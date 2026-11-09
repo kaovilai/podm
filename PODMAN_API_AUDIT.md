@@ -7,8 +7,8 @@ against `github.com/containers/podman` `pkg/api/server/register_*.go`
 (canonical route registration) where fetched; the rest match the long-stable
 libpod API v4/v5 convention (`/libpod/<resource>/...`).
 
-Currently registered in this repo: `Sources/pacman/configure.swift`
-("Podman libpod routes" section) + `Sources/pacman/Routes/Libpod/*.swift`.
+Currently registered in this repo: `Sources/podm/configure.swift`
+("Podman libpod routes" section) + `Sources/podm/Routes/Libpod/*.swift`.
 
 ## Ping / handshake (critical path — CLI probes this before anything else)
 
@@ -189,7 +189,7 @@ back-to-back to narrow, not close, the window.
    every other gap in this doc, there is no existing Docker-side route to
    delegate to: real `podman healthcheck run <container>` executes the
    container's configured healthcheck test command right now and reports
-   the result, whereas `HealthCheckManager` (`Sources/pacman/Utilities/HealthCheckManager.swift`)
+   the result, whereas `HealthCheckManager` (`Sources/podm/Utilities/HealthCheckManager.swift`)
    only exposes `start`/`stop`/`currentHealth(for:)` — a background poll loop
    and its last cached result, not an on-demand single run. Implementing
    this properly needs new exec-based invocation logic (parse the

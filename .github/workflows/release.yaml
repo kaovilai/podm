@@ -42,7 +42,7 @@ jobs:
       contents: write
     outputs:
       githubTag: ${{ steps.TAG_UTIL.outputs.githubTag}}
-      pacmanVersion: ${{ steps.TAG_UTIL.outputs.pacmanVersion}}
+      podmVersion: ${{ steps.TAG_UTIL.outputs.podmVersion}}
       releaseId: ${{ steps.create_release.outputs.id}}
 
     steps:
@@ -54,7 +54,7 @@ jobs:
         run: |
             TAG_PATTERN=${{ github.event.inputs.version }}
             echo "githubTag=v$TAG_PATTERN" >> ${GITHUB_OUTPUT}
-            echo "pacmanVersion=$TAG_PATTERN" >> ${GITHUB_OUTPUT}
+            echo "podmVersion=$TAG_PATTERN" >> ${GITHUB_OUTPUT}
 
       - name: tag
         run: |
@@ -160,16 +160,16 @@ jobs:
             --sign "${{ secrets.APPLE_APPLICATION_ID}}" \
             --options runtime \
             --entitlements entitlements.plist \
-            ./.build/arm64-apple-macosx/release/pacmand
+            ./.build/arm64-apple-macosx/release/podmd
     
       - name: zip the binary
         run: |
           cd ./.build/arm64-apple-macosx/release/
-          zip pacmand.zip pacmand pacman
+          zip podmd.zip podmd podm
 
       - name: Submit for notarization
         run: |
-          xcrun notarytool submit ./.build/arm64-apple-macosx/release/pacmand.zip \
+          xcrun notarytool submit ./.build/arm64-apple-macosx/release/podmd.zip \
             --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_ID_PASSWORD" \
@@ -183,18 +183,18 @@ jobs:
         run: |
           make installer-notarized
         env:
-          BUILD_VERSION: ${{ needs.tag.outputs.pacmanVersion}}
+          BUILD_VERSION: ${{ needs.tag.outputs.podmVersion}}
           APPLE_APPLICATION_ID: ${{ secrets.APPLE_APPLICATION_ID}}
           APPLE_PRODUCT_ID: ${{ secrets.APPLE_PRODUCT_ID}}  
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
-      - name: Upload pacman binary
+      - name: Upload podm binary
         run: |
-         gh release upload ${{ needs.tag.outputs.githubTag}} ./.build/arm64-apple-macosx/release/pacmand
-         gh release upload ${{ needs.tag.outputs.githubTag}} ./.build/arm64-apple-macosx/release/pacmand.zip
-         gh release upload ${{ needs.tag.outputs.githubTag}} ./pkginstaller/out/pacman-installer.pkg
+         gh release upload ${{ needs.tag.outputs.githubTag}} ./.build/arm64-apple-macosx/release/podmd
+         gh release upload ${{ needs.tag.outputs.githubTag}} ./.build/arm64-apple-macosx/release/podmd.zip
+         gh release upload ${{ needs.tag.outputs.githubTag}} ./pkginstaller/out/podm-installer.pkg
 
   release:
     needs: [tag, build]

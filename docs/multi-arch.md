@@ -1,6 +1,6 @@
 # Multi-arch builds
 
-How pacman builds images for architectures your Mac cannot natively run —
+How podm builds images for architectures your Mac cannot natively run —
 including ppc64le and s390x — with the stock CLIs.
 
 ## The three tiers
@@ -22,8 +22,8 @@ tracked as [apple/container#1496](https://github.com/apple/container/issues/1496
 
 ## The two-builder split
 
-The QEMU tier is pacman's addition over upstream. Instead of one BuildKit
-builder, `pacmand` provisions **two builder container VMs**:
+The QEMU tier is podm's addition over upstream. Instead of one BuildKit
+builder, `podmd` provisions **two builder container VMs**:
 
 1. the **Rosetta builder** — default BuildKit VM, handles arm64 + amd64;
 2. the **QEMU builder** — an additional BuildKit VM with qemu-user-static

@@ -17,11 +17,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # bootstrap-box: idempotent bootstrap of a fresh macOS 26 (Tahoe) Apple silicon
-# dev box for pacman (https://github.com/kaovilai/pacman).
+# dev box for podm (https://github.com/kaovilai/podm).
 #
 # usage: zsh scripts/bootstrap-box.sh [--user-install] [--sudo-stdin] [--test] [REPO]
-#   REPO         existing pacman checkout to build; default: clone
-#                $PACMAN_REPO_URL (branch $PACMAN_BRANCH) into ~/pacman
+#   REPO         existing podm checkout to build; default: clone
+#                $PODM_REPO_URL (branch $PODM_BRANCH) into ~/podm
 #   --user-install  (default) install Apple container and podman from their
 #                .pkg payloads into ~/.local (no sudo at all) and symlink the
 #                CLIs into the bin dir instead of running `installer`
@@ -47,12 +47,12 @@ set -euo pipefail
 
 PODMAN_VERSION=${PODMAN_VERSION:-6.1.4}
 DOCKER_VERSION=${DOCKER_VERSION:-27.3.1}
-PACMAN_REPO_URL=${PACMAN_REPO_URL:-https://github.com/kaovilai/pacman.git}
-PACMAN_BRANCH=${PACMAN_BRANCH:-main}
+PODM_REPO_URL=${PODM_REPO_URL:-https://github.com/kaovilai/podm.git}
+PODM_BRANCH=${PODM_BRANCH:-main}
 # empty = derive from the checkout's Package.resolved (fallback 1.6.0 below)
 CONTAINER_VERSION=${CONTAINER_VERSION:-}
 
-DL=$HOME/pacman-box-dl
+DL=$HOME/podm-box-dl
 export PATH=/usr/local/bin:/opt/podman/bin:$HOME/bin:$PATH
 
 typeset -a DONE_STEPS PENDING
@@ -90,7 +90,7 @@ userpkg() {
   pkgutil --expand-full $2 $x >/dev/null && [[ -d $x/$3 ]] && rm -rf $4 && mkdir -p ${4:h} && mv $x/$3 $4
 }
 
-# fetch NAME URL: download into a fresh ~/pacman-box-dl/NAME/ and print the file path
+# fetch NAME URL: download into a fresh ~/podm-box-dl/NAME/ and print the file path
 fetch() {
   local d=$DL/$1; rm -rf $d; mkdir -p $d; local f=$d/${2:t}
   curl -fsSL --retry 3 -o $f "$2" || { echo "download failed: $2" >&2; return 1; }; echo $f
@@ -120,33 +120,33 @@ ulink() {
   return 0
 }
 
-# ── pacman checkout ──────────────────────────────────────────────────────────
+# ── podm checkout ──────────────────────────────────────────────────────────
 if [[ -n ${1:-} ]]; then
   REPO=$1
   [[ -d $REPO ]] || { echo "repo path not found: $REPO" >&2; exit 1; }
 else
-  REPO=$HOME/pacman
+  REPO=$HOME/podm
   if [[ -d $REPO/.git ]]; then
     # Fast-forward only: a hard `checkout -B` reset of an existing checkout
     # silently drops committed local development work when the working tree is
     # clean. Diverged checkouts are left alone and reported instead.
     if git -C $REPO fetch -q origin; then
-      if git -C $REPO rev-parse -q --verify "origin/$PACMAN_BRANCH" >/dev/null; then
-        if git -C $REPO merge-base --is-ancestor HEAD "origin/$PACMAN_BRANCH"; then
-          git -C $REPO merge -q --ff-only "origin/$PACMAN_BRANCH" \
-            && ok "repo updated to origin/$PACMAN_BRANCH" \
+      if git -C $REPO rev-parse -q --verify "origin/$PODM_BRANCH" >/dev/null; then
+        if git -C $REPO merge-base --is-ancestor HEAD "origin/$PODM_BRANCH"; then
+          git -C $REPO merge -q --ff-only "origin/$PODM_BRANCH" \
+            && ok "repo updated to origin/$PODM_BRANCH" \
             || pend "repo update" "fast-forward failed (dirty working tree?); keeping current checkout"
         else
-          pend "repo update" "local $REPO has commits not on origin/$PACMAN_BRANCH; not resetting — update manually if intended"
+          pend "repo update" "local $REPO has commits not on origin/$PODM_BRANCH; not resetting — update manually if intended"
         fi
       else
-        pend "repo update" "branch $PACMAN_BRANCH not found on origin; keeping current checkout"
+        pend "repo update" "branch $PODM_BRANCH not found on origin; keeping current checkout"
       fi
     else
       pend "repo update" "git fetch failed (offline?); keeping current checkout"
     fi
   else
-    git clone -q --branch $PACMAN_BRANCH $PACMAN_REPO_URL $REPO
+    git clone -q --branch $PODM_BRANCH $PODM_REPO_URL $REPO
   fi
 fi
 
@@ -168,7 +168,7 @@ if xcode-select -p >/dev/null 2>&1 && swift --version >/dev/null 2>&1; then
   elif needsudo "xcode license"; then asroot xcodebuild -license accept && ok "xcode license accepted"; fi
 else pend "xcode" "install Xcode 26 from the App Store (or xcode-select --install), then re-run"; fi
 
-# ── Rosetta (for pacman's amd64 builder containers) ──────────────────────────
+# ── Rosetta (for podm's amd64 builder containers) ──────────────────────────
 step "Rosetta"
 if arch -x86_64 /usr/bin/true 2>/dev/null; then ok "rosetta"
 elif needsudo "rosetta"; then asroot softwareupdate --install-rosetta --agree-to-license && ok "rosetta installed"; fi
@@ -217,7 +217,7 @@ if [[ $($PODMAN --version 2>/dev/null) == *" $PODMAN_VERSION"* ]]; then ok "podm
 elif (( USER_INSTALL )) || needsudo "podman install"; then
   pkg=$(fetch podman https://github.com/containers/podman/releases/download/v$PODMAN_VERSION/podman-installer-macos-arm64.pkg) || pkg=''
   if (( USER_INSTALL )); then
-    # only the CLI is needed: pacman is reached with --remote, so podman
+    # only the CLI is needed: podm is reached with --remote, so podman
     # machine helpers stay unused
     if [[ -n $pkg ]] && userpkg podman $pkg podman.pkg/Payload/podman $UPODMAN; then ok "podman $PODMAN_VERSION -> $UPODMAN"
     else pend "podman install" "pkg extract failed"; fi
@@ -237,29 +237,29 @@ else
   else pend "docker install" "download/extract failed"; fi
 fi
 
-# ── build pacman ─────────────────────────────────────────────────────────────
-step "build pacmand (release) in $REPO"
-if (cd $REPO && swift build -c release --product pacmand 2>&1 | tail -5); then
-  ok "pacmand built ($REPO/.build/arm64-apple-macosx/release/pacmand)"
-  ln -sf $REPO/.build/arm64-apple-macosx/release/pacmand $BIN/pacmand
-  ok "pacmand symlinked -> $BIN/pacmand"
+# ── build podm ─────────────────────────────────────────────────────────────
+step "build podmd (release) in $REPO"
+if (cd $REPO && swift build -c release --product podmd 2>&1 | tail -5); then
+  ok "podmd built ($REPO/.build/arm64-apple-macosx/release/podmd)"
+  ln -sf $REPO/.build/arm64-apple-macosx/release/podmd $BIN/podmd
+  ok "podmd symlinked -> $BIN/podmd"
 else
-  pend "build pacmand" "swift build -c release --product pacmand failed in $REPO"
+  pend "build podmd" "swift build -c release --product podmd failed in $REPO"
 fi
 
-step "build pacman client shim (if present)"
-# The `pacman` client shim target (Sources/pacman/) may not exist on every
+step "build podm client shim (if present)"
+# The `podm` client shim target (Sources/podm/) may not exist on every
 # branch yet; never fail the bootstrap because of it.
-if [[ -d $REPO/Sources/pacman ]]; then
-  if (cd $REPO && swift build -c release --product pacman 2>&1 | tail -5); then
-    ok "pacman shim built"
-    ln -sf $REPO/.build/arm64-apple-macosx/release/pacman $BIN/pacman
-    ok "pacman symlinked -> $BIN/pacman"
+if [[ -d $REPO/Sources/podm ]]; then
+  if (cd $REPO && swift build -c release --product podm 2>&1 | tail -5); then
+    ok "podm shim built"
+    ln -sf $REPO/.build/arm64-apple-macosx/release/podm $BIN/podm
+    ok "podm symlinked -> $BIN/podm"
   else
-    pend "build pacman shim" "swift build -c release --product pacman failed in $REPO"
+    pend "build podm shim" "swift build -c release --product podm failed in $REPO"
   fi
 else
-  echo "Sources/pacman not present yet; skipping client shim build"
+  echo "Sources/podm not present yet; skipping client shim build"
 fi
 
 if (( RUN_TESTS )); then
@@ -278,9 +278,9 @@ done
 
 echo
 echo "next steps:"
-echo "  $BIN/pacmand &              # daemon; socket at \$HOME/.pacman/container.sock"
-echo "  docker ps                   # stock docker CLI, no setup (context 'pacman' is auto-installed)"
-echo "  CONTAINER_HOST=unix://\$HOME/.pacman/container.sock podman ps"
+echo "  $BIN/podmd &              # daemon; socket at \$HOME/.podm/container.sock"
+echo "  docker ps                   # stock docker CLI, no setup (context 'podm' is auto-installed)"
+echo "  CONTAINER_HOST=unix://\$HOME/.podm/container.sock podman ps"
 
 echo
 echo "${#DONE_STEPS} ok, ${#PENDING} pending"

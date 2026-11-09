@@ -41,7 +41,7 @@ All tests must pass before opening a PR.
 
 - **Bug fixes must include a unit test** that reproduces the bug and verifies the fix.
 - **New features must include unit tests** covering the main behavior and relevant edge cases.
-- Place tests in `Tests/pacmandTests/` following the existing directory structure.
+- Place tests in `Tests/podmdTests/` following the existing directory structure.
 - When modifying existing behavior, update the corresponding tests to reflect the change.
 
 ### Verify Branch State
@@ -150,7 +150,7 @@ gh pr create \
 ## Summary
 
 Implement Docker healthcheck support so containers can define HEALTHCHECK
-instructions and pacman tracks their status. Closes #214
+instructions and podm tracks their status. Closes #214
 
 ## Related Issue
 
@@ -161,7 +161,7 @@ Closes #214
 - Added `HealthCheckManager` to run periodic health probes inside containers
 - Added `ClientHealthCheckService` for healthcheck state management
 - Container inspect now returns `.State.Health` with current status and log
-- Healthcheck loops resume automatically on pacman restart
+- Healthcheck loops resume automatically on podm restart
 
 ## Testing
 
@@ -224,7 +224,7 @@ The command outputs the PR URL and number.
 **Display the URL using markdown link syntax** so it's easily clickable:
 
 ```
-Created PR [#123](https://github.com/kaovilai/pacman/pull/123)
+Created PR [#123](https://github.com/kaovilai/podm/pull/123)
 ```
 
 ### Monitor CI (Optional)

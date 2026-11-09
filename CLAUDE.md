@@ -1,10 +1,10 @@
 # Agent Instructions
 
-This file is the primary instruction surface for agents contributing to Pacman. It is injected into your context on every interaction.
+This file is the primary instruction surface for agents contributing to Podm. It is injected into your context on every interaction.
 
 ## Project Identity
 
-Pacman is a Swift daemon (`pacmand`) plus client shim (`pacman`) that lets the stock
+Podm is a Swift daemon (`podmd`) plus client shim (`podm`) that lets the stock
 `podman` and `docker` CLIs manage local containers on macOS **with no `podman machine`
 and no remote connection setup** — the same feel as running podman on Linux. It exposes
 both the Docker Engine API and the podman libpod API on one unix socket, on top of
@@ -12,7 +12,7 @@ Apple's containerization libraries (microVM per container).
 
 - **Target platform**: macOS on Apple Silicon (arm64) only
 - **API compatibility**: [Docker Engine API v1.51](https://github.com/moby/moby/blob/v28.5.2/api/swagger.yaml)
-- **Repository**: <https://github.com/kaovilai/pacman>
+- **Repository**: <https://github.com/kaovilai/podm>
 - **License**: Apache 2.0
 
 ## Skills
@@ -28,23 +28,23 @@ Agent skills live in `.agents/skills/`. Each skill has a `SKILL.md` file describ
 
 | Path | Component | Purpose |
 |---|---|---|
-| `Sources/pacmand/main.swift` | Entry point | CLI argument parsing, Vapor app setup, Unix socket binding |
-| `Sources/pacmand/configure.swift` | Configuration | Registers route collections and initializes services |
-| `Sources/pacmand/Routes/Containers/` | Container routes | Docker container lifecycle API endpoints |
-| `Sources/pacmand/Routes/Images/` | Image routes | Docker image management API endpoints |
-| `Sources/pacmand/Routes/Networks/` | Network routes | Docker network API endpoints |
-| `Sources/pacmand/Routes/Volumes/` | Volume routes | Docker volume API endpoints |
-| `Sources/pacmand/Routes/Server/` | Server routes | Health check, info, version, events, system endpoints |
-| `Sources/pacmand/Routes/Swarm/` | Swarm stubs | Stub responses for Docker Swarm API compatibility |
-| `Sources/pacmand/Routes/Plugins/` | Plugin stubs | Stub responses for Docker plugin API compatibility |
-| `Sources/pacmand/Routes/Registry/` | Registry routes | Auth and distribution endpoints |
-| `Sources/pacmand/Clients/` | Service layer | Business logic wrapping Apple Container/Containerization frameworks |
-| `Sources/pacmand/Models/` | REST models | Request/response DTOs matching Docker Engine API |
-| `Sources/pacmand/DNS/` | DNS service | Inter-container DNS resolution |
-| `Sources/pacmand/Events/` | Event system | Container event broadcasting for client liveness monitoring |
-| `Sources/pacmand/Utilities/` | Utilities | Shared helpers (ID generation, label normalization, etc.) |
+| `Sources/podmd/main.swift` | Entry point | CLI argument parsing, Vapor app setup, Unix socket binding |
+| `Sources/podmd/configure.swift` | Configuration | Registers route collections and initializes services |
+| `Sources/podmd/Routes/Containers/` | Container routes | Docker container lifecycle API endpoints |
+| `Sources/podmd/Routes/Images/` | Image routes | Docker image management API endpoints |
+| `Sources/podmd/Routes/Networks/` | Network routes | Docker network API endpoints |
+| `Sources/podmd/Routes/Volumes/` | Volume routes | Docker volume API endpoints |
+| `Sources/podmd/Routes/Server/` | Server routes | Health check, info, version, events, system endpoints |
+| `Sources/podmd/Routes/Swarm/` | Swarm stubs | Stub responses for Docker Swarm API compatibility |
+| `Sources/podmd/Routes/Plugins/` | Plugin stubs | Stub responses for Docker plugin API compatibility |
+| `Sources/podmd/Routes/Registry/` | Registry routes | Auth and distribution endpoints |
+| `Sources/podmd/Clients/` | Service layer | Business logic wrapping Apple Container/Containerization frameworks |
+| `Sources/podmd/Models/` | REST models | Request/response DTOs matching Docker Engine API |
+| `Sources/podmd/DNS/` | DNS service | Inter-container DNS resolution |
+| `Sources/podmd/Events/` | Event system | Container event broadcasting for client liveness monitoring |
+| `Sources/podmd/Utilities/` | Utilities | Shared helpers (ID generation, label normalization, etc.) |
 | `Sources/BuildInfo/` | Build metadata | C target exposing build version, git commit, API versions to Swift |
-| `Tests/pacmandTests/` | Test suite | Unit tests organized by feature area |
+| `Tests/podmdTests/` | Test suite | Unit tests organized by feature area |
 | `Package.swift` | SPM manifest | Dependencies: apple/container, apple/containerization, Vapor, swift-log, swift-argument-parser |
 
 ## Commits
@@ -70,13 +70,13 @@ Agent skills live in `.agents/skills/`. Each skill has a `SKILL.md` file describ
 | `make test` | Run the unit test suite |
 | `make release` | Build in release mode |
 
-Tests are in `Tests/pacmandTests/`. The PR CI (`pr-check.yaml`) runs: format check, unit tests, release build, installer build, and integration tests.
+Tests are in `Tests/podmdTests/`. The PR CI (`pr-check.yaml`) runs: format check, unit tests, release build, installer build, and integration tests.
 
 ### Unit Test Requirements
 
 - **Bug fixes must include a unit test** that reproduces the bug and verifies the fix. The test should fail without the fix and pass with it.
 - **New features must include unit tests** covering the main behavior and relevant edge cases.
-- Place tests in `Tests/pacmandTests/` following the existing directory structure (e.g., `Routes/`, `Utilities/`, `DNS/`, `Network/`).
+- Place tests in `Tests/podmdTests/` following the existing directory structure (e.g., `Routes/`, `Utilities/`, `DNS/`, `Network/`).
 - When modifying existing behavior, update the corresponding tests to reflect the change.
 - Run `make test` before committing to ensure all tests pass.
 
@@ -107,7 +107,7 @@ Tests are in `Tests/pacmandTests/`. The PR CI (`pr-check.yaml`) runs: format che
 
 These APIs dup the passed fds into the container and then **immediately close the parent copies**. `Pipe()` does not know about this external close — its `deinit` later calls `close()` again on the same fd, which may now be a recycled NIO socket. The double-close corrupts NIO's fd table, causing `writev`/`kevent` EBADF crashes under concurrent load (issue #107).
 
-**Use `StdioPipes`** (centralized allocation and cleanup, `Sources/pacmand/Utilities/DockerConnectionUtility.swift`):
+**Use `StdioPipes`** (centralized allocation and cleanup, `Sources/podmd/Utilities/DockerConnectionUtility.swift`):
 
 ```swift
 guard let pipes = StdioPipes.make([.stdin, .stdout, .stderr]) else {  // or make(.all)
@@ -142,4 +142,4 @@ Ownership contract:
 - Never commit secrets, API keys, or credentials. Do not stage files that look like they contain secrets (`.env`, `credentials.json`, etc.).
 - Do not run destructive operations (force push, hard reset) without explicit human confirmation.
 - Security vulnerabilities should be reported responsibly, not as public GitHub issues.
-- Pacman listens on a Unix domain socket and is intended for local development use only.
+- Podm listens on a Unix domain socket and is intended for local development use only.

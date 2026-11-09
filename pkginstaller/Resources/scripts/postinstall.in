@@ -2,33 +2,33 @@
 
 set -e
 
-echo "Pacman __VERSION__ installation completed successfully!"
+echo "Podm __VERSION__ installation completed successfully!"
 
 # Verify the installation
-if [ -f "__INSTALL_PREFIX__/bin/pacmand" ]; then
-    echo "✅ pacman binary installed to __INSTALL_PREFIX__/bin/pacmand"
+if [ -f "__INSTALL_PREFIX__/bin/podmd" ]; then
+    echo "✅ podm binary installed to __INSTALL_PREFIX__/bin/podmd"
     
     # Make sure it's executable
-    chmod +x "__INSTALL_PREFIX__/bin/pacmand"
+    chmod +x "__INSTALL_PREFIX__/bin/podmd"
     
     # Add to system PATH by creating paths.d entry
     if [ ! -d "/etc/paths.d" ]; then
         mkdir -p /etc/paths.d
     fi
-    echo "__INSTALL_PREFIX__/bin" > /etc/paths.d/pacman
+    echo "__INSTALL_PREFIX__/bin" > /etc/paths.d/podm
     echo "✅ Added __INSTALL_PREFIX__/bin to system PATH"
     
     echo ""
     echo "🚀 Quick start:"
     echo "   Open a new terminal, then run:"
-    echo "   pacman --help      # Show available commands"
-    echo "   pacman --version   # Display version information"
+    echo "   podm --help      # Show available commands"
+    echo "   podm --version   # Display version information"
     echo ""
     echo "   Or use the full path:"
-    echo "   __INSTALL_PREFIX__/bin/pacmand --help"
+    echo "   __INSTALL_PREFIX__/bin/podmd --help"
     echo ""
     echo "Happy containerizing! 🍏📦🐳"
 else
-    echo "⚠️  Warning: pacman binary not found at expected location"
+    echo "⚠️  Warning: podm binary not found at expected location"
     exit 1
 fi

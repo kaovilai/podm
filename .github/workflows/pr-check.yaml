@@ -71,13 +71,13 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: pacman
-          path: ./.build/arm64-apple-macosx/release/pacmand
+          name: podm
+          path: ./.build/arm64-apple-macosx/release/podmd
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: pacman-installer
-          path: ./pkginstaller/out/pacman-installer.pkg
+          name: podm-installer
+          path: ./pkginstaller/out/podm-installer.pkg
 
   tests-lint-format:
     name: formatters & tests
@@ -135,12 +135,12 @@ jobs:
       # fetch the artifact from the build job
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: pacman
+          name: podm
 
       - name: List downloaded artifact
         run: |
           ls -la
-          chmod 755 pacmand
+          chmod 755 podmd
 
       - name: fetch apple container
         run: |
@@ -198,13 +198,13 @@ jobs:
       - name: Install default Linux kernel for container builds
         run: sudo container system kernel set --recommended --force
 
-      - name: run pacman
+      - name: run podm
         run: |
-          # PACMAN_IDLE_EXIT_SECS=0: idle-exit must never kill the daemon mid-job
+          # PODM_IDLE_EXIT_SECS=0: idle-exit must never kill the daemon mid-job
           # (sudo -i drops the caller environment, so pass it explicitly).
-          nohup sudo -i env PACMAN_IDLE_EXIT_SECS=0 $PWD/pacmand > service.log 2>&1 &
+          nohup sudo -i env PODM_IDLE_EXIT_SECS=0 $PWD/podmd > service.log 2>&1 &
           echo $! > service.pid
-          sudo ln -s /var/root/.pacman/container.sock /var/run/docker.sock
+          sudo ln -s /var/root/.podm/container.sock /var/run/docker.sock
           sleep 5
           cat service.log
 
@@ -219,7 +219,7 @@ jobs:
         run: |
           brew install docker
 
-      - name: check docker image with pacman
+      - name: check docker image with podm
         run: |
           # expect that the image pulled above is present
           sudo docker image ls | grep 'podman/hello'
@@ -246,7 +246,7 @@ jobs:
           sudo docker image prune --all --force
           [[ "1" == $(sudo docker image ls | wc -l | xargs) ]]
 
-      - name: check docker load with pacman
+      - name: check docker load with podm
         run: |
           # OCI tarballs shaped like real `docker save` output, crafted without Docker.
           ./scripts/craft-oci-fixtures.sh /tmp/oci-fixtures
@@ -270,22 +270,22 @@ jobs:
       # NOTE: Disabling tests for now.
       #       Most likely calling some internal function that fails
       #       on CI host.
-      # - name: check system info was returned by pacman
+      # - name: check system info was returned by podm
       #   run: |
       #     # expect specific content returned via `/info` endpoint
       #     sudo docker info | grep 'container-apiserver'
       #     sudo docker info | grep 'com.apple.container'
-      #     sudo docker info | grep 'pacman'
+      #     sudo docker info | grep 'podm'
 
-      - name: check version info was returned by pacman
+      - name: check version info was returned by podm
         run: |
           # expect specific content returned via `/version` endpoint
-          sudo docker version | grep 'pacman'
+          sudo docker version | grep 'podm'
           # expect specific Docker engine API versions
           sudo docker version | grep 'v1.32'
           sudo docker version | grep 'v1.51'
 
-      - name: check network with pacman
+      - name: check network with podm
         run: |
           # expect default network to be present
           sudo docker network ls | grep default
@@ -312,7 +312,7 @@ jobs:
           [[ $(sudo docker network inspect bar | jq -r ".[0].Labels.test // empty") == "true" ]] || { echo "Error: Label 'test=true' not found"; exit 1;}
 
       # NOTE: Inspecting a volume is not possible in CI
-      - name: check volume with pacman
+      - name: check volume with podm
         run: |
           # create volume with randomly generated name
           sudo docker volume create
@@ -344,21 +344,21 @@ jobs:
       - name: setup podman socket
         run: |
           # /run is read-only on macOS, so use CONTAINER_HOST env var
-          echo "CONTAINER_HOST=unix:///var/root/.pacman/container.sock" >> "$GITHUB_ENV"
+          echo "CONTAINER_HOST=unix:///var/root/.podm/container.sock" >> "$GITHUB_ENV"
 
-      - name: check podman version with pacman
+      - name: check podman version with podm
         run: |
           sudo -E podman version
-          # Verify pacman is responding with expected API version
+          # Verify podm is responding with expected API version
           sudo -E podman version | grep 'v1.51'
 
-      - name: check podman images with pacman
+      - name: check podman images with podm
         run: |
           sudo -E podman image ls
           sudo -E podman pull alpine:latest
           sudo -E podman image ls | grep alpine
 
-      - name: check podman containers with pacman
+      - name: check podman containers with podm
         run: |
           sudo -E podman ps
           sudo -E podman ps -a
@@ -372,7 +372,7 @@ jobs:
       # `{name:.*}` route (manifest create) no longer swallowing the more specific
       # `{name}/registry/{destination}` sibling (manifest push) registered after it
       # (see RegexRouter's specificity-ordered matching).
-      - name: check podman manifest with pacman
+      - name: check podman manifest with podm
         run: |
           sudo -E podman manifest create ci-test-manifest
           sudo -E podman manifest add ci-test-manifest alpine:latest
@@ -404,7 +404,7 @@ jobs:
       # workaround (ClientImageService.resolvedScheme) — both need a real `podman build`
       # output to reproduce, which this runner can't do for the same reason `podman build`
       # itself is disabled below.
-      - name: check podman push with pacman
+      - name: check podman push with podm
         run: |
           retry() {
             for attempt in 1 2 3; do
@@ -417,9 +417,9 @@ jobs:
             return 1
           }
           TAG="ci-$(date +%s)"
-          retry sudo -E podman push alpine:latest "ttl.sh/pacman-ci-push-${TAG}:5m"
+          retry sudo -E podman push alpine:latest "ttl.sh/podm-ci-push-${TAG}:5m"
           sudo -E podman manifest create ci-push-manifest
-          retry sudo -E podman manifest push ci-push-manifest "ttl.sh/pacman-ci-manifest-${TAG}:5m"
+          retry sudo -E podman manifest push ci-push-manifest "ttl.sh/podm-ci-manifest-${TAG}:5m"
 
       # NOTE: podman/docker build requires a BuildKit builder VM. Confirmed on a real
       #       run here (see below) that GitHub-hosted macOS runners genuinely can't
@@ -429,7 +429,7 @@ jobs:
       #       a hardware capability gap, not a race.
       #       See: https://github.com/actions/runner-images/issues/12933
       #            https://github.com/orgs/community/discussions/69211
-      # - name: check podman build with pacman
+      # - name: check podman build with podm
       #   run: |
       #     echo 'FROM alpine:latest' > /tmp/Dockerfile.test
       #     echo 'RUN echo hello' >> /tmp/Dockerfile.test
@@ -456,12 +456,12 @@ jobs:
       # fetch the artifact from the build job
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: pacman
+          name: podm
 
-      - name: Prepare pacman binary
+      - name: Prepare podm binary
         run: |
           ls -la
-          chmod 755 pacmand
+          chmod 755 podmd
 
       - name: Fetch Apple Container installer
         run: |
@@ -526,12 +526,12 @@ jobs:
       - name: Install default Linux kernel for container builds
         run: sudo container system kernel set --recommended --force
 
-      - name: Start pacman
+      - name: Start podm
         run: |
-          PACMAND_BIN="$(pwd)/pacmand"
-          nohup sudo -i "$PACMAND_BIN" > service.log 2>&1 &
+          PODMD_BIN="$(pwd)/podmd"
+          nohup sudo -i "$PODMD_BIN" > service.log 2>&1 &
           echo $! > service.pid
-          sudo ln -s /var/root/.pacman/container.sock /var/run/docker.sock
+          sudo ln -s /var/root/.podm/container.sock /var/run/docker.sock
           sleep 5
           cat service.log
 
@@ -556,8 +556,8 @@ jobs:
 
       # ── Rosetta path: arm64 + amd64 ──────────────────────────────────────────
       # docker buildx build with the default docker-container driver would start
-      # a moby/buildkit container inside pacman, which is not supported.
-      # We call the Docker build API directly via curl instead; pacman routes
+      # a moby/buildkit container inside podm, which is not supported.
+      # We call the Docker build API directly via curl instead; podm routes
       # multi-platform requests to its Rosetta / QEMU builder containers.
       - name: docker build – arm64+amd64 (Rosetta builder)
         run: |

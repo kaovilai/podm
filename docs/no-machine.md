@@ -1,6 +1,6 @@
 # No machine, no remote — the philosophy
 
-Why pacman exists, with numbers. Measurements are from
+Why podm exists, with numbers. Measurements are from
 [RESEARCH.md](../RESEARCH.md) (macOS 26.7.1, arm64, apple/container 1.6.1,
 2026-11-09).
 
@@ -19,7 +19,7 @@ is secretly one of two shapes:
 There is no third option — qemu-user on the macOS host without a VM cannot
 work (it needs a Linux kernel).
 
-pacman takes the second model and fixes its one real problem — the CLI/API
+podm takes the second model and fixes its one real problem — the CLI/API
 surface — instead of taking the first model and hiding the machine.
 
 ## What "no machine / no remote" means concretely
@@ -28,19 +28,19 @@ Not marketing. Checkable properties:
 
 - **No `machine` lifecycle in your workflow.** No `podman machine start`,
   no `colima start`, no menu-bar app to babysit. First-run bootstrap is
-  `pacman install`, once.
+  `podm install`, once.
 - **No connection setup.** No `podman system connection add`, no
   `DOCKER_HOST` exports, no context juggling. The shim sets the environment;
   the socket is always where the CLIs expect it.
 - **No errors that mention machines or remote hosts.** The CLIs talk to what
   they believe is a local socket; there is no "cannot connect to remote host"
   failure class.
-- **Idle RAM is zero for pacman, ~25 MB for the platform.** Measured with no
+- **Idle RAM is zero for podm, ~25 MB for the platform.** Measured with no
   containers running: `container-apiserver` 9.8 MB + `container-core-images`
   10.0 MB + `container-network-vmnet` 4.7 MB ≈ **25 MB total, 0% CPU**.
-  `pacmand` itself is a launchd-managed on-demand process that exits when it
+  `podmd` itself is a launchd-managed on-demand process that exits when it
   has zero connections and zero running containers. `container system stop`
-  releases even the 25 MB, and pacman auto-starts the helpers again on demand.
+  releases even the 25 MB, and podm auto-starts the helpers again on demand.
 
 Contrast: a podman machine VM or Docker Desktop pins **gigabytes** whether you
 use them or not. The 25 MB helper set is the floor Apple's platform gives you;

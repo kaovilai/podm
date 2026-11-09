@@ -32,17 +32,17 @@ SUDO ?= sudo
 .DEFAULT_GOAL := all
 
 .PHONY: all
-all: pacmand pacman
+all: podmd podm
 
 .PHONY: build
 build:
-	@echo Building pacmand binary...
-	@$(SWIFT) build -c $(BUILD_CONFIGURATION) --product pacmand
-	@$(SWIFT) build -c $(BUILD_CONFIGURATION) --product pacman
+	@echo Building podmd binary...
+	@$(SWIFT) build -c $(BUILD_CONFIGURATION) --product podmd
+	@$(SWIFT) build -c $(BUILD_CONFIGURATION) --product podm
 
-.PHONY: pacmand pacman
-pacmand: build
-pacman: build
+.PHONY: podmd podm
+podmd: build
+podm: build
 
 .PHONY: release
 release: BUILD_CONFIGURATION = release
@@ -59,7 +59,7 @@ version:
 .PHONY: help
 help:
 	@echo "Available targets:"
-	@echo "  all              - Build pacmand (default)"
+	@echo "  all              - Build podmd (default)"
 	@echo "  build            - Build in debug mode"
 	@echo "  release          - Build in release mode"
 	@echo "  test             - Run tests"

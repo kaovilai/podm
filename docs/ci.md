@@ -1,6 +1,6 @@
 # CI Workflows & Dev-Box Bootstrap
 
-pacman has four GitHub Actions workflows plus a bootstrap script for standing
+podm has four GitHub Actions workflows plus a bootstrap script for standing
 up a real (non-CI) Apple silicon box. All macOS jobs run on the
 `macos-26` runner label — an arm64 macOS 26 (Tahoe) image, matching the
 minimum OS that Apple's `container`/`containerization` frameworks target.
@@ -13,26 +13,26 @@ Runs on every pull request:
 
 | Job | What it does |
 |---|---|
-| `build` | `make release` (builds the `pacmand` product) + `make installer`; uploads the `pacmand` binary and `pacman-installer.pkg` as artifacts |
+| `build` | `make release` (builds the `podmd` product) + `make installer`; uploads the `podmd` binary and `podm-installer.pkg` as artifacts |
 | `tests-lint-format` | `make fmt` + no-drift check, `make test` (unit tests + `scripts/lint-pipes.sh`) |
-| `integration-test` | Downloads the `pacmand` artifact, installs Apple `container` (version pinned via `Package.resolved`), starts the container runtime, runs `pacmand` as root, and drives it with the **real** docker and podman CLIs: image pull/tag/inspect/load/save fixtures, networks, volumes, version endpoints, podman images/containers/manifest/push-to-ttl.sh |
+| `integration-test` | Downloads the `podmd` artifact, installs Apple `container` (version pinned via `Package.resolved`), starts the container runtime, runs `podmd` as root, and drives it with the **real** docker and podman CLIs: image pull/tag/inspect/load/save fixtures, networks, volumes, version endpoints, podman images/containers/manifest/push-to-ttl.sh |
 | `multi-arch-build` | Multi-arch build API test (arm64+amd64 via Rosetta builder, s390x via QEMU builder, combined manifest list). Currently `if: false` — see [VM-gated steps](#vm-gated-steps) |
 
 ### `cli-integration.yaml` — flagship proof workflow
 
-Manual dispatch (`workflow_dispatch`) and on PRs. Builds `pacmand` from
+Manual dispatch (`workflow_dispatch`) and on PRs. Builds `podmd` from
 source, installs Apple `container`, starts the daemon, waits for its socket
-(`~/.pacman/container.sock`, i.e. `/var/root/.pacman/container.sock` under
+(`~/.podm/container.sock`, i.e. `/var/root/.podm/container.sock` under
 `sudo -i`), then proves the stock-CLI experience end to end:
 
 - **docker CLI** (Homebrew): `docker ps`, `version`, `images`, `pull`,
   `run --rm alpine echo hello`, `build` of a tiny Dockerfile
   (classic builder, `DOCKER_BUILDKIT=0`).
-- **podman CLI** (Homebrew, `CONTAINER_HOST=unix:///var/root/.pacman/container.sock`):
+- **podman CLI** (Homebrew, `CONTAINER_HOST=unix:///var/root/.podm/container.sock`):
   `podman ps`, `version`, `pull`, `run --rm alpine echo hello`, `build`,
   the manifest workflow (`manifest create/add/inspect/exists`), and
   `podman push` / `manifest push` to ttl.sh.
-- **client shim**: built only if `Sources/pacman/` exists (guarded by a
+- **client shim**: built only if `Sources/podm/` exists (guarded by a
   file-exists check), so the workflow stays green before the shim target
   lands.
 - **`multi-arch-build` job**: mirrors `pr-check.yaml`'s multi-arch job
@@ -42,12 +42,12 @@ source, installs Apple `container`, starts the daemon, waits for its socket
 ### `next-build.yaml` — nightly-style prerelease
 
 On push to `main` and manual dispatch. Tags `v<next-minor>-next.<timestamp>-<sha>`,
-builds, signs, notarizes, zips (`pacman.zip`) and packages
-(`pacman-installer.pkg`), and attaches them to a prerelease. Every job is
-**conditional on the required secrets existing** (`PACMAN_BOT_TOKEN`,
+builds, signs, notarizes, zips (`podm.zip`) and packages
+(`podm-installer.pkg`), and attaches them to a prerelease. Every job is
+**conditional on the required secrets existing** (`PODM_BOT_TOKEN`,
 Apple signing/notarization secrets), so on a freshly-imported repository the
 workflow completes as all-skipped instead of failing. The fork pushed tags to
-a separate `socktainer/prereleases` repository; pacman tags and releases in
+a separate `socktainer/prereleases` repository; podm tags and releases in
 its own repository. The `brew-tap-update` job additionally requires a
 `kaovilai/homebrew-tap` repository with an `update-formula-next.yml` workflow.
 
@@ -60,7 +60,7 @@ certificate secrets existing.
 
 ## VM-gated steps
 
-pacman runs each container in its own microVM (Apple `containerization`), and
+podm runs each container in its own microVM (Apple `containerization`), and
 image builds go through BuildKit builder VMs. **GitHub-hosted macOS runners
 run inside VMs without nested virtualization**, so anything that boots a VM
 fails there with `VZErrorDomain Code=2 "Virtualization is not available on
@@ -86,21 +86,21 @@ The same steps `cli-integration.yaml` performs, on a real Apple silicon Mac
 #    podman + docker CLI from their .pkg payloads; idempotent)
 zsh scripts/bootstrap-box.sh
 
-# 2. start the daemon (socket: ~/.pacman/container.sock)
-~/bin/pacmand &
+# 2. start the daemon (socket: ~/.podm/container.sock)
+~/bin/podmd &
 
-# 3. docker CLI — no setup needed (the daemon installs a 'pacman' docker
+# 3. docker CLI — no setup needed (the daemon installs a 'podm' docker
 #    context); or point at the socket explicitly:
 docker ps
-DOCKER_HOST=unix://$HOME/.pacman/container.sock docker run --rm alpine echo hello
+DOCKER_HOST=unix://$HOME/.podm/container.sock docker run --rm alpine echo hello
 
 # 4. podman CLI
-CONTAINER_HOST=unix://$HOME/.pacman/container.sock podman ps
-CONTAINER_HOST=unix://$HOME/.pacman/container.sock podman run --rm alpine echo hello
+CONTAINER_HOST=unix://$HOME/.podm/container.sock podman ps
+CONTAINER_HOST=unix://$HOME/.podm/container.sock podman run --rm alpine echo hello
 
 # 5. build something
 DOCKER_BUILDKIT=0 docker build -t cli-int-test .   # classic builder
-CONTAINER_HOST=unix://$HOME/.pacman/container.sock podman build -t cli-int-test .
+CONTAINER_HOST=unix://$HOME/.podm/container.sock podman build -t cli-int-test .
 ```
 
 `scripts/bootstrap-box.sh` flags:
@@ -110,11 +110,11 @@ CONTAINER_HOST=unix://$HOME/.pacman/container.sock podman build -t cli-int-test 
 | (default) | `--user-install`: no-sudo user-local installs into `~/.local`, CLIs symlinked into the bin dir |
 | `--sudo-stdin` | fallback: password piped to `sudo -S -k` per call (never on argv); without it, sudo steps use `sudo -n` and are reported as `PENDING` rather than prompting |
 | `--test` | also run `scripts/lint-pipes.sh` and `swift test` in the checkout |
-| `REPO` (positional) | build an existing checkout instead of cloning `PACMAN_REPO_URL` (branch `PACMAN_BRANCH`) into `~/pacman` |
+| `REPO` (positional) | build an existing checkout instead of cloning `PODM_REPO_URL` (branch `PODM_BRANCH`) into `~/podm` |
 
 Versions are pinned and env-overridable: `CONTAINER_VERSION` (defaults to the
 `Package.resolved` pin — the same version CI installs), `PODMAN_VERSION`,
-`DOCKER_VERSION`, plus `PACMAN_REPO_URL` / `PACMAN_BRANCH`. The script is
+`DOCKER_VERSION`, plus `PODM_REPO_URL` / `PODM_BRANCH`. The script is
 safe over ssh without a tty: it never prompts, and reports sudo-requiring
 steps as `PENDING` for a later re-run.
 

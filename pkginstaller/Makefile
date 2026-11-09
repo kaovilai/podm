@@ -1,9 +1,9 @@
-# Makefile for building the Pacman macOS package installer
+# Makefile for building the Podm macOS package installer
 SHELL := bash
 
 # Configuration variables
 BUILD_VERSION ?= 0.0.0-dev
-PKG_NAME := pacman-installer.pkg
+PKG_NAME := podm-installer.pkg
 APPLE_APPLICATION_ID ?= -
 APPLE_PRODUCT_ID ?= mock
 NO_CODESIGN ?= 1
@@ -11,7 +11,7 @@ NO_NOTARIZE ?= 1
 NOTARIZE_USERNAME ?=
 NOTARIZE_PASSWORD ?=
 NOTARIZE_TEAM ?=
-INSTALL_PREFIX ?= /opt/pacman
+INSTALL_PREFIX ?= /opt/podm
 SIGNING_KEYCHAIN ?=
 
 # Directory structure
@@ -75,39 +75,39 @@ $(SCRIPTS_DIR)/postinstall: Resources/scripts/postinstall.in | $(SCRIPTS_DIR)
 
 .PHONY: copy-binary
 copy-binary: setup
-	@echo "Copying pacman + pacmand binaries..."
-	@if [ ! -f "../.build/release/pacmand" ]; then \
-		echo "Error: pacmand binary not found. Run 'make release' in the parent directory first."; \
+	@echo "Copying podm + podmd binaries..."
+	@if [ ! -f "../.build/release/podmd" ]; then \
+		echo "Error: podmd binary not found. Run 'make release' in the parent directory first."; \
 		exit 1; \
 	fi
-	@if [ ! -f "../.build/release/pacman" ]; then \
-		echo "Error: pacman client binary not found. Run 'make release' in the parent directory first."; \
+	@if [ ! -f "../.build/release/podm" ]; then \
+		echo "Error: podm client binary not found. Run 'make release' in the parent directory first."; \
 		exit 1; \
 	fi
-	@cp ../.build/release/pacmand $(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/
-	@cp ../.build/release/pacman $(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/
-	@chmod +x $(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/pacmand
-	@chmod +x $(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/pacman
+	@cp ../.build/release/podmd $(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/
+	@cp ../.build/release/podm $(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/
+	@chmod +x $(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/podmd
+	@chmod +x $(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/podm
 
 .PHONY: sign-binary
 sign-binary: copy-binary
 	@if [ "$(NO_CODESIGN)" != "1" ] && [ "$(APPLE_APPLICATION_ID)" != "-" ]; then \
 		echo "Signing binaries..."; \
 		codesign --sign "$(APPLE_APPLICATION_ID)" --options runtime --timestamp --force \
-			$(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/pacmand \
-			$(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/pacman; \
+			$(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/podmd \
+			$(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/podm; \
 	fi
 
 .PHONY: component-pkg
 component-pkg: sign-binary scripts
 	@echo "Creating component package..."
 	@pkgbuild --root $(PACKAGE_ROOT) \
-		--identifier io.github.pacman \
+		--identifier io.github.podm \
 		--version $(BUILD_VERSION) \
 		--install-location / \
 		--scripts $(SCRIPTS_DIR) \
 		--ownership preserve \
-		$(OUT_DIR)/pacman.pkg
+		$(OUT_DIR)/podm.pkg
 
 .PHONY: product-pkg
 product-pkg: component-pkg resources
@@ -115,22 +115,22 @@ product-pkg: component-pkg resources
 	@productbuild --distribution $(BUILD_DIR)/Distribution \
 		--resources $(RESOURCES_DIR) \
 		--package-path $(OUT_DIR) \
-		$(OUT_DIR)/pacman-unsigned.pkg
+		$(OUT_DIR)/podm-unsigned.pkg
 
 .PHONY: sign-pkg
 sign-pkg: product-pkg
 	@if [ "$(NO_CODESIGN)" = "1" ]; then \
-		mv $(OUT_DIR)/pacman-unsigned.pkg $(OUT_DIR)/$(PKG_NAME); \
+		mv $(OUT_DIR)/podm-unsigned.pkg $(OUT_DIR)/$(PKG_NAME); \
 		echo "✅ Unsigned installer created: $(OUT_DIR)/$(PKG_NAME)"; \
 	else \
 		echo "Signing installer package..."; \
 		productsign --timestamp --sign "$(APPLE_PRODUCT_ID)" \
-			$(OUT_DIR)/pacman-unsigned.pkg \
+			$(OUT_DIR)/podm-unsigned.pkg \
 			$(OUT_DIR)/$(PKG_NAME); \
-		rm $(OUT_DIR)/pacman-unsigned.pkg; \
+		rm $(OUT_DIR)/podm-unsigned.pkg; \
 		echo "✅ Signed installer created: $(OUT_DIR)/$(PKG_NAME)"; \
 	fi
-	@rm -f $(OUT_DIR)/pacman.pkg
+	@rm -f $(OUT_DIR)/podm.pkg
 
 # Notarize the signed package
 .PHONY: notarize
@@ -162,7 +162,7 @@ installer-notarized: notarize
 
 .PHONY: help
 help:
-	@echo "Pacman macOS Package Installer"
+	@echo "Podm macOS Package Installer"
 	@echo ""
 	@echo "Targets:"
 	@echo "  pkginstaller       - Build unsigned .pkg installer (default)"

@@ -21,7 +21,7 @@ func resolvedVersion(for identity: String) -> String {
 }
 
 let package = Package(
-    name: "pacman",
+    name: "podm",
     platforms: [
         .macOS(.v15)
     ],
@@ -36,7 +36,7 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "pacmand",
+            name: "podmd",
             dependencies: [
                 .product(name: "ContainerBuild", package: "container"),
                 .product(name: "ContainerAPIClient", package: "container"),
@@ -56,16 +56,16 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "pacman",
+            name: "podm",
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
             ]
         ),
         .testTarget(
-            name: "pacmandTests",
+            name: "podmdTests",
             dependencies: [
-                .target(name: "pacmand"),
+                .target(name: "podmd"),
                 .product(name: "ContainerAPIClient", package: "container"),
                 .product(name: "SocktainerDNSImage", package: "dns-forwarder"),
                 .product(name: "VaporTesting", package: "vapor"),
