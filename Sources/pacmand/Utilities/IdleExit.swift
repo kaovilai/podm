@@ -403,12 +403,7 @@ final class IdleExitMonitor: Sendable {
             // shutting down — bounded by the provider itself — and abort the
             // exit if anything is running now or the count is unknown.
             let fresh = await runningContainersProvider()
-            if fresh == 0 {
-                logger.info(
-                    "idle-exit: no client connections and no running containers for \(configuration.grace) — shutting down (launchd restarts on demand)"
-                )
-                onExit()
-            } else {
+            guard fresh == 0 else {
                 if let fresh {
                     counters.setRunningContainers(fresh)
                 } else {
@@ -426,6 +421,10 @@ final class IdleExitMonitor: Sendable {
                 )
                 return revised
             }
+            logger.info(
+                "idle-exit: no client connections and no running containers for \(configuration.grace) — shutting down (launchd restarts on demand)"
+            )
+            onExit()
         }
         return decision
     }
