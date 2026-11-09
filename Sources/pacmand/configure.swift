@@ -272,6 +272,12 @@ func configure(_ app: Application) async throws {
 
     // --- Podman libpod routes: stats/pause/prune/cp/push/save/load/events gaps ---
     try app.register(collection: LibpodContainerStatsRoute())
+    // All-container stats (podman stats with no args): plural route, podman's
+    // newline-delimited ContainerStatsReport shape.
+    try app.register(collection: LibpodContainersStatsRoute(client: containerClient))
+    // podman untag: POST /libpod/images/{name}/untag (repo/tag parameter dance
+    // like the tag endpoint; bare invocation removes every reference).
+    try app.register(collection: LibpodImageUntagRoute(systemConfig: systemConfig))
     try app.register(collection: LibpodContainerPauseRoute())
     try app.register(collection: LibpodContainerUnpauseRoute())
     try app.register(collection: LibpodContainerChangesRoute())
