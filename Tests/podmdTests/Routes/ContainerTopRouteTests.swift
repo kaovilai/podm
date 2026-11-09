@@ -409,6 +409,11 @@ struct ContainerTopRouteTests {
         #expect(
             ContainerTopUtility.libpodArgv(psArgs: ["user", "command", "pid"])
                 == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "user,pid,args"], reorder: [0, 2, 1]))
+        // Repeated command descriptors collapse onto the single internal args
+        // column — a duplicated internal args column would corrupt parsing.
+        #expect(
+            ContainerTopUtility.libpodArgv(psArgs: ["command", "pid", "command"])
+                == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "pid,args"], reorder: [1, 0, 1]))
     }
 
     @Test("libpodArgv treats comm as insufficient for self-row filtering and appends args anyway")

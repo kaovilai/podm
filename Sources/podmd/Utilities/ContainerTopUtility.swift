@@ -163,22 +163,26 @@ enum ContainerTopUtility {
             .filter { !$0.isEmpty }
         if tokens.allSatisfy({ isKnownDescriptor($0) }) {
             let mapped = tokens.map { descriptorAliases[$0] ?? $0 }
-            guard let commandIndex = mapped.firstIndex(of: "args") else {
+            let commandCount = mapped.filter { $0 == "args" }.count
+            guard commandCount > 0 else {
                 // No command column at all: append args so the self-row filter
                 // has a command line to match on; top() strips it after.
                 return LibpodTopArgs(
                     argv: ["-eo", (mapped + ["args"]).joined(separator: ",")],
                     appendedCommandColumn: true)
             }
-            if commandIndex == mapped.count - 1 {
-                // Command already last — ps output merges cleanly as-is.
+            if commandCount == 1, mapped.last == "args" {
+                // Single command column, already last — ps output merges
+                // cleanly as-is, no fixups needed.
                 return LibpodTopArgs(argv: ["-eo", mapped.joined(separator: ",")])
             }
-            // Command not last: render it last internally, then restore the
-            // requested column order after parsing.
-            var internalColumns = mapped
-            internalColumns.remove(at: commandIndex)
-            internalColumns.append("args")
+            // Otherwise render exactly ONE args column last (repeated command
+            // descriptors collapse onto it — `command,pid,command` must not
+            // produce a duplicated internal args column, which would corrupt
+            // parsing), then restore the requested order after parsing: every
+            // requested command position maps to that single internal column.
+            let nonCommand = mapped.filter { $0 != "args" }
+            let internalColumns = nonCommand + ["args"]
             var permutation: [Int] = []
             var nonCommandPosition = 0
             for column in mapped {
