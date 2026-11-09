@@ -28,7 +28,8 @@ struct ImageHealthcheckExtractorTests {
     private func makeContentStore(blob json: String, digestHex: String) throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
-        let blobDir = root
+        let blobDir =
+            root
             .appendingPathComponent("content", isDirectory: true)
             .appendingPathComponent("blobs", isDirectory: true)
             .appendingPathComponent("sha256", isDirectory: true)
@@ -40,7 +41,8 @@ struct ImageHealthcheckExtractorTests {
     @Test("a Dockerfile HEALTHCHECK is decoded with all fields")
     func validHealthcheckIsDecoded() async throws {
         let appSupport = try makeContentStore(
-            blob: #"{"architecture":"arm64","os":"linux","config":{"Env":["A=1"],"Healthcheck":{"Test":["CMD-SHELL","curl -f http://localhost/ || exit 1"],"Interval":30000000000,"Timeout":5000000000,"StartPeriod":10000000000,"Retries":3}}}"#,
+            blob:
+                #"{"architecture":"arm64","os":"linux","config":{"Env":["A=1"],"Healthcheck":{"Test":["CMD-SHELL","curl -f http://localhost/ || exit 1"],"Interval":30000000000,"Timeout":5000000000,"StartPeriod":10000000000,"Retries":3}}}"#,
             digestHex: String(repeating: "a1", count: 32)
         )
 
@@ -186,7 +188,8 @@ struct ImageHealthcheckExtractorTests {
         // Remove the blob: a re-read would now find nothing, so an identical
         // second result proves the first was served from the digest cache.
         try FileManager.default.removeItem(
-            at: appSupport
+            at:
+                appSupport
                 .appendingPathComponent("content")
                 .appendingPathComponent("blobs")
                 .appendingPathComponent("sha256")
@@ -196,19 +199,40 @@ struct ImageHealthcheckExtractorTests {
             configDigest: digest, appSupportURL: appSupport, logger: logger)
         #expect(second?.Retries == 2)
 
-        // A known-ABSENT healthcheck is cached just as deliberately: planting a
-        // healthcheck-carrying blob under an already-resolved nil digest must
+        // A DECODED absent healthcheck is cached just as deliberately: planting a
+        // healthcheck-carrying blob under an already-DECODED-nil digest must
         // not resurrect a value (image configs are immutable).
-        let nilDigest = "sha256:" + String(repeating: "0f", count: 32)
+        let absentHex = String(repeating: "0f", count: 32)
+        let absentDigest = "sha256:" + absentHex
+        let absentSupport = try makeContentStore(
+            blob: #"{"config":{}}"#,
+            digestHex: absentHex
+        )
         _ = await ImageHealthcheckExtractor.healthcheck(
-            configDigest: nilDigest, appSupportURL: appSupport, logger: logger)
+            configDigest: absentDigest, appSupportURL: absentSupport, logger: logger)
         let plantedSupport = try makeContentStore(
             blob: #"{"config":{"Healthcheck":{"Test":["CMD","true"],"Retries":9}}}"#,
-            digestHex: String(repeating: "0f", count: 32)
+            digestHex: absentHex
         )
         let afterAbsence = await ImageHealthcheckExtractor.healthcheck(
-            configDigest: nilDigest, appSupportURL: plantedSupport, logger: logger)
+            configDigest: absentDigest, appSupportURL: plantedSupport, logger: logger)
         #expect(afterAbsence == nil)
+
+        // A MISSING blob is transient, NOT cached: the same digest looked up
+        // again after the blob appears must resolve (one early miss must not
+        // drop that digest's healthcheck for the daemon's whole life).
+        let lateHex = String(repeating: "1a", count: 32)
+        let lateDigest = "sha256:" + lateHex
+        let miss = await ImageHealthcheckExtractor.healthcheck(
+            configDigest: lateDigest, appSupportURL: absentSupport, logger: logger)
+        #expect(miss == nil)
+        let lateSupport = try makeContentStore(
+            blob: #"{"config":{"Healthcheck":{"Test":["CMD","true"],"Retries":5}}}"#,
+            digestHex: lateHex
+        )
+        let lateHit = await ImageHealthcheckExtractor.healthcheck(
+            configDigest: lateDigest, appSupportURL: lateSupport, logger: logger)
+        #expect(lateHit?.Retries == 5)
     }
 }
 
@@ -245,13 +269,14 @@ struct HealthConfigMappingTests {
 
     @Test("a NONE sentinel maps through unchanged")
     func noneMapsThrough() {
-        let health = HealthConfig(HealthcheckConfig(
-            Test: ["NONE"],
-            Interval: nil,
-            Timeout: nil,
-            Retries: nil,
-            StartPeriod: nil
-        ))
+        let health = HealthConfig(
+            HealthcheckConfig(
+                Test: ["NONE"],
+                Interval: nil,
+                Timeout: nil,
+                Retries: nil,
+                StartPeriod: nil
+            ))
         #expect(health?.Test == ["NONE"])
     }
 }

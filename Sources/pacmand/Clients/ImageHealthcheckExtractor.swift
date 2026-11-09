@@ -32,9 +32,11 @@ enum ImageHealthcheckExtractor {
     }
 
     /// Memoizes lookups by config-blob digest. Values are `HealthcheckConfig?`
-    /// so a known-absent healthcheck (nil) is cached as deliberately as a
-    /// present one — a repeat lookup must not re-read (or re-warn on) a blob
-    /// that was already determined to carry no healthcheck.
+    /// Only DEFINITIVE answers are cached: a blob that was read and decoded
+    /// (nil = the image genuinely has no healthcheck). A missing or unreadable
+    /// blob is transient — content not yet written, an image re-pulled after a
+    /// prune — and must be retried on the next lookup, or one early miss would
+    /// silently drop that digest's HEALTHCHECK for the daemon's whole life.
     private actor Cache {
         private var values: [String: HealthcheckConfig?] = [:]
 
@@ -49,49 +51,63 @@ enum ImageHealthcheckExtractor {
 
     private static let cache = Cache()
 
+    /// Extraction outcome: `.decoded` is definitive (cached), `.unreadable` is
+    /// transient (never cached).
+    private enum Extraction {
+        case decoded(HealthcheckConfig?)
+        case unreadable
+    }
+
     /// Returns the image's `HEALTHCHECK`, or nil when the image has none or its
-    /// config blob can't be read or decoded. Never throws.
+    /// config blob can't currently be read. Never throws.
     static func healthcheck(configDigest: String, appSupportURL: URL, logger: Logger) async -> HealthcheckConfig? {
         if let cached = await cache.get(configDigest) {
             return cached
         }
-        let value = extract(configDigest: configDigest, appSupportURL: appSupportURL, logger: logger)
-        await cache.set(value, for: configDigest)
-        return value
+        switch extract(configDigest: configDigest, appSupportURL: appSupportURL, logger: logger) {
+        case .decoded(let value):
+            await cache.set(value, for: configDigest)
+            return value
+        case .unreadable:
+            return nil
+        }
     }
 
-    private static func extract(configDigest: String, appSupportURL: URL, logger: Logger) -> HealthcheckConfig? {
+    private static func extract(configDigest: String, appSupportURL: URL, logger: Logger) -> Extraction {
         // The digest is spliced into a filesystem path; only a well-formed
         // `algorithm:hex` string may be followed (mirrors `OCILayoutPruner`'s
         // guard — anything else is treated as absent, not an error).
         guard configDigest.wholeMatch(of: /[a-z0-9]+:[a-fA-F0-9]{32,}/) != nil else {
             logger.warning("[healthcheck] refusing to read image config blob with malformed digest '\(configDigest)'")
-            return nil
+            // A malformed digest can never address a real blob — definitive.
+            return .decoded(nil)
         }
         let parts = configDigest.split(separator: ":")
-        let blobURL = appSupportURL
+        let blobURL =
+            appSupportURL
             .appendingPathComponent("content")
             .appendingPathComponent("blobs")
             .appendingPathComponent(String(parts[0]))
             .appendingPathComponent(String(parts[1]))
 
-        // Missing blob → honest nil (e.g. pruned or not-yet-pulled content),
-        // not an error.
+        // Missing or unreadable blob → transient (not-yet-written content,
+        // re-pull after a prune): NOT cached, retried next lookup.
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: blobURL.path, isDirectory: &isDirectory),
             !isDirectory.boolValue,
             let data = try? Data(contentsOf: blobURL)
         else {
-            return nil
+            return .unreadable
         }
 
         do {
-            return try JSONDecoder().decode(RawImageConfig.self, from: data).config?.Healthcheck
+            return .decoded(try JSONDecoder().decode(RawImageConfig.self, from: data).config?.Healthcheck)
         } catch {
+            // Undecodable: could be a truncated write — transient, retried.
             logger.warning(
-                "[healthcheck] could not decode image config blob \(configDigest): \(error) — treating as no healthcheck"
+                "[healthcheck] could not decode image config blob \(configDigest): \(error) — treating as no healthcheck this once"
             )
-            return nil
+            return .unreadable
         }
     }
 }
