@@ -257,7 +257,7 @@ Honest, inherited-from-the-model limits (details in
 | `podman` CLI | ✅ stock | ✅ stock (machine UX) | ❌ | ✅ (machine UX) | ❌ | ❌ | ❌ |
 | `docker` CLI / Engine API | ✅ stock | via docker socket in VM | ✅ | ✅ | ✅ (partial: 52/69 endpoints) | ❌ | ❌ (own CLI only) |
 | libpod API | ✅ | ✅ | ❌ | ❌ | ❌ (upstream) | ❌ | ❌ |
-| Multi-arch (ppc64le/s390x) | ✅ QEMU builder | manual | manual | manual | ❌ native only | ❌ | ❌ |
+| Multi-arch (ppc64le/s390x) | ✅ QEMU builder | manual | manual | manual | ❌ arm64/amd64 (Rosetta) only | ❌ arm64/amd64 (Rosetta) only | ❌ |
 | No machine concept / lifecycle | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
 | License | Apache-2.0 | Apache-2.0 | proprietary | MIT | Apache-2.0 | Apache-2.0 | AGPL-3.0 |
 
