@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Testing
+
 @testable import pacmand
 
 @Test("upstream spec: bare IPv4 defaults to port 53")

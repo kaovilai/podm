@@ -150,13 +150,167 @@ struct LibpodManifestModifyRouteTests {
         #expect(await removedDigests.get() == [])
     }
 
-    @Test("operation=annotate is not implemented")
-    func annotateIsNotImplemented() async throws {
+    @Test("operation=annotate with an index_annotations map body annotates the manifest list index")
+    func annotateIndexMap() async throws {
+        let receivedAnnotations = Box<[String: String]?>(nil)
+        let client = MockManifestClient(annotateHandler: { _, annotations in
+            await receivedAnnotations.set(annotations)
+            return "sha256:annotated"
+        })
+
+        try await withModifyApp(client: client) { app in
+            // Podman's bindings send the JSON body WITHOUT a Content-Type header, like the
+            // rest of this endpoint family.
+            let body = ByteBuffer(string: #"{"operation":"annotate","index_annotations":{"org.opencontainers.image.title":"mylist"}}"#)
+            try await app.testing().test(.PUT, "/v1.51/libpod/manifests/mylist?operation=annotate", body: body) { res async throws in
+                #expect(res.status == .ok)
+                let responseBody = try JSONDecoder().decode(RESTManifestIDResponse.self, from: Data(buffer: res.body))
+                #expect(responseBody.ID == "sha256:annotated")
+            }
+        }
+        #expect(await receivedAnnotations.get() == ["org.opencontainers.image.title": "mylist"])
+    }
+
+    @Test("annotate accepts podman's Go field-name body spellings (Operation, Images)")
+    func annotateGoFieldCasing() async throws {
+        // Podman's bindings marshal UNtagged Go struct fields under their Go names
+        // ("Operation", "Images") while tagged fields keep their json tags
+        // ("index_annotations") — Go's server-side decode matches keys
+        // case-insensitively, so both spellings must be accepted here.
+        let receivedAnnotations = Box<[String: String]?>(nil)
+        let client = MockManifestClient(annotateHandler: { _, annotations in
+            await receivedAnnotations.set(annotations)
+            return "sha256:annotated"
+        })
+
+        try await withModifyApp(client: client) { app in
+            let body = ByteBuffer(string: #"{"Operation":"annotate","Images":[""],"index_annotations":{"a":"b"}}"#)
+            try await app.testing().test(.PUT, "/v1.51/libpod/manifests/mylist?operation=annotate", body: body) { res async throws in
+                #expect(res.status == .ok)
+            }
+        }
+        // "Images": [""] is an empty instance entry — podman's bindings send it for
+        // `manifest annotate --index`; it must NOT count as a member instance.
+        #expect(await receivedAnnotations.get() == ["a": "b"])
+    }
+
+    @Test("annotate with the index_annotation k=v slice form merges it into the map")
+    func annotateIndexSliceForm() async throws {
+        let receivedAnnotations = Box<[String: String]?>(nil)
+        let client = MockManifestClient(annotateHandler: { _, annotations in
+            await receivedAnnotations.set(annotations)
+            return "sha256:annotated"
+        })
+
+        try await withModifyApp(client: client) { app in
+            let body = ByteBuffer(string: #"{"index_annotation":["left=right","empty="]}"#)
+            try await app.testing().test(.PUT, "/v1.51/libpod/manifests/mylist?operation=annotate", body: body) { res async throws in
+                #expect(res.status == .ok)
+            }
+        }
+        #expect(await receivedAnnotations.get() == ["left": "right", "empty": ""])
+    }
+
+    @Test("annotate with both the map and the k=v slice form is a 400, not an ambiguous merge")
+    func annotateBothFormsIs400() async throws {
         let client = MockManifestClient()
 
         try await withModifyApp(client: client) { app in
-            try await app.testing().test(.PUT, "/v1.51/libpod/manifests/mylist?operation=annotate") { res async throws in
+            let body = ByteBuffer(string: #"{"index_annotations":{"a":"b"},"index_annotation":["c=d"]}"#)
+            try await app.testing().test(.PUT, "/v1.51/libpod/manifests/mylist?operation=annotate", body: body) { res async throws in
+                #expect(res.status == .badRequest)
+                #expect(res.body.string.contains("can not set both IndexAnnotation and IndexAnnotations"))
+            }
+        }
+    }
+
+    @Test("annotate with a k=v spec missing '=' is a 400")
+    func annotateBadSpecIs400() async throws {
+        let client = MockManifestClient()
+
+        try await withModifyApp(client: client) { app in
+            let body = ByteBuffer(string: #"{"index_annotation":["novalue"]}"#)
+            try await app.testing().test(.PUT, "/v1.51/libpod/manifests/mylist?operation=annotate", body: body) { res async throws in
+                #expect(res.status == .badRequest)
+                #expect(res.body.string.contains("no value given for annotation"))
+            }
+        }
+    }
+
+    @Test("annotate with a malformed JSON body is a 400")
+    func annotateMalformedBodyIs400() async throws {
+        let client = MockManifestClient()
+
+        try await withModifyApp(client: client) { app in
+            let body = ByteBuffer(string: #"{"index_annotations":"#)
+            try await app.testing().test(.PUT, "/v1.51/libpod/manifests/mylist?operation=annotate", body: body) { res async throws in
+                #expect(res.status == .badRequest)
+            }
+        }
+    }
+
+    @Test("annotate with a member instance plus member fields is an honest 501, not a faked success")
+    func annotateMemberLevelIs501() async throws {
+        let client = MockManifestClient()
+
+        try await withModifyApp(client: client) { app in
+            let body = ByteBuffer(string: #"{"annotations":{"a":"b"},"images":["sha256:aaa"]}"#)
+            try await app.testing().test(.PUT, "/v1.51/libpod/manifests/mylist?operation=annotate", body: body) { res async throws in
                 #expect(res.status == .notImplemented)
+                #expect(res.body.string.contains("per-instance manifest annotate is not implemented"))
+            }
+        }
+    }
+
+    @Test("annotate with member fields but no instance is a 400, matching podman's own validation")
+    func annotateMemberFieldsWithoutInstanceIs400() async throws {
+        let client = MockManifestClient()
+
+        try await withModifyApp(client: client) { app in
+            let body = ByteBuffer(string: #"{"annotations":{"a":"b"}}"#)
+            try await app.testing().test(.PUT, "/v1.51/libpod/manifests/mylist?operation=annotate", body: body) { res async throws in
+                #expect(res.status == .badRequest)
+                #expect(res.body.string.contains("requires an instance digest"))
+            }
+        }
+    }
+
+    @Test("annotate with index fields plus a member instance is a 400, matching podman's own validation")
+    func annotateIndexFieldsWithInstanceIs400() async throws {
+        let client = MockManifestClient()
+
+        try await withModifyApp(client: client) { app in
+            let body = ByteBuffer(string: #"{"index_annotations":{"a":"b"},"images":["sha256:aaa"]}"#)
+            try await app.testing().test(.PUT, "/v1.51/libpod/manifests/mylist?operation=annotate", body: body) { res async throws in
+                #expect(res.status == .badRequest)
+                #expect(res.body.string.contains("requires no instance digest"))
+            }
+        }
+    }
+
+    @Test("annotate with an index subject is an honest 501, not a silently-dropped field")
+    func annotateSubjectIs501() async throws {
+        let client = MockManifestClient()
+
+        try await withModifyApp(client: client) { app in
+            let body = ByteBuffer(string: #"{"subject":"registry.example.com/repo:latest"}"#)
+            try await app.testing().test(.PUT, "/v1.51/libpod/manifests/mylist?operation=annotate", body: body) { res async throws in
+                #expect(res.status == .notImplemented)
+                #expect(res.body.string.contains("subject"))
+            }
+        }
+    }
+
+    @Test("annotating a nonexistent manifest list is a 404")
+    func annotateNonexistentManifestIs404() async throws {
+        let client = MockManifestClient(annotateHandler: { name, _ in
+            throw ClientManifestError.notFound(name: name)
+        })
+
+        try await withModifyApp(client: client) { app in
+            let body = ByteBuffer(string: #"{"index_annotations":{"a":"b"}}"#)
+            try await app.testing().test(.PUT, "/v1.51/libpod/manifests/ghost?operation=annotate", body: body) { res async throws in
+                #expect(res.status == .notFound)
             }
         }
     }

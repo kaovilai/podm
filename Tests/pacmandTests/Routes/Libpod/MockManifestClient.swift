@@ -39,6 +39,7 @@ struct MockManifestClient: ClientManifestServiceProtocol {
     var addHandler: (@Sendable (String, [String]) async throws -> String)?
     var removeDigestHandler: (@Sendable (String, String) async throws -> String)?
     var removeDigestsHandler: (@Sendable (String, [String]) async throws -> String)?
+    var annotateHandler: (@Sendable (String, [String: String]) async throws -> String)?
     var addBuiltImageHandler: (@Sendable (String, String) async throws -> String)?
     var deleteHandler: (@Sendable (String) async throws -> Void)?
     var retagForPushHandler: (@Sendable (String, String) async throws -> (reference: String, priorState: RetagState?))?
@@ -90,6 +91,12 @@ struct MockManifestClient: ClientManifestServiceProtocol {
         await recorder?.record("removeDigests(\(name), \(digests))")
         guard let removeDigestsHandler else { throw Unconfigured(method: "removeDigests") }
         return try await removeDigestsHandler(name, digests)
+    }
+
+    func annotate(name: String, annotations: [String: String]) async throws -> String {
+        await recorder?.record("annotate(\(name), \(annotations))")
+        guard let annotateHandler else { throw Unconfigured(method: "annotate") }
+        return try await annotateHandler(name, annotations)
     }
 
     func addBuiltImage(name: String, builtReference: String, logger: Logger) async throws -> String {

@@ -35,6 +35,11 @@ protocol ClientManifestServiceProtocol: Sendable {
     func removeDigest(name: String, digest: String) async throws -> String
     @discardableResult
     func removeDigests(name: String, digests: [String]) async throws -> String
+    /// `podman manifest annotate --index <name>` / the "annotate" operation of
+    /// `PUT /libpod/manifests/{name}` — merges INDEX-LEVEL annotations into the manifest
+    /// list. See the implementing method for the exact (libimage `SetAnnotations`) semantics.
+    @discardableResult
+    func annotate(name: String, annotations: [String: String]) async throws -> String
     @discardableResult
     func addBuiltImage(name: String, builtReference: String, logger: Logger) async throws -> String
     func delete(name: String) async throws
@@ -234,6 +239,24 @@ struct ClientManifestService: ClientManifestServiceProtocol {
         return try await writeIndexAndTag(name: name, manifests: manifests)
     }
 
+    /// `podman manifest annotate --index <name>` / the "annotate" operation of `PUT /libpod/manifests/{name}`.
+    /// See the protocol method's doc comment for the merge semantics; an empty `annotations`
+    /// map is a valid no-op (podman's own annotate with no fields set succeeds without
+    /// changing anything — the rewritten index is byte-identical, so the digest is too).
+    @discardableResult
+    func annotate(name: String, annotations: [String: String]) async throws -> String {
+        let index = try await inspect(name: name)
+        var merged = index.annotations ?? [:]
+        for (key, value) in annotations {
+            merged[key] = value
+        }
+        // libimage's SetAnnotations stores an all-empty map as nil — an index with no
+        // annotations encodes without the key entirely, matching what `Index(manifests:)`
+        // has always written for every other modify operation here.
+        let storedAnnotations = merged.isEmpty ? nil : merged
+        return try await writeIndexAndTag(name: name, manifests: index.manifests, annotations: storedAnnotations)
+    }
+
     /// Called from `build --manifest <name>` after a multi-platform build has already produced and
     /// tagged its own index at `builtReference`. Merges into `name`'s existing index if present
     /// (union by digest, matching real podman's "creates a manifest list if it does not exist"
@@ -382,11 +405,12 @@ struct ClientManifestService: ClientManifestServiceProtocol {
 
     /// Writes a new OCI index blob and (re)tags `name` to point at it. Ingest and create are kept
     /// adjacent (no other `await` in between) to minimize, not eliminate, the window described in
-    /// this type's doc comment.
+    /// this type's doc comment. `annotations` defaults to nil, which writes the same bytes the
+    /// pre-annotate callers have always produced (no `annotations` key in the JSON at all).
     @discardableResult
-    private func writeIndexAndTag(name: String, manifests: [Descriptor]) async throws -> String {
+    private func writeIndexAndTag(name: String, manifests: [Descriptor], annotations: [String: String]? = nil) async throws -> String {
         let normalized = try ClientImage.normalizeReference(name, containerSystemConfig: containerSystemConfig)
-        let index = Index(manifests: manifests)
+        let index = Index(manifests: manifests, annotations: annotations)
         let data = try JSONEncoder().encode(index)
 
         // Computed independently rather than captured from inside the ingest closure
