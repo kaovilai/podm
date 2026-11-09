@@ -1,6 +1,8 @@
 # Dependabot: all updates grouped — one PR per ecosystem, security included.
-# Security updates join the same groups (applies-to: security-updates) so a
-# advisory-driven bump arrives as one reviewable PR instead of ten.
+# No `applies-to` key: a group without it covers BOTH version updates and
+# security updates (applies-to: security-updates would make the group
+# security-ONLY and leave scheduled version updates one-PR-per-dependency
+# again — Copilot review catch).
 
 version: 2
 updates:
@@ -12,7 +14,6 @@ updates:
     open-pull-requests-limit: 20
     groups:
       github-actions:
-        applies-to: security-updates
         patterns:
           - "*"
 
@@ -27,6 +28,5 @@ updates:
       # apple-swift groups produced a PR per dependency (10 open at once),
       # which nobody reviewed separately anyway.
       swift-dependencies:
-        applies-to: security-updates
         patterns:
           - "*"
