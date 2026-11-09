@@ -87,6 +87,56 @@ actor HealthCheckManager {
         logs.removeValue(forKey: containerId)
     }
 
+    /// Runs exactly one probe on demand — the backing for libpod's
+    /// `GET /libpod/containers/{name}/healthcheck` endpoint (`podman healthcheck run`),
+    /// as opposed to the background loop above. Uses the same probe path
+    /// (`runCheck` → injected `HealthProbe`) and honors the configured timeout,
+    /// clamped to `minimumTimeoutNs`.
+    ///
+    /// The exit code maps directly to the reported status (0 → "healthy",
+    /// nonzero → "unhealthy"), matching real podman's manual-run semantics
+    /// (`Runtime.HealthCheck` reports unhealthy for a failed on-demand run);
+    /// "starting" remains a background-loop concept. On failure the streak
+    /// carries over from the tracked status, so repeated manual runs (or a run
+    /// alongside an active loop) accumulate like podman's persisted streak. When
+    /// a background loop is active for the container, its tracked status and log
+    /// are updated so `GET /containers/{id}/json` reflects the manual run; with
+    /// no loop running the result is reported without being cached (a stale
+    /// cached status would be worse than none).
+    ///
+    /// Returns nil when the config carries no runnable test (`NONE`, empty, or
+    /// bare `CMD`) — the caller maps that to podman's HTTP 409
+    /// "container has no defined healthcheck".
+    func runProbeOnce(containerId: String, config: HealthcheckConfig) async -> ContainerHealth? {
+        guard Self.parseTest(config.Test) != nil else { return nil }
+        let configTimeoutNs = config.Timeout.map { UInt64(max($0, 0)) } ?? Self.defaultTimeoutNs
+        let timeoutNs = max(configTimeoutNs, Self.minimumTimeoutNs)
+
+        let start = Date()
+        let exitCode = await runCheck(containerId: containerId, config: config, timeoutNs: timeoutNs)
+        let end = Date()
+
+        let entry = HealthLogEntry(
+            Start: Self.formatISO8601(start),
+            End: Self.formatISO8601(end),
+            ExitCode: exitCode,
+            Output: ""
+        )
+
+        let streak = exitCode == 0 ? 0 : (statuses[containerId]?.FailingStreak ?? 0) + 1
+        let status = exitCode == 0 ? "healthy" : "unhealthy"
+
+        if isActive(id: containerId) {
+            updateStatus(
+                id: containerId,
+                health: ContainerHealth(Status: status, FailingStreak: streak, Log: []),
+                logEntry: entry
+            )
+        }
+
+        return ContainerHealth(Status: status, FailingStreak: streak, Log: [entry])
+    }
+
     /// Parses Docker's `Test` field into a runnable command vector.
     /// Returns nil for empty input or `["NONE"]` (the disable sentinel).
     static func parseTest(_ test: [String]?) -> [String]? {

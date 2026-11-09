@@ -244,6 +244,7 @@ func configure(_ app: Application) async throws {
     try app.register(collection: LibpodContainerWaitRoute(client: containerClient))
     try app.register(collection: LibpodContainerInspectRoute(client: containerClient))
     try app.register(collection: LibpodContainerDeleteRoute(client: containerClient))
+    try app.register(collection: LibpodContainerHealthcheckRoute(client: containerClient))
     try app.register(collection: LibpodImageListRoute(client: imageClient))
     try app.register(collection: LibpodImagePullRoute(client: imageClient))
     try app.register(collection: LibpodImageDeleteRoute(client: imageClient))
