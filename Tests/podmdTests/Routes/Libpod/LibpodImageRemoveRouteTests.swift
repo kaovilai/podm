@@ -225,16 +225,19 @@ struct LibpodImageRemoveRouteTests {
 
     // MARK: - Helpers
 
-    /// Registers BOTH the new remove route and the pre-existing wildcard delete route,
-    /// in the same order configure.swift does, so precedence is genuinely exercised.
+    /// Registers BOTH the pre-existing wildcard delete route and the new remove
+    /// route, in the same order configure.swift registers them (delete at ~250,
+    /// remove at ~251), so precedence is exercised against the production
+    /// registration sequence — RegexRouter.insertSorted orders by specificity,
+    /// so this also pins that order-independence isn't load-bearing.
     private func withRemoveApp(_ mock: BatchRemoveImageMock, test: @escaping (Application) async throws -> Void) async throws {
         try await withApp(configure: { _ in }) { app in
             let regexRouter = app.regexRouter(with: app.logger)
             app.setRegexRouter(regexRouter)
             regexRouter.installMiddleware(on: app)
             app.storage[EventBroadcasterKey.self] = EventBroadcaster()
-            try app.register(collection: LibpodImageRemoveRoute(client: mock))
             try app.register(collection: LibpodImageDeleteRoute(client: mock))
+            try app.register(collection: LibpodImageRemoveRoute(client: mock))
             try await test(app)
         }
     }

@@ -36,9 +36,20 @@ struct ContainerTopRouteTests {
 
     private struct TopClientMock: ClientContainerProtocol {
         let containers: [ContainerSnapshot]
+        /// When set, `getContainer` throws this instead of looking up — used
+        /// to cover error branches (e.g. the ambiguous-ID 400 path).
+        let getContainerError: Error?
+
+        init(containers: [ContainerSnapshot], getContainerError: Error? = nil) {
+            self.containers = containers
+            self.getContainerError = getContainerError
+        }
 
         func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { containers }
-        func getContainer(id: String) async throws -> ContainerSnapshot? { containers.first { $0.id == id } }
+        func getContainer(id: String) async throws -> ContainerSnapshot? {
+            if let getContainerError { throw getContainerError }
+            return containers.first { $0.id == id }
+        }
         func enforceContainerRunning(container: ContainerSnapshot) throws {
             guard container.status == .running else {
                 throw ClientContainerError.notRunning(id: container.id)
@@ -372,6 +383,25 @@ struct ContainerTopRouteTests {
             }
             try await app.testing().test(.GET, "/v1.51/libpod/containers/c-stopped/top") { res async throws in
                 #expect(res.status == .conflict)
+            }
+        }
+    }
+
+    @Test("an ambiguous container reference is a 400 in both dialects")
+    func ambiguousReferenceIsBadRequest() async throws {
+        let fake = FakePs(output: "")
+        let mock = TopClientMock(
+            containers: [],
+            getContainerError: ClientContainerError.ambiguousId(reference: "c1", matches: ["c1a", "c1b"])
+        )
+        try await withTopApp(ContainerTopRoute(client: mock, runPs: makeRunner(fake))) { app in
+            try await app.testing().test(.GET, "/v1.51/containers/c1/top") { res async throws in
+                #expect(res.status == .badRequest)
+            }
+        }
+        try await withTopApp(LibpodContainerTopRoute(client: mock, runPs: makeRunner(fake))) { app in
+            try await app.testing().test(.GET, "/v1.51/libpod/containers/c1/top") { res async throws in
+                #expect(res.status == .badRequest)
             }
         }
     }

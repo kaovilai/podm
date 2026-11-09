@@ -43,6 +43,13 @@ extension LibpodImageRemoveRoute {
             var all = queryAll ?? false
 
             // Body fallback for clients that POST-style JSON bodies on DELETE.
+            // Vapor streams request bodies unless they were collected; decode
+            // needs the buffered bytes, so collect explicitly (a no-op when
+            // already collected) — a streamed body would otherwise fail the
+            // `try?` decode and silently turn into empty success.
+            if images.isEmpty {
+                try? await req.body.collect()
+            }
             if images.isEmpty, let body = try? req.content.decode(LibpodImageRemoveBody.self) {
                 images = body.images ?? []
                 force = body.force ?? force

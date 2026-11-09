@@ -352,8 +352,12 @@ struct HealthCheckManagerStartIntervalTests {
 
     @Test("failures during the start period do not count toward Retries")
     func startupFailuresAreForgiven() async throws {
+        let timeline = ProbeTimeline()
         let mgr = HealthCheckManager(
-            probe: { _, _, _ in 1 },
+            probe: { _, _, _ in
+                await timeline.record()
+                return 1
+            },
             intervalFloorNs: 1_000_000
         )
         let cfg = HealthcheckConfig(
@@ -361,15 +365,25 @@ struct HealthCheckManagerStartIntervalTests {
             Interval: 1_000_000,
             Timeout: 1_000_000_000,
             Retries: 1,  // a single counted failure must flip the container unhealthy
-            StartPeriod: 300_000_000,
+            StartPeriod: 1_000_000_000,  // 1s: wide margin over the probe-count poll below
             StartInterval: 1_000_000
         )
         await mgr.start(containerId: "forgiven", config: cfg)
 
-        // ~150ms into a 300ms start period: dozens of failed probes have run,
-        // none of which may count — with Retries=1 the container would have
-        // gone unhealthy on the very first counted failure.
-        try await Task.sleep(nanoseconds: 150_000_000)
+        // Poll until at least 5 probes have run and assert in the SAME step —
+        // a fixed sleep can resume past the start period on a loaded runner,
+        // and a counted failure would then (correctly) mark the container
+        // unhealthy, failing the test without a product defect. Five probes
+        // at the ~1ms startup cadence land in milliseconds, far inside the
+        // 1s window; with Retries=1 the first COUNTED failure goes unhealthy,
+        // so reaching 5 probes at all proves every one was forgiven.
+        var probes = 0
+        for _ in 0..<200 {
+            probes = await timeline.timestamps.count
+            if probes >= 5 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(probes >= 5, "startup cadence never produced probes, saw \(probes)")
         let midHealth = await mgr.currentHealth(for: "forgiven")
         #expect(midHealth?.Status == "starting", "startup failures must not mark the container unhealthy")
         #expect(midHealth?.FailingStreak == 0, "startup failures must not count toward the retry budget")
@@ -453,7 +467,7 @@ struct HealthCheckManagerStartIntervalTests {
         )
         let cfg = HealthcheckConfig(
             Test: ["CMD", "true"],
-            Interval: 300_000_000,
+            Interval: 2_000_000_000,  // 2s: the 150ms wait below stays far inside one Interval
             Timeout: 1_000_000_000,
             Retries: 3,
             StartPeriod: 1_000_000_000,  // window still open long after the first success
@@ -464,8 +478,9 @@ struct HealthCheckManagerStartIntervalTests {
         try await Self.waitForStatus("healthy", on: mgr, id: "early-healthy")
 
         // moby's getInterval: a non-starting container probes at Interval even
-        // inside the start period. 150ms after the healthy transition the
-        // 300ms Interval cannot have fired a second probe yet — at the 1ms
+        // inside the start period. 150ms after the healthy transition the 2s
+        // Interval cannot have fired a second probe yet (a Task.sleep never
+        // returns early, so the margin survives a loaded runner) — at the 1ms
         // StartInterval cadence there would be ~150.
         try await Task.sleep(nanoseconds: 150_000_000)
         let count = await timeline.timestamps.count
