@@ -140,11 +140,18 @@ jobs:
       - name: List downloaded artifact
         run: |
           ls -la
-          chmod 755 pacman
+          chmod 755 pacmand
 
       - name: fetch apple container
         run: |
-          APPLE_CONTAINER_VERSION=$(python3 -c "import json; d=json.load(open('Package.resolved')); print([p['state']['version'] for p in d['pins'] if p['identity']=='container'][0])")
+          # Runtime version, deliberately NOT the Package.resolved pin: Apple
+          # rotates the kernel archive on their CDN and older runtime pins carry
+          # stale expected digests -- `container system start
+          # --enable-kernel-install` then fails with "kernel archive digest
+          # mismatch" on fresh runners (seen 2026-11-09 with both the 1.2.0 and
+          # 1.6.1 pins after Apple rotated the artifact mid-day). The daemon
+          # only warns on linked-vs-runtime version mismatch.
+          APPLE_CONTAINER_VERSION=${APPLE_CONTAINER_VERSION:-1.7.1}
           wget "https://github.com/apple/container/releases/download/${APPLE_CONTAINER_VERSION}/container-installer-unsigned.pkg" \
             -O container-installer-signed.pkg
 
@@ -193,7 +200,9 @@ jobs:
 
       - name: run pacman
         run: |
-          nohup sudo -i $PWD/pacman > service.log 2>&1 &
+          # PACMAN_IDLE_EXIT_SECS=0: idle-exit must never kill the daemon mid-job
+          # (sudo -i drops the caller environment, so pass it explicitly).
+          nohup sudo -i env PACMAN_IDLE_EXIT_SECS=0 $PWD/pacmand > service.log 2>&1 &
           echo $! > service.pid
           sudo ln -s /var/root/.pacman/container.sock /var/run/docker.sock
           sleep 5
@@ -452,11 +461,18 @@ jobs:
       - name: Prepare pacman binary
         run: |
           ls -la
-          chmod 755 pacman
+          chmod 755 pacmand
 
       - name: Fetch Apple Container installer
         run: |
-          APPLE_CONTAINER_VERSION=$(python3 -c "import json; d=json.load(open('Package.resolved')); print([p['state']['version'] for p in d['pins'] if p['identity']=='container'][0])")
+          # Runtime version, deliberately NOT the Package.resolved pin: Apple
+          # rotates the kernel archive on their CDN and older runtime pins carry
+          # stale expected digests -- `container system start
+          # --enable-kernel-install` then fails with "kernel archive digest
+          # mismatch" on fresh runners (seen 2026-11-09 with both the 1.2.0 and
+          # 1.6.1 pins after Apple rotated the artifact mid-day). The daemon
+          # only warns on linked-vs-runtime version mismatch.
+          APPLE_CONTAINER_VERSION=${APPLE_CONTAINER_VERSION:-1.7.1}
           wget "https://github.com/apple/container/releases/download/${APPLE_CONTAINER_VERSION}/container-installer-unsigned.pkg" \
             -O container-installer-signed.pkg
 
@@ -512,7 +528,7 @@ jobs:
 
       - name: Start pacman
         run: |
-          PACMAND_BIN="$(pwd)/pacman"
+          PACMAND_BIN="$(pwd)/pacmand"
           nohup sudo -i "$PACMAND_BIN" > service.log 2>&1 &
           echo $! > service.pid
           sudo ln -s /var/root/.pacman/container.sock /var/run/docker.sock
@@ -593,7 +609,7 @@ jobs:
       # --platform alone does not produce a multi-arch image on the real
       # podman client. Podman's own --manifest flow (BuildRoute now reads the
       # `manifest` query param and registers the built image via
-      # `manifestClient.addBuiltImage` — see pacman#201) isn't exercised by
+      # `manifestClient.addBuiltImage` — see socktainer#201) isn't exercised by
       # this step either, since it never sends that param. This step only
       # proves the Docker-compat build endpoint itself can assemble a
       # multi-platform manifest list when asked directly via curl; it is not

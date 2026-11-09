@@ -52,7 +52,7 @@ extension ContainerLogsRoute {
             let follow = MobyBool.queryValue(req.query["follow"] as String?)
             let timestamps = MobyBool.queryValue(req.query["timestamps"] as String?)
 
-            let body = Response.Body { writer in
+            let body = Response.Body.idleTracked(stream: { writer in
                 Task.detached {
                     var buffer = Data()
 
@@ -160,7 +160,7 @@ extension ContainerLogsRoute {
                     }
                     finish()
                 }
-            }
+            })
 
             return Response(
                 status: .ok,

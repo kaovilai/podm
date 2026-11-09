@@ -150,6 +150,21 @@ extension ContainerListRoute {
                     ImageManifestDescriptor: nil,
                     Command: ([container.configuration.initProcess.executable] + container.configuration.initProcess.arguments).joined(separator: " "),
                     Created: createdTimestamp,
+                    // Real lifecycle data for the libpod list route (podman's
+                    // ListContainer.StartedAt/ExitCode/ExitedAt): the Docker
+                    // shape itself doesn't carry these, so they ride along as
+                    // optional extras (Docker clients ignore unknown fields).
+                    StartedAtUnix: container.startedDate.map {
+                        AppleContainerTimestampResolver.unixTimestampSeconds($0)
+                    },
+                    ExitCode: container.status == .stopped
+                        ? await ContainerExitCodeStore.shared.get(id: container.id)
+                        : nil,
+                    ExitedAtUnix: container.status == .stopped
+                        ? await ContainerExitCodeStore.shared.exitDate(id: container.id).map {
+                            AppleContainerTimestampResolver.unixTimestampSeconds($0)
+                        }
+                        : nil,
                     Ports: ports,
                     SizeRw: nil,  // there is no mechanism to retrieve this value from apple container
                     SizeRootFs: nil,  // there is no mechanism to retrieve this value from apple container

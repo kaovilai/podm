@@ -24,7 +24,10 @@ struct LibpodContainerWaitRoute: RouteCollection {
 
             do {
                 let waitResponse = try await client.wait(id: containerId, condition: condition)
-                return try await waitResponse.encodeResponse(for: req)
+                // Real podman's libpod wait responds with the bare exit code integer;
+                // podman's remote client decodes the body into int32, so the Docker-compat
+                // {"StatusCode": N} object is an unmarshal error for it.
+                return Response(status: .ok, body: .init(string: String(waitResponse.StatusCode)))
             } catch ClientContainerError.notFound(let id) {
                 throw Abort(.notFound, reason: "No such container: \(id)")
             } catch {

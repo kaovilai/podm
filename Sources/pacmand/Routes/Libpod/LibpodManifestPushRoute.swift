@@ -87,7 +87,7 @@ struct LibpodManifestPushRoute: RouteCollection {
         }
 
         let logger = req.logger
-        response.body = .init(stream: { writer in
+        response.body = .idleTracked(stream: { writer in
             Task {
                 await DockerProgressFrame.pipe(
                     progressStream, to: writer, useStreamKey: true,

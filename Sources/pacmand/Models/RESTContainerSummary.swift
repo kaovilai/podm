@@ -23,6 +23,16 @@ struct RESTContainerSummary: Content {
     let ImageManifestDescriptor: ImageOCIDescriptor?
     let Command: String
     let Created: Int64
+    /// Unix seconds the init process last started, nil when never started.
+    /// Extra field beyond Docker's shape (clients ignore unknown fields);
+    /// consumed by the libpod list route for podman's ListContainer.StartedAt.
+    let StartedAtUnix: Int64?
+    /// Recorded init-process exit code, nil while running/never started.
+    /// Consumed by the libpod list route for podman's ListContainer.ExitCode.
+    let ExitCode: Int32?
+    /// Unix seconds the init process exited, nil while running/never started.
+    /// Consumed by the libpod list route for podman's ListContainer.ExitedAt.
+    let ExitedAtUnix: Int64?
     let Ports: [ContainerPort]
     let SizeRw: Int64?
     let SizeRootFs: Int64?

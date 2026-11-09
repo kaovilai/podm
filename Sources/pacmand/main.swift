@@ -69,6 +69,9 @@ try await configure(app)
 
 // Start the app
 try await app.startup()
+// Start the idle-exit monitor only now that the server is actually up — see
+// configure() for why starting it any earlier burns its exit latch.
+app.storage[IdleExitMonitorKey.self]?.start()
 do {
     try openUnixSocketToAllUsers(homeDirectory: homeDirectory)
 } catch {

@@ -119,7 +119,7 @@ extension ImagePushRoute {
             // which do need different framing. Passed explicitly by each route's own
             // registration rather than derived from the request path, so it can't silently
             // pick the wrong framing for an image name that happens to contain "/libpod/".
-            response.body = .init(stream: { writer in
+            response.body = .idleTracked(stream: { writer in
                 Task {
                     await DockerProgressFrame.pipe(
                         progressStream, to: writer, useStreamKey: useStreamKey,

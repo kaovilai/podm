@@ -31,11 +31,32 @@ permissions:
 
 jobs:
 
+  # The `secrets` context is not available in jobs.<id>.if — GitHub rejects the
+  # workflow file with "Unrecognized named-value: 'secrets'". Convert the
+  # secret presence checks into job outputs here and gate the real jobs on
+  # those outputs (needs.*.outputs IS available in job-level if).
+  check-secrets:
+    name: Secret availability
+    runs-on: ubuntu-24.04
+    outputs:
+      has_bot_token: ${{ steps.check.outputs.has_bot_token }}
+      has_certs: ${{ steps.check.outputs.has_certs }}
+    steps:
+      - id: check
+        run: |
+          echo "has_bot_token=${{ secrets.PACMAN_BOT_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+          echo "has_certs=${{ secrets.CERTIFICATE_P12_BASE64 != '' }}" >> "$GITHUB_OUTPUT"
+
   tag:
     name: Tagging
     runs-on: ubuntu-24.04
-    # disable on forks as secrets are not available
-    if: github.event.repository.fork == false
+    # disable on forks as secrets are not available; also skip until the
+    # release bot token is configured on kaovilai/pacman (the fork's
+    # socktainer-org bot token does not exist here)
+    needs: check-secrets
+    if: github.event.repository.fork == false && needs.check-secrets.outputs.has_bot_token == 'true'
+    permissions:
+      contents: write
     outputs:
       githubTag: ${{ steps.TAG_UTIL.outputs.githubTag}}
       pacmanVersion: ${{ steps.TAG_UTIL.outputs.pacmanVersion}}
@@ -53,8 +74,15 @@ jobs:
             SHORT_SHA1=$(git rev-parse --short HEAD)
             # grab the latest tags
             git fetch --tags
-            # nearest tag on main
-            PACMAND_VERSION=$(git describe --tags --abbrev=0 main)
+            # nearest stable tag on main
+            # - fresh clones of pacman have no tags yet (unlike the socktainer
+            #   fork this repo was imported from) — fall back so the bump math works
+            # - exclude the generated v<version>-next.<timestamp>-<sha> prerelease
+            #   tags this workflow pushes to the same repository: git describe
+            #   would otherwise select the previous prerelease tag, and its
+            #   parsing then makes "minor" non-numeric and the bump arithmetic
+            #   fails, stopping all subsequent prerelease builds
+            PACMAND_VERSION=$(git describe --tags --abbrev=0 --exclude='*-next.*' main 2>/dev/null || echo v0.0.0)
             STRIPPED_VERSION=${PACMAND_VERSION#v}
             echo "Current version is $STRIPPED_VERSION"
             tmp=${STRIPPED_VERSION%.*}
@@ -69,9 +97,9 @@ jobs:
           git config --local user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
           echo "Tagging with ${{ steps.TAG_UTIL.outputs.githubTag }}"
           git tag ${{ steps.TAG_UTIL.outputs.githubTag }}
-          # push tag to the prereleases repository
-          git remote add prereleases https://github.com/pacman/prereleases
-          git push prereleases ${{ steps.TAG_UTIL.outputs.githubTag }}
+          # push the tag to this repository (the fork pushed to a separate
+          # socktainer-org "prereleases" repository, which does not exist here)
+          git push origin ${{ steps.TAG_UTIL.outputs.githubTag }}
 
       - name: Create Release
         id: create_release
@@ -81,19 +109,19 @@ jobs:
           name: ${{ steps.TAG_UTIL.outputs.githubTag }}
           draft: true
           prerelease: true
-          owner: pacman
-          repo: prereleases
           token: ${{ secrets.PACMAN_BOT_TOKEN }}
 
   build:
     name: Build
-    needs: tag
+    needs: [tag, check-secrets]
+    # signing/notarization needs the Apple certificates; skip (rather than
+    # fail) until they are configured on this repository
+    if: needs.tag.result == 'success' && needs.check-secrets.outputs.has_certs == 'true'
     runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: pacman/prereleases
           ref: ${{ needs.tag.outputs.githubTag}}
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -147,7 +175,7 @@ jobs:
       - name: zip the binary
         run: |
           cd ./.build/arm64-apple-macosx/release/
-          zip -r pacman.zip pacman
+          zip pacmand.zip pacmand pacman
 
       - name: Submit for notarization
         run: |
@@ -174,9 +202,9 @@ jobs:
 
       - name: Upload pacman binary
         run: |
-         gh release upload --repo pacman/prereleases ${{ needs.tag.outputs.githubTag}} ./.build/arm64-apple-macosx/release/pacmand
-         gh release upload --repo pacman/prereleases ${{ needs.tag.outputs.githubTag}} ./.build/arm64-apple-macosx/release/pacmand.zip
-         gh release upload --repo pacman/prereleases ${{ needs.tag.outputs.githubTag}} ./pkginstaller/out/pacman-installer.pkg
+         gh release upload --repo "$GITHUB_REPOSITORY" ${{ needs.tag.outputs.githubTag}} ./.build/arm64-apple-macosx/release/pacmand
+         gh release upload --repo "$GITHUB_REPOSITORY" ${{ needs.tag.outputs.githubTag}} ./.build/arm64-apple-macosx/release/pacmand.zip
+         gh release upload --repo "$GITHUB_REPOSITORY" ${{ needs.tag.outputs.githubTag}} ./pkginstaller/out/pacman-installer.pkg
         env:
           GITHUB_TOKEN: ${{ secrets.PACMAN_BOT_TOKEN }}
 
@@ -184,6 +212,7 @@ jobs:
     needs: [tag, build]
     name: Release
     runs-on: ubuntu-24.04
+    if: needs.build.result == 'success'
     steps:
       - name: id
         run: echo the release id is ${{ needs.tag.outputs.releaseId}}
@@ -194,17 +223,18 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.PACMAN_BOT_TOKEN }}
         with:
           id: ${{ needs.tag.outputs.releaseId}}
-          repo: prereleases
-          owner: pacman
 
   brew-tap-update:
-    needs: [tag, release]
+    needs: [tag, release, check-secrets]
     name: Homebrew Tap
     runs-on: ubuntu-24.04
+    # requires the kaovilai/homebrew-tap repository (with an
+    # update-formula-next.yml workflow) and PACMAN_BOT_TOKEN; skipped until then
+    if: needs.release.result == 'success' && needs.check-secrets.outputs.has_bot_token == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: pacman/homebrew-tap
+          repository: kaovilai/homebrew-tap
           token: ${{ secrets.PACMAN_BOT_TOKEN }}
           fetch-depth: 0
 
@@ -215,14 +245,14 @@ jobs:
 
           # Trigger workflow run in homebrew-tap
           gh workflow run update-formula-next.yml \
-            --repo pacman/homebrew-tap \
+            --repo kaovilai/homebrew-tap \
             --ref main \
             -f version="$VERSION"
 
           # Get the latest run ID for that workflow
           run_id=$(gh run list \
             --workflow update-formula-next.yml \
-            --repo pacman/homebrew-tap \
+            --repo kaovilai/homebrew-tap \
             --limit 1 \
             --json databaseId \
             --jq '.[0].databaseId')
@@ -230,6 +260,6 @@ jobs:
           echo "Waiting for workflow run ID: $run_id"
 
           # Watch until completion (streams logs & exits with same status)
-          gh run watch "$run_id" --repo pacman/homebrew-tap
+          gh run watch "$run_id" --repo kaovilai/homebrew-tap
         env:
           GITHUB_TOKEN: ${{ secrets.PACMAN_BOT_TOKEN }}

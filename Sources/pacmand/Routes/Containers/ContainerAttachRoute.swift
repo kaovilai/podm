@@ -343,13 +343,83 @@ extension ContainerAttachRoute {
         let contentType =
             isTTY
             ? "application/vnd.docker.raw-stream" : "application/vnd.docker.multiplexed-stream"
+
+        // Upgraded (hijacked) connections: the client treats the 101 response as a
+        // raw pipe and waits for EOF once the container's output ends. A hand-rolled
+        // 101 + Vapor streaming body never closes the socket — Vapor keeps HTTP/1.1
+        // connections alive after the body completes — so clients that genuinely
+        // wait for stream EOF (podman's `run`) hang forever after the container
+        // exits. Docker's CLI abandons the attach once its wait returns, which is
+        // why this was never visible with docker clients.
+        // Response.dockerTCPUpgrade performs a real pipeline upgrade (HTTP handlers
+        // removed, the raw channel handed to the stream handler), letting us close
+        // the channel — delivering EOF — after all output is flushed and the
+        // process monitor has finished.
+        if isUpgrade && hasConnectionUpgrade {
+            return Response.dockerTCPUpgrade(execId: container.id, ttyEnabled: isTTY) { channel, _ in
+                await withTaskGroup(of: Void.self) { group in
+                    // Process monitor — stdout/stderr write ends and stdin read are Apple-owned.
+                    group.addTask {
+                        _ = await ContainerProcessExitMonitor.run(
+                            wait: { try await process.wait() },
+                            hexId: hexId,
+                            nativeId: container.id,
+                            fallbackImage: container.configuration.image.reference,
+                            fallbackLabels: LabelNormalization.restore(container.configuration.labels),
+                            dnsServer: req.application.storage[PacmanDNSServerKey.self],
+                            broadcaster: req.application.storage[EventBroadcasterKey.self]
+                        )
+                    }
+
+                    // Stdout reader
+                    if let stdoutHandle = pipes.stdout?.read {
+                        let frameType: DockerStreamFrame.StreamType = stderrOnly ? .stderr : .stdout
+                        group.addTask {
+                            defer { try? stdoutHandle.close() }
+                            while let data = try? stdoutHandle.read(upToCount: 8192), !data.isEmpty {
+                                var buf = channel.allocator.buffer(capacity: data.count + (isTTY ? 0 : 8))
+                                buf.writeDockerFrame(streamType: frameType, data: data, ttyMode: isTTY)
+                                // Await the socket write before reading on: the task group
+                                // completing with writes still in flight would let the close
+                                // below truncate output for large responses or slow clients.
+                                // A failed write means the client is gone — stop reading.
+                                do {
+                                    try await channel.writeAndFlush(buf).get()
+                                } catch {
+                                    break
+                                }
+                            }
+                        }
+                    }
+
+                    // Stderr reader (separate stream when both stdout and stderr requested)
+                    if let stderrHandle = pipes.stderr?.read {
+                        group.addTask {
+                            defer { try? stderrHandle.close() }
+                            while let data = try? stderrHandle.read(upToCount: 8192), !data.isEmpty {
+                                var buf = channel.allocator.buffer(capacity: data.count + 8)
+                                buf.writeDockerFrame(streamType: .stderr, data: data, ttyMode: false)
+                                do {
+                                    try await channel.writeAndFlush(buf).get()
+                                } catch {
+                                    break
+                                }
+                            }
+                        }
+                    }
+
+                    for await _ in group {}
+                }
+                // EOF for the hijacked stream: every output frame has been flushed
+                // and the process monitor recorded the exit code.
+                channel.eventLoop.execute {
+                    channel.close(promise: nil)
+                }
+            }
+        }
+
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: contentType)
-        if isUpgrade && hasConnectionUpgrade {
-            headers.add(name: "Connection", value: "Upgrade")
-            headers.add(name: "Upgrade", value: "tcp")
-        }
-        let status: HTTPResponseStatus = (isUpgrade && hasConnectionUpgrade) ? .switchingProtocols : .ok
 
         let body = Response.Body { writer in
             Task.detached {
@@ -400,7 +470,7 @@ extension ContainerAttachRoute {
             }
         }
 
-        return Response(status: status, headers: headers, body: body)
+        return Response(status: .ok, headers: headers, body: body)
     }
 
     private static func handleAttachWithStdin(

@@ -55,7 +55,7 @@ extension ImageCreateRoute {
             // Use decodedTag (the value actually pulled) so a percent-encoded tag
             // does not produce a mismatched reference in the "pull" event.
             let pulledRef = "\(image)\(decodedTag.isEmpty ? "" : ":\(decodedTag)")"
-            response.body = .init(stream: { writer in
+            response.body = .idleTracked(stream: { writer in
                 Task {
                     let progressId = pulledRef.split(separator: "/").last.map(String.init) ?? pulledRef
                     await DockerProgressFrame.pipe(progressStream, id: progressId, to: writer) {
@@ -130,7 +130,7 @@ extension ImageCreateRoute {
         let app = req.application
         let response = Response()
         response.headers.add(name: .contentType, value: "application/json")
-        response.body = .init(stream: { writer in
+        response.body = .idleTracked(stream: { writer in
             Task {
                 defer { try? FileManager.default.removeItem(at: tempDir) }
                 do {

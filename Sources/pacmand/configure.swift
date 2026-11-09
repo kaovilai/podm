@@ -19,6 +19,51 @@ func configure(_ app: Application) async throws {
     // outermost so it wraps all routing/error handling. See DockerErrorMiddleware.
     app.middleware.use(DockerErrorMiddleware(), at: .beginning)
 
+    // launchd on-demand lifecycle: count in-flight requests so the daemon
+    // never exits while serving a client. Streaming response bodies are
+    // counted at construction via `Response.Body.idleTracked(...)` — Vapor's
+    // Response.Body storage is internal, so middleware alone cannot see a
+    // stream that outlives its handler. See Utilities/IdleExit.swift.
+    let idleCounters = IdleActivityCounters.shared
+    app.middleware.use(IdleExitConnectionMiddleware(counters: idleCounters))
+
+    // Idle-exit monitor: exits the daemon after PACMAN_IDLE_EXIT_SECS
+    // (default 90s, 0 disables) of no client connections AND no running
+    // containers, so an idle pacmand consumes zero RAM; launchctl kickstart
+    // wakes it again. Never exits while containers run — the embedded DNS
+    // server (PacmanDNSServer), healthcheck loops (HealthCheckManager) and
+    // event broadcasting all live in this process and running containers
+    // depend on them. See Utilities/IdleExit.swift for the full contract.
+    let idleConfiguration = IdleExitConfiguration.fromEnvironment(
+        ProcessInfo.processInfo.environment)
+    if idleConfiguration.isEnabled {
+        if ProcessInfo.processInfo.environment["PACMAN_LAUNCHD"] == "1" {
+            app.logger.info("launchd mode: idle-exit enabled (grace \(idleConfiguration.grace))")
+        } else {
+            app.logger.info(
+                "idle-exit enabled (grace \(idleConfiguration.grace)); set PACMAN_IDLE_EXIT_SECS=0 to disable"
+            )
+        }
+        let idleMonitor = IdleExitMonitor(
+            configuration: idleConfiguration,
+            counters: idleCounters,
+            runningContainersProvider: defaultRunningContainersProvider(logger: app.logger),
+            logger: app.logger
+        ) {
+            // Same path SIGTERM takes (Vapor's ServeCommand signal handler
+            // completes app.running's promise): main.swift's onStop.get()
+            // returns, the instance lock is released, the process exits 0.
+            app.running?.stop()
+        }
+        // Created here but started by main.swift after app.startup() succeeds:
+        // configure() runs before the server is up, and startup (housekeeping
+        // included) can take tens of seconds — with a short grace the monitor
+        // would fire while app.running is still nil (the optional stop() would
+        // no-op, but the monitor's exit latch would burn its one shot and the
+        // daemon would never idle-exit for the rest of its life).
+        app.storage[IdleExitMonitorKey.self] = idleMonitor
+    }
+
     // Define app support path early since it's needed by multiple services
     let folderPath = ("\(NSHomeDirectory())/Library/Application Support/com.apple.container")
     let appleContainerAppSupportUrl = URL(fileURLWithPath: folderPath)

@@ -38,6 +38,13 @@ extension ContainerAttachWSRoute {
             // moby: MuxStreams=false — WebSocket is the mux; raw binary frames,
             // no stdcopy header, matches moby's wsContainersAttach behaviour.
             return req.webSocket { req, ws in
+                // Idle-exit: the HTTP middleware chain ends at the 101
+                // response, long before this socket's real life ends, so hold
+                // an activity token for the lifetime of the WebSocket.
+                let idleToken = IdleActivityCounters.shared.beginStream()
+                ws.onClose.whenComplete { _ in
+                    IdleActivityCounters.shared.endStream(idleToken)
+                }
                 Task {
                     if container.status == .stopped {
                         await handleStopped(

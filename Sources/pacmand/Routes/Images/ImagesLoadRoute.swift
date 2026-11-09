@@ -34,7 +34,7 @@ extension ImagesLoadRoute {
             let response = Response()
             response.headers.add(name: .contentType, value: "application/json")
 
-            response.body = .init(stream: { writer in
+            response.body = .idleTracked(stream: { writer in
                 Task {
                     do {
                         let bodyBuffer: ByteBuffer

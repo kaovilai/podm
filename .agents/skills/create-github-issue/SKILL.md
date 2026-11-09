@@ -139,7 +139,7 @@ The command outputs the issue URL and number.
 **Display the URL using markdown link syntax** so it's easily clickable:
 
 ```
-Created issue [#123](https://github.com/socktainer/socktainer/issues/123)
+Created issue [#123](https://github.com/kaovilai/pacman/issues/123)
 ```
 
 Use the issue number to:

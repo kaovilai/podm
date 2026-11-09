@@ -285,9 +285,12 @@ struct EmbeddedDNSImageTests {
         #expect(try Data(contentsOf: url) == data, "materialized file must match the embedded archive")
     }
 
-    @Test("EmbeddedDNSImage.tag matches SocktainerDNSImage.reference")
+    @Test("EmbeddedDNSImage.tag is the pacman-local re-tag of the embedded DNS forwarder")
     func tagMatchesPackageReference() {
-        #expect(EmbeddedDNSImage.tag == SocktainerDNSImage.reference)
+        // The external SocktainerDNSImage package ships its tarball tagged
+        // "socktainer-dns:embedded"; EmbeddedDNSImage re-tags it locally, so our
+        // tag must NOT equal the external reference — it is our own brand name.
+        #expect(EmbeddedDNSImage.tag != SocktainerDNSImage.reference)
         #expect(EmbeddedDNSImage.tag == "pacman-dns:embedded", "image tag must match what NetworkDNSManager registers")
     }
 

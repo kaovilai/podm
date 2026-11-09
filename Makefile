@@ -32,15 +32,17 @@ SUDO ?= sudo
 .DEFAULT_GOAL := all
 
 .PHONY: all
-all: pacmand
+all: pacmand pacman
 
 .PHONY: build
 build:
 	@echo Building pacmand binary...
-	@$(SWIFT) build -c $(BUILD_CONFIGURATION)
+	@$(SWIFT) build -c $(BUILD_CONFIGURATION) --product pacmand
+	@$(SWIFT) build -c $(BUILD_CONFIGURATION) --product pacman
 
-.PHONY: pacmand
-pacmand: build 
+.PHONY: pacmand pacman
+pacmand: build
+pacman: build
 
 .PHONY: release
 release: BUILD_CONFIGURATION = release

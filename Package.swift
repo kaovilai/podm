@@ -55,6 +55,13 @@ let package = Package(
                 "BuildInfo",
             ]
         ),
+        .executableTarget(
+            name: "pacman",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
+            ]
+        ),
         .testTarget(
             name: "pacmandTests",
             dependencies: [

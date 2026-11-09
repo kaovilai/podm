@@ -12,10 +12,14 @@ actor ContainerExitCodeStore {
     static let shared = ContainerExitCodeStore()
 
     private var codes: [String: Int32] = [:]
+    /// Wall time each exit code was recorded, for lifecycle reporting
+    /// (podman's ListContainer.ExitedAt). Same keys as `codes`.
+    private var exitDates: [String: Date] = [:]
     private var waiters: [String: [CheckedContinuation<Int32, Never>]] = [:]
 
     func set(id: String, code: Int32) {
         codes[id] = code
+        exitDates[id] = Date()
         // Resume anyone awaiting this container's exit code (e.g. the die-event observer),
         // delivering the authoritative recorded value rather than a timed-poll fallback.
         if let pending = waiters.removeValue(forKey: id) {
@@ -27,8 +31,15 @@ actor ContainerExitCodeStore {
         codes[id]
     }
 
+    /// When the exit code for `id` was recorded (i.e. when the container
+    /// exited), nil when unknown or not yet exited.
+    func exitDate(id: String) -> Date? {
+        exitDates[id]
+    }
+
     func remove(id: String) {
         codes.removeValue(forKey: id)
+        exitDates.removeValue(forKey: id)
     }
 
     /// Suspends until the exit code for `id` is recorded, returning the exact recorded value.

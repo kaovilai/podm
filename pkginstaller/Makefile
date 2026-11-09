@@ -75,20 +75,27 @@ $(SCRIPTS_DIR)/postinstall: Resources/scripts/postinstall.in | $(SCRIPTS_DIR)
 
 .PHONY: copy-binary
 copy-binary: setup
-	@echo "Copying pacman binary..."
+	@echo "Copying pacman + pacmand binaries..."
 	@if [ ! -f "../.build/release/pacmand" ]; then \
-		echo "Error: pacman binary not found. Run 'make release' in the parent directory first."; \
+		echo "Error: pacmand binary not found. Run 'make release' in the parent directory first."; \
+		exit 1; \
+	fi
+	@if [ ! -f "../.build/release/pacman" ]; then \
+		echo "Error: pacman client binary not found. Run 'make release' in the parent directory first."; \
 		exit 1; \
 	fi
 	@cp ../.build/release/pacmand $(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/
+	@cp ../.build/release/pacman $(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/
 	@chmod +x $(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/pacmand
+	@chmod +x $(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/pacman
 
 .PHONY: sign-binary
 sign-binary: copy-binary
 	@if [ "$(NO_CODESIGN)" != "1" ] && [ "$(APPLE_APPLICATION_ID)" != "-" ]; then \
-		echo "Signing binary..."; \
+		echo "Signing binaries..."; \
 		codesign --sign "$(APPLE_APPLICATION_ID)" --options runtime --timestamp --force \
-			$(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/pacmand; \
+			$(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/pacmand \
+			$(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/pacman; \
 	fi
 
 .PHONY: component-pkg

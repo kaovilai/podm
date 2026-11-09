@@ -592,7 +592,10 @@ extension ConnectionHijackingMiddleware {
             headers.add(name: "Content-Type", value: contentType)
         }
 
-        let body = Response.Body(stream: { writer in
+        // idleTracked: the hijacked attach/exec stream is an active client
+        // connection for as long as it streams (the body callback below
+        // returns early while detached tasks keep writing).
+        let body = Response.Body.idleTracked(stream: { writer in
             let (stream, continuation) = AsyncThrowingStream<ByteBuffer, Error>.makeStream()
 
             Task.detached {
