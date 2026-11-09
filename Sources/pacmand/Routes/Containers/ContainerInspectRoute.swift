@@ -174,18 +174,32 @@ extension ContainerInspectRoute {
             // True during the backoff window between a crash and its automatic restart.
             let isPendingRestart = await ContainerRestartState.shared.isPendingRestart(id: container.id)
 
+            // A container with no startedDate was created but never started. Docker and
+            // podman report such containers as State.Status "created" (not "exited"), and
+            // podman remote `run` inspects between create and start — reporting "exited"
+            // with a Dead flag makes it abort the run before ever calling /start.
+            let neverStarted = container.startedDate == nil
+
             let containerState: ContainerState = ContainerState(
-                Status: isPendingRestart ? "restarting" : container.status.mobyState,
+                Status: isPendingRestart
+                    ? "restarting"
+                    : (neverStarted ? "created" : container.status.mobyState),
                 Running: container.status == .running,
                 Paused: false,  // Apple containers don't have a paused state like Docker
                 Restarting: isPendingRestart,
                 OOMKilled: false,
-                Dead: container.status == .stopped && !isPendingRestart,
+                // Docker's Dead means "removal failed"; it is false in normal operation.
+                Dead: false,
                 Pid: 0,  // we have no mechanism to derive PID in Apple container
                 ExitCode: container.status == .stopped ? 0 : 0,
                 Error: "",
-                StartedAt: container.startedDate.map { AppleContainerTimestampResolver.iso8601Timestamp($0) } ?? "",
-                FinishedAt: container.status == .stopped ? "1970-01-01T00:00:00.000000000Z" : "",
+                // podman's client unmarshals these into time.Time, so an empty string is
+                // a hard parse error; both engines serialize the zero time as below.
+                StartedAt: container.startedDate.map { AppleContainerTimestampResolver.iso8601Timestamp($0) }
+                    ?? "0001-01-01T00:00:00Z",
+                FinishedAt: container.status == .stopped
+                    ? "1970-01-01T00:00:00.000000000Z"
+                    : "0001-01-01T00:00:00Z",
                 Health: health
             )
 

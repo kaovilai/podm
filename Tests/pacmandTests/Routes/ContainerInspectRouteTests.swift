@@ -261,7 +261,15 @@ struct ContainerInspectRouteRestartPolicyTests {
         if let restartPolicyLabel {
             containerConfig.labels = [RestartPolicyManager.label: restartPolicyLabel]
         }
-        return ContainerSnapshot(configuration: containerConfig, status: .stopped, networks: [])
+        // startedDate models a container that ran and exited: inspect reports such
+        // containers as "exited", while created-but-never-started ones report
+        // "created" (nil startedDate).
+        return ContainerSnapshot(
+            configuration: containerConfig,
+            status: .stopped,
+            networks: [],
+            startedDate: Date(timeIntervalSinceNow: -60)
+        )
     }
 
     private func encodedPolicy(name: String, maximumRetryCount: Int? = nil) -> String {

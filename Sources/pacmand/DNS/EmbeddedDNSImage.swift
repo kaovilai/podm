@@ -5,7 +5,11 @@ import Logging
 import SocktainerDNSImage
 
 enum EmbeddedDNSImage {
-    static let tag = SocktainerDNSImage.reference
+    /// Locally re-tagged reference for the embedded DNS forwarder image. The
+    /// tarball's original reference comes from the external SocktainerDNSImage
+    /// product ("socktainer-dns:embedded"); importAndTag re-tags the loaded
+    /// image under this pacman name so the local store carries our brand.
+    static let tag = "pacman-dns:embedded"
     private static let log = Logger(label: "pacman.dns.embedded")
 
     actor ImportGate {
