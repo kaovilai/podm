@@ -1,4 +1,8 @@
-# Set update schedule for GitHub Actions and Swift dependencies
+# Dependabot: all updates grouped — one PR per ecosystem, security included.
+# No `applies-to` key: a group without it covers BOTH version updates and
+# security updates (applies-to: security-updates would make the group
+# security-ONLY and leave scheduled version updates one-PR-per-dependency
+# again — Copilot review catch).
 
 version: 2
 updates:
@@ -8,6 +12,10 @@ updates:
       interval: "daily"
       time: "03:00"
     open-pull-requests-limit: 20
+    groups:
+      github-actions:
+        patterns:
+          - "*"
 
   - package-ecosystem: "swift"
     directory: "/"
@@ -16,12 +24,9 @@ updates:
       time: "03:00"
     open-pull-requests-limit: 20
     groups:
-      apple-container:
-        applies-to: version-updates
+      # Everything in one Swift PR — the finer-grained apple-container /
+      # apple-swift groups produced a PR per dependency (10 open at once),
+      # which nobody reviewed separately anyway.
+      swift-dependencies:
         patterns:
-          - "apple-container"
-          - "apple-containerization"
-      apple-swift:
-        applies-to: version-updates
-        patterns:
-          - "apple-swift-*"
+          - "*"
