@@ -136,7 +136,7 @@ jobs:
         run: |
           PACMAND_BIN="$(pwd)/.build/arm64-apple-macosx/release/pacmand"
           chmod 755 "$PACMAND_BIN"
-          nohup sudo -i "$PACMAND_BIN" > service.log 2>&1 &
+          nohup sudo -i env PACMAN_IDLE_EXIT_SECS=0 "$PACMAND_BIN" > service.log 2>&1 &
           echo $! > service.pid
           sudo ln -sf /var/root/.pacman/container.sock /var/run/docker.sock
           START=$SECONDS
@@ -345,7 +345,7 @@ jobs:
       - name: Start pacman
         run: |
           PACMAND_BIN="$(pwd)/pacmand"
-          nohup sudo -i "$PACMAND_BIN" > service.log 2>&1 &
+          nohup sudo -i env PACMAN_IDLE_EXIT_SECS=0 "$PACMAND_BIN" > service.log 2>&1 &
           echo $! > service.pid
           sudo ln -s /var/root/.pacman/container.sock /var/run/docker.sock
           sleep 5

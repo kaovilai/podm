@@ -19,8 +19,10 @@ struct LibpodContainerListRoute: RouteCollection {
 }
 
 /// podman's `entities.ListContainer` (pkg/domain/entities/types/container_ps.go):
-/// only the fields where the shape differs from Docker's summary are declared;
-/// the rest pass through the embedded Docker-compat summary via keyed decoding.
+/// every field is declared flat and populated from the Docker-compat summary in
+/// `from(_:)` — only the fields where the shape differs from Docker's summary
+/// are carried (Created as RFC3339 string, CreatedAt/StartedAt/ExitedAt/Exited/
+/// Networks); podman-only fields podman tolerates as absent are omitted.
 struct LibpodListContainer: Content {
     /// Docker-compat fields podman also consumes, encoded flat.
     let Id: String

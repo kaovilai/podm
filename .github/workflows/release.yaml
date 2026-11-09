@@ -74,14 +74,26 @@ jobs:
           draft: true
           prerelease: true
 
+  # The `secrets` context is not available in jobs.<id>.if (GitHub rejects the
+  # workflow with "Unrecognized named-value: 'secrets'"). Convert the check
+  # into a job output and gate the build job on it.
+  check-secrets:
+    name: Secret availability
+    runs-on: ubuntu-24.04
+    outputs:
+      has_certs: ${{ steps.check.outputs.has_certs }}
+    steps:
+      - id: check
+        run: echo "has_certs=${{ secrets.CERTIFICATE_P12_BASE64 != '' }}" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build
-    needs: tag
+    needs: [tag, check-secrets]
     permissions:
       contents: write
     # signing/notarization needs the Apple certificates; skip (rather than
     # fail) until they are configured on this repository
-    if: secrets.CERTIFICATE_P12_BASE64 != ''
+    if: needs.tag.result == 'success' && needs.check-secrets.outputs.has_certs == 'true'
     runs-on: macos-26
     timeout-minutes: 60
     env:
@@ -153,7 +165,7 @@ jobs:
       - name: zip the binary
         run: |
           cd ./.build/arm64-apple-macosx/release/
-          zip pacman.zip pacmand
+          zip pacmand.zip pacmand
 
       - name: Submit for notarization
         run: |

@@ -92,16 +92,25 @@ struct IdleExitConfiguration: Sendable, Equatable {
 
     /// Pure parse from an environment mapping so tests need not mutate the
     /// real process environment.
+    ///
+    /// Default when PACMAN_IDLE_EXIT_SECS is absent: enabled (90s) under
+    /// launchd (PACMAN_LAUNCHD=1), where something restarts the daemon on
+    /// demand; disabled for foreground/dev invocations (`pacman serve`, a bare
+    /// `pacmand &`, CI nohup starts), where an unprompted exit would just look
+    /// like a crash. Set PACMAN_IDLE_EXIT_SECS explicitly to override either
+    /// way.
     static func fromEnvironment(_ env: [String: String]) -> IdleExitConfiguration {
+        let fallback: IdleExitConfiguration =
+            (env["PACMAN_LAUNCHD"] == "1") ? .default : IdleExitConfiguration(grace: .zero)
         guard
             let raw = env["PACMAN_IDLE_EXIT_SECS"]?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
             !raw.isEmpty
         else {
-            return .default
+            return fallback
         }
         guard let seconds = Double(raw) else {
-            return .default
+            return fallback
         }
         guard seconds > 0 else {
             return IdleExitConfiguration(grace: .zero)
@@ -179,6 +188,14 @@ struct IdleExitStateMachine: Sendable {
         guard elapsed >= grace else { return .idle(elapsed: elapsed) }
         hasExited = true
         return .exitNow
+    }
+
+    /// Cancel a fired-but-aborted exit: the pre-shutdown fresh poll in
+    /// `IdleExitMonitor.step()` can discover running containers after the
+    /// state machine already latched `hasExited`. Re-arm so a later genuine
+    /// idle period can still fire.
+    mutating func rearm() {
+        hasExited = false
     }
 }
 
@@ -379,10 +396,36 @@ final class IdleExitMonitor: Sendable {
                 "idle-exit: idle \(elapsed) of \(configuration.grace) (requests=\(snapshot.inFlightRequests), streams=\(snapshot.activeStreams), runningContainers=\(String(describing: snapshot.runningContainers)))"
             )
         case .exitNow:
-            logger.info(
-                "idle-exit: no client connections and no running containers for \(configuration.grace) — shutting down (launchd restarts on demand)"
-            )
-            onExit()
+            // The grace elapsed against possibly-stale inputs: the
+            // running-container count is cached on a 30s cadence, so a
+            // `docker run -d` that began just before the deadline would not
+            // be seen by the cached value (tick-race). Re-poll fresh before
+            // shutting down — bounded by the provider itself — and abort the
+            // exit if anything is running now or the count is unknown.
+            let fresh = await runningContainersProvider()
+            if fresh == 0 {
+                logger.info(
+                    "idle-exit: no client connections and no running containers for \(configuration.grace) — shutting down (launchd restarts on demand)"
+                )
+                onExit()
+            } else {
+                if let fresh {
+                    counters.setRunningContainers(fresh)
+                } else {
+                    counters.markRunningContainersUnknown()
+                }
+                // The machine latched hasExited when it returned .exitNow —
+                // re-arm so a later genuine idle period can still fire, then
+                // recompute against the fresh counters.
+                let revised = loopState.withLock {
+                    $0.machine.rearm()
+                    return $0.machine.update(counters.snapshot(), now: now)
+                }
+                logger.info(
+                    "idle-exit: aborted exit — fresh poll found \(String(describing: fresh)) running container(s)"
+                )
+                return revised
+            }
         }
         return decision
     }

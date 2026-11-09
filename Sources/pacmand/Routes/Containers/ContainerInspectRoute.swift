@@ -174,11 +174,14 @@ extension ContainerInspectRoute {
             // True during the backoff window between a crash and its automatic restart.
             let isPendingRestart = await ContainerRestartState.shared.isPendingRestart(id: container.id)
 
-            // A container with no startedDate was created but never started. Docker and
-            // podman report such containers as State.Status "created" (not "exited"), and
-            // podman remote `run` inspects between create and start — reporting "exited"
-            // with a Dead flag makes it abort the run before ever calling /start.
-            let neverStarted = container.startedDate == nil
+            // A stopped container with no startedDate was created but never
+            // started. Docker and podman report such containers as
+            // State.Status "created" (not "exited"), and podman remote `run`
+            // inspects between create and start — reporting "exited" with a
+            // Dead flag makes it abort the run before ever calling /start.
+            // Running containers never report "created" even if startedDate
+            // is somehow missing.
+            let neverStarted = container.startedDate == nil && container.status == .stopped
 
             let containerState: ContainerState = ContainerState(
                 Status: isPendingRestart

@@ -98,10 +98,19 @@ struct InstallCommand: ParsableCommand {
         let plistPath = PacmanPaths.launchAgentURL.path
         // Boot out any previously loaded agent first (quietly — failure just
         // means nothing was loaded yet).
-        _ = ProcessSpawn.run("/bin/launchctl", ["bootout", PacmanPaths.launchdTarget, plistPath], discardOutput: true)
-        let rendered = template.replacingOccurrences(of: "__HOME__", with: PacmanPaths.homePath)
+        _ = ProcessSpawn.run("/bin/launchctl", ["bootout", PacmanPaths.launchdServiceTarget], discardOutput: true)
+        // Render every placeholder the template defines: __HOME__ and the
+        // daemon binary path (__PACMAND_BIN__). Leaving the latter unreplaced
+        // yields a plist whose ProgramArguments is the literal placeholder —
+        // bootstrap succeeds but the agent can never start the daemon.
+        var rendered = template.replacingOccurrences(of: "__HOME__", with: PacmanPaths.homePath)
+        if let pacmandPath = DaemonLocator.locate() {
+            rendered = rendered.replacingOccurrences(of: "__PACMAND_BIN__", with: pacmandPath)
+        } else if rendered.contains("__PACMAND_BIN__") {
+            print("warning: template contains __PACMAND_BIN__ but no pacmand binary was found; the agent will not start the daemon")
+        }
         try rendered.write(to: PacmanPaths.launchAgentURL, atomically: true, encoding: .utf8)
-        let result = ProcessSpawn.run("/bin/launchctl", ["bootstrap", PacmanPaths.launchdTarget, plistPath], discardOutput: true)
+        let result = ProcessSpawn.run("/bin/launchctl", ["bootstrap", PacmanPaths.launchdDomain, plistPath], discardOutput: true)
         if result.exitStatus == 0 {
             print("Installed launchd agent: \(plistPath)")
         } else {

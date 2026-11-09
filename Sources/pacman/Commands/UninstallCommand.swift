@@ -15,7 +15,7 @@ struct UninstallCommand: ParsableCommand {
         // 1. LaunchAgent.
         let plistPath = PacmanPaths.launchAgentURL.path
         if fileManager.fileExists(atPath: plistPath) {
-            _ = ProcessSpawn.run("/bin/launchctl", ["bootout", PacmanPaths.launchdTarget, plistPath], discardOutput: true)
+            _ = ProcessSpawn.run("/bin/launchctl", ["bootout", PacmanPaths.launchdServiceTarget], discardOutput: true)
             try fileManager.removeItem(at: PacmanPaths.launchAgentURL)
             print("Removed launchd agent: \(plistPath)")
         } else {

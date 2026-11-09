@@ -193,7 +193,9 @@ jobs:
 
       - name: run pacman
         run: |
-          nohup sudo -i $PWD/pacmand > service.log 2>&1 &
+          # PACMAN_IDLE_EXIT_SECS=0: idle-exit must never kill the daemon mid-job
+          # (sudo -i drops the caller environment, so pass it explicitly).
+          nohup sudo -i env PACMAN_IDLE_EXIT_SECS=0 $PWD/pacmand > service.log 2>&1 &
           echo $! > service.pid
           sudo ln -s /var/root/.pacman/container.sock /var/run/docker.sock
           sleep 5

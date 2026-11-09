@@ -53,7 +53,7 @@ enum PersonaExec {
         guard FileManager.default.fileExists(atPath: plistPath) else { return }
 
         _ = ProcessSpawn.run(
-            "/bin/launchctl", ["kickstart", PacmanPaths.launchdTarget], discardOutput: true)
+            "/bin/launchctl", ["kickstart", PacmanPaths.launchdServiceTarget], discardOutput: true)
 
         // Bounded wait: the daemon needs a moment to bind the socket after
         // launchd spawns it. Bail early the moment it answers.

@@ -68,7 +68,7 @@ and the hard limits we accept.
 ```bash
 git clone https://github.com/kaovilai/pacman.git
 cd pacman
-make                # builds pacmand (debug)
+make                # builds pacmand (daemon) + pacman (client), debug
 ```
 
 A macOS `.pkg` is also available via `make installer` (system install to
@@ -81,11 +81,16 @@ needed.
 ### Set up the client (`pacman install`)
 
 One-time bootstrap — installs the `pacman` client, symlinks the `podman` and
-`docker` personas, and loads the daemon's LaunchAgent:
+`docker` personas, and records the real CLI paths:
 
 ```bash
-pacman install
+.build/debug/pacman install
 ```
+
+Add `--launchd-template assets/launchd/io.github.pacman.daemon.plist.in` to
+also install the daemon's LaunchAgent (on-demand lifecycle: idle-exit +
+kickstart wake). Without it, start the daemon yourself when needed:
+`.build/debug/pacmand &` (or `pacman serve`).
 
 Then put pacman's bin directory first on your `PATH` (in `~/.zshrc`):
 

@@ -62,11 +62,25 @@ struct IdleExitTests {
 
     // MARK: - Configuration
 
-    @Test("default grace is 90 seconds when the env var is absent")
+    @Test("default grace is 90 seconds under launchd (PACMAN_LAUNCHD=1) when the env var is absent")
     func configurationDefault() {
-        let config = IdleExitConfiguration.fromEnvironment([:])
+        let config = IdleExitConfiguration.fromEnvironment(["PACMAN_LAUNCHD": "1"])
         #expect(config == .default)
         #expect(config.grace == .seconds(90))
+        #expect(config.isEnabled)
+    }
+
+    @Test("idle-exit is disabled by default outside launchd (foreground/dev/CI starts)")
+    func configurationDefaultForegroundDisabled() {
+        let config = IdleExitConfiguration.fromEnvironment([:])
+        #expect(config.grace == .zero)
+        #expect(!config.isEnabled)
+    }
+
+    @Test("PACMAN_LAUNCHD only matters when PACMAN_IDLE_EXIT_SECS is absent")
+    func configurationExplicitOverridesLaunchd() {
+        let config = IdleExitConfiguration.fromEnvironment(["PACMAN_LAUNCHD": "0", "PACMAN_IDLE_EXIT_SECS": "45"])
+        #expect(config.grace == .seconds(45))
         #expect(config.isEnabled)
     }
 
@@ -90,16 +104,18 @@ struct IdleExitTests {
         #expect(config.isEnabled)
     }
 
-    @Test("absent, empty, whitespace, and unparseable values fall back to the default")
+    @Test("absent, empty, whitespace, and unparseable values fall back to the launchd-aware default")
     func configurationInvalidFallsBack() {
-        for raw in [nil, "", "   ", "abc", "1.2.3"] {
-            let env: [String: String]
-            if let raw {
-                env = ["PACMAN_IDLE_EXIT_SECS": raw]
-            } else {
-                env = [:]
+        for launchd in ["0", "1"] {
+            for raw in [nil, "", "   ", "abc", "1.2.3"] {
+                var env: [String: String] = ["PACMAN_LAUNCHD": launchd]
+                if let raw {
+                    env["PACMAN_IDLE_EXIT_SECS"] = raw
+                }
+                #expect(
+                    IdleExitConfiguration.fromEnvironment(env)
+                        == (launchd == "1" ? .default : IdleExitConfiguration(grace: .zero)))
             }
-            #expect(IdleExitConfiguration.fromEnvironment(env) == .default)
         }
     }
 
@@ -253,6 +269,81 @@ struct IdleExitTests {
     }
 
     // MARK: - Monitor loop
+
+    @Test("a container that started after the last cached poll aborts the exit, and a later genuine idle still fires")
+    func monitorAbortsExitOnFreshPollFindingContainers() async {
+        final class Box: @unchecked Sendable {
+            var value = 0
+        }
+        let clock = ManualClock()
+        let counters = IdleActivityCounters()
+        let running = Box()
+        let exits = AtomicCounter()
+        let monitor = IdleExitMonitor(
+            configuration: IdleExitConfiguration(grace: .seconds(3)),
+            counters: counters,
+            clock: clock,
+            // Every poll reads the live value: the startup poll sees 0 running;
+            // the fresh pre-shutdown re-poll sees the container that started
+            // just after the cached poll (the tick race).
+            runningContainersProvider: { running.value },
+            tickInterval: .seconds(1),
+            containerPollInterval: .seconds(30),
+            logger: Logger(label: "test.idleexit"),
+            onExit: { exits.increment() }
+        )
+
+        let first = await monitor.step()
+        #expect(first == .idle(elapsed: .zero))
+
+        // `docker run -d` completes after the cached poll, before the grace
+        // deadline. The grace then elapses against the stale count; the fresh
+        // re-poll finds the running container and aborts the exit.
+        running.value = 1
+        clock.advance(by: .seconds(3))
+        let decision = await monitor.step()
+        #expect(decision == .active)
+        #expect(exits.current == 0)
+
+        // The container goes away and a fresh idle period still fires: the
+        // abort re-armed the state machine's exit latch.
+        running.value = 0
+        clock.advance(by: .seconds(30))
+        counters.setRunningContainers(0)
+        let idleAgain = await monitor.step()
+        #expect(idleAgain == .idle(elapsed: .zero))
+        clock.advance(by: .seconds(3))
+        let fired = await monitor.step()
+        #expect(fired == .exitNow)
+        #expect(exits.current == 1)
+    }
+
+    @Test("an unknown fresh poll result also aborts the exit (never exit on missing information)")
+    func monitorAbortsExitOnUnknownFreshPoll() async {
+        let clock = ManualClock()
+        let counters = IdleActivityCounters()
+        let polls = AtomicCounter()
+        let exits = AtomicCounter()
+        let monitor = IdleExitMonitor(
+            configuration: IdleExitConfiguration(grace: .seconds(2)),
+            counters: counters,
+            clock: clock,
+            runningContainersProvider: {
+                polls.increment()
+                return polls.current == 1 ? 0 : nil
+            },
+            tickInterval: .seconds(1),
+            containerPollInterval: .seconds(30),
+            logger: Logger(label: "test.idleexit"),
+            onExit: { exits.increment() }
+        )
+
+        _ = await monitor.step()
+        clock.advance(by: .seconds(2))
+        let decision = await monitor.step()
+        #expect(decision == .active)
+        #expect(exits.current == 0)
+    }
 
     @Test("monitor polls once up front, honors the poll interval, and exits exactly once after grace")
     func monitorExitsAfterGrace() async {

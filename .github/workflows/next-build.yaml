@@ -31,13 +31,30 @@ permissions:
 
 jobs:
 
+  # The `secrets` context is not available in jobs.<id>.if — GitHub rejects the
+  # workflow file with "Unrecognized named-value: 'secrets'". Convert the
+  # secret presence checks into job outputs here and gate the real jobs on
+  # those outputs (needs.*.outputs IS available in job-level if).
+  check-secrets:
+    name: Secret availability
+    runs-on: ubuntu-24.04
+    outputs:
+      has_bot_token: ${{ steps.check.outputs.has_bot_token }}
+      has_certs: ${{ steps.check.outputs.has_certs }}
+    steps:
+      - id: check
+        run: |
+          echo "has_bot_token=${{ secrets.PACMAN_BOT_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+          echo "has_certs=${{ secrets.CERTIFICATE_P12_BASE64 != '' }}" >> "$GITHUB_OUTPUT"
+
   tag:
     name: Tagging
     runs-on: ubuntu-24.04
     # disable on forks as secrets are not available; also skip until the
     # release bot token is configured on kaovilai/pacman (the fork's
     # socktainer-org bot token does not exist here)
-    if: github.event.repository.fork == false && secrets.PACMAN_BOT_TOKEN != ''
+    needs: check-secrets
+    if: github.event.repository.fork == false && needs.check-secrets.outputs.has_bot_token == 'true'
     permissions:
       contents: write
     outputs:
@@ -91,10 +108,10 @@ jobs:
 
   build:
     name: Build
-    needs: tag
+    needs: [tag, check-secrets]
     # signing/notarization needs the Apple certificates; skip (rather than
     # fail) until they are configured on this repository
-    if: needs.tag.result == 'success' && secrets.CERTIFICATE_P12_BASE64 != ''
+    if: needs.tag.result == 'success' && needs.check-secrets.outputs.has_certs == 'true'
     runs-on: macos-26
     timeout-minutes: 60
     steps:
@@ -153,7 +170,7 @@ jobs:
       - name: zip the binary
         run: |
           cd ./.build/arm64-apple-macosx/release/
-          zip pacman.zip pacmand
+          zip pacmand.zip pacmand
 
       - name: Submit for notarization
         run: |
@@ -203,12 +220,12 @@ jobs:
           id: ${{ needs.tag.outputs.releaseId}}
 
   brew-tap-update:
-    needs: [tag, release]
+    needs: [tag, release, check-secrets]
     name: Homebrew Tap
     runs-on: ubuntu-24.04
     # requires the kaovilai/homebrew-tap repository (with an
     # update-formula-next.yml workflow) and PACMAN_BOT_TOKEN; skipped until then
-    if: needs.release.result == 'success' && secrets.PACMAN_BOT_TOKEN != ''
+    if: needs.release.result == 'success' && needs.check-secrets.outputs.has_bot_token == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

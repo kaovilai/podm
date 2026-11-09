@@ -14,8 +14,11 @@ struct LibpodContainerDeleteRoute: RouteCollection {
             // with an array of per-container reports.
             _ = try await ContainerDeleteRoute.handler(client: client)(req)
             let report = LibpodRmReport(Id: req.parameters.get("id") ?? "", Err: nil)
+            var headers = HTTPHeaders()
+            headers.replaceOrAdd(name: .contentType, value: "application/json")
             return Response(
                 status: .ok,
+                headers: headers,
                 body: .init(data: try JSONEncoder().encode([report]))
             )
         }

@@ -33,8 +33,11 @@ enum PacmanPaths {
     }
 
     static var launchAgentURL: URL {
-        launchAgentDir.appendingPathComponent("io.github.pacman.daemon.plist")
+        launchAgentDir.appendingPathComponent(Self.launchdLabel + ".plist")
     }
+
+    /// launchd label of the daemon agent.
+    static let launchdLabel = "io.github.pacman.daemon"
 
     static var socketPath: String {
         socketURL.path
@@ -45,8 +48,16 @@ enum PacmanPaths {
         "unix://" + socketPath
     }
 
-    /// launchd domain/target for the current GUI login session, e.g. "gui/501".
-    static var launchdTarget: String {
+    /// launchd domain for the current GUI login session, e.g. "gui/501" — what
+    /// `launchctl bootstrap <domain> <plist>` wants.
+    static var launchdDomain: String {
         "gui/\(getuid())"
+    }
+
+    /// Fully-qualified launchd service target, e.g.
+    /// "gui/501/io.github.pacman.daemon" — what `launchctl kickstart <target>`
+    /// and `launchctl bootout <target>` want (the bare domain is invalid there).
+    static var launchdServiceTarget: String {
+        launchdDomain + "/" + launchdLabel
     }
 }
