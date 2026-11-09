@@ -50,7 +50,13 @@ struct ContainerRestartPolicyPostStartTests {
             dnsServer.listEntries()[nativeId] == newIP
         }
         #expect(refreshed, "DNS entry must be refreshed to the new IP after an automatic restart")
-        #expect(await ContainerInfoCache.shared.get(id: nativeId)?.ip == newIP, "ContainerInfoCache must also reflect the new IP")
+        // The cache write (armRestartObserver) happens after DNS registration with several await
+        // points between them, so the DNS poll can succeed while the cache write is still in
+        // flight — poll for it too instead of asserting immediately (de-flake on slow runners).
+        let cacheRefreshed = try await pollUntil(timeoutSeconds: 3) {
+            await ContainerInfoCache.shared.get(id: nativeId)?.ip == newIP
+        }
+        #expect(cacheRefreshed, "ContainerInfoCache must also reflect the new IP")
 
         await ContainerRestartState.shared.reset(id: nativeId)
         await ContainerExitCodeStore.shared.remove(id: nativeId)
