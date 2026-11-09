@@ -345,11 +345,15 @@ enum ContainerTopUtility {
         guard let outcome else {
             // Timed out: kill ps so Apple closes the write ends (letting the
             // collector's drain tasks finish and close the read fds), then
-            // report an empty table rather than hanging the request. If even
-            // the kill doesn't unblock a dead XPC wait, the collector leaks —
-            // the request is already home.
+            // fail the request — a stalled ps must not masquerade as "no
+            // processes" in a 200 empty table. If even the kill doesn't
+            // unblock a dead XPC wait, the collector leaks — the request is
+            // already home.
             try? await process.kill(SIGTERM)
-            return ""
+            throw Abort(
+                .internalServerError,
+                reason: "ps in container \(container.id) did not finish within \(execTimeoutNs / 1_000_000_000)s"
+            )
         }
         // A collection failure (e.g. a pipe read error) is not "no processes"
         // either — surface it instead of silently returning an empty table.
