@@ -158,9 +158,13 @@ actor HealthCheckManager {
             // ...but the PERSISTED transition respects Retries: one manual
             // failure must not mark a tracked container unhealthy before its
             // retry threshold (or during its start period, which the loop
-            // owns). A manual success always heals.
+            // owns). A manual success always heals. Below the threshold the
+            // CURRENT status is preserved — demoting to "starting" here would
+            // hand the next background failure the startup-forgiveness branch
+            // and delay the unhealthy transition (same parity fix as the
+            // loop's handleProbeResult path).
             let maxRetries = config.Retries ?? Self.defaultRetries
-            let persistedStatus = exitCode == 0 ? "healthy" : (streak >= maxRetries ? "unhealthy" : "starting")
+            let persistedStatus = exitCode == 0 ? "healthy" : (streak >= maxRetries ? "unhealthy" : (statuses[containerId]?.Status ?? "starting"))
             updateStatus(
                 id: containerId,
                 health: ContainerHealth(Status: persistedStatus, FailingStreak: streak, Log: []),

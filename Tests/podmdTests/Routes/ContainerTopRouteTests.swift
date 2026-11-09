@@ -206,23 +206,24 @@ struct ContainerTopRouteTests {
 
     @Test("libpodArgv defaults to empty (route applies -ef)")
     func libpodArgvDefaults() {
-        #expect(ContainerTopUtility.libpodArgv(psArgs: []) == ([], false))
-        #expect(ContainerTopUtility.libpodArgv(psArgs: [""]) == ([], false))
+        #expect(ContainerTopUtility.libpodArgv(psArgs: []) == ContainerTopUtility.LibpodTopArgs(argv: [], appendedCommandColumn: false))
+        #expect(ContainerTopUtility.libpodArgv(psArgs: [""]) == ContainerTopUtility.LibpodTopArgs(argv: [], appendedCommandColumn: false))
     }
 
     @Test("libpodArgv maps descriptors — repeated, comma-joined, or via descriptors — to ps -eo")
     func libpodArgvDescriptors() {
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["user", "pid"]) == (["-eo", "user,pid,args"], true))
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["user,pid,command"]) == (["-eo", "user,pid,args"], false))
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["user", "pid,command"]) == (["-eo", "user,pid,args"], false))
-        #expect(ContainerTopUtility.libpodArgv(psArgs: [" user , pid "]) == (["-eo", "user,pid,args"], true))
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["user", "pid"]) == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "user,pid,args"], appendedCommandColumn: true))
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["user,pid,command"]) == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "user,pid,args"], appendedCommandColumn: false))
+        #expect(
+            ContainerTopUtility.libpodArgv(psArgs: ["user", "pid,command"]) == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "user,pid,args"], appendedCommandColumn: false))
+        #expect(ContainerTopUtility.libpodArgv(psArgs: [" user , pid "]) == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "user,pid,args"], appendedCommandColumn: true))
     }
 
     @Test("libpodArgv aliases procps-only descriptor spellings to busybox-compatible ones")
     func libpodArgvAliases() {
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["command"]) == (["-eo", "args"], false))
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["cmd"]) == (["-eo", "args"], false))
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["pid,elapsed"]) == (["-eo", "pid,etime,args"], true))
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["command"]) == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "args"], appendedCommandColumn: false))
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["cmd"]) == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "args"], appendedCommandColumn: false))
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["pid,elapsed"]) == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "pid,etime,args"], appendedCommandColumn: true))
     }
 
     @Test("libpodArgv recognizes psgo/podman-documented descriptors beyond the core set")
@@ -231,24 +232,24 @@ struct ContainerTopRouteTests {
         // ps arguments made valid requests fail (`ps pid vsz`).
         #expect(
             ContainerTopUtility.libpodArgv(psArgs: ["pid", "vsz"])
-                == (["-eo", "pid,vsz,args"], true))
+                == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "pid,vsz,args"], appendedCommandColumn: true))
         #expect(
             ContainerTopUtility.libpodArgv(psArgs: ["nice", "pcpu", "pgid", "rgroup", "ruser", "rss", "stat"])
-                == (["-eo", "nice,pcpu,pgid,rgroup,ruser,rss,stat,args"], true))
+                == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "nice,pcpu,pgid,rgroup,ruser,rss,stat,args"], appendedCommandColumn: true))
     }
 
     @Test("libpodArgv passes flag-style values through unchanged, raw mode decided before normalization")
     func libpodArgvFlags() {
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["-ef"]) == (["-ef"], false))
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["aux", "-f"]) == (["aux", "-f"], false))
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["-ef"]) == ContainerTopUtility.LibpodTopArgs(argv: ["-ef"], appendedCommandColumn: false))
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["aux", "-f"]) == ContainerTopUtility.LibpodTopArgs(argv: ["aux", "-f"], appendedCommandColumn: false))
         // A single flag-carrying value is shlex-split with commas preserved —
         // comma-splitting first would destroy the "-o pid,args" option value
         // (podman's ErrUnknownDescriptor fallback, google/shlex, #12452).
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["-o pid,args"]) == (["-o", "pid,args"], false))
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["-o pid,args"]) == ContainerTopUtility.LibpodTopArgs(argv: ["-o", "pid,args"], appendedCommandColumn: false))
         // Unknown descriptors are raw ps arguments, not "-o" columns:
         // "aux" would otherwise become "ps -eo aux", which ps rejects.
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["aux"]) == (["aux"], false))
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["-eo", "pid,args"]) == (["-eo", "pid,args"], false))
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["aux"]) == ContainerTopUtility.LibpodTopArgs(argv: ["aux"], appendedCommandColumn: false))
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["-eo", "pid,args"]) == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "pid,args"], appendedCommandColumn: false))
     }
 
     @Test("libpodArgv shlex-splits quoted and escaped single values like shell words")
@@ -256,9 +257,9 @@ struct ContainerTopRouteTests {
         // Quotes are stripped and escapes honored (podman uses google/shlex);
         // a whitespace-only split would pass 'pid,args' with literal quotes
         // and ps would reject the format.
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["-eo 'pid,args'"]) == (["-eo", "pid,args"], false))
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["-eo \"pid args\""]) == (["-eo", "pid args"], false))
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["-eo p\\;id"]) == (["-eo", "p;id"], false))
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["-eo 'pid,args'"]) == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "pid,args"], appendedCommandColumn: false))
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["-eo \"pid args\""]) == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "pid args"], appendedCommandColumn: false))
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["-eo p\\;id"]) == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "p;id"], appendedCommandColumn: false))
     }
 
     @Test("filterPsSelfRow drops the ps process's own row, keeps everything else")
@@ -395,6 +396,73 @@ struct ContainerTopRouteTests {
         }
         let calls = await fake.calls
         #expect(calls.map(\.argv) == [["-eo", "user,pid,args"], ["-eo", "user,pid,args"]])
+    }
+
+    @Test("libpodArgv renders a nonfinal command column last and reports the reorder permutation")
+    func libpodArgvNonFinalCommandColumn() {
+        // parse() merges overhanging command words into the LAST column, so
+        // the command must be rendered last internally; the requested order
+        // is restored after parsing via the permutation.
+        #expect(
+            ContainerTopUtility.libpodArgv(psArgs: ["command", "pid"])
+                == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "pid,args"], reorder: [1, 0]))
+        #expect(
+            ContainerTopUtility.libpodArgv(psArgs: ["user", "command", "pid"])
+                == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "user,pid,args"], reorder: [0, 2, 1]))
+    }
+
+    @Test("libpodArgv treats comm as insufficient for self-row filtering and appends args anyway")
+    func libpodArgvCommOnlyAppends() {
+        // comm is only the executable name — the self-row filter needs the
+        // full command line, so args is appended (and stripped after parse).
+        #expect(
+            ContainerTopUtility.libpodArgv(psArgs: ["pid", "comm"])
+                == ContainerTopUtility.LibpodTopArgs(argv: ["-eo", "pid,comm,args"], appendedCommandColumn: true))
+    }
+
+    @Test("podman top with a nonfinal command descriptor restores the requested column order")
+    func libpodTopNonFinalCommandColumn() async throws {
+        // ps output as "ps -eo pid,args" renders it: PID first, COMMAND last.
+        let fake = FakePs(
+            output: """
+                PID COMMAND
+                1 sleep 1000
+                """)
+        let snapshot = try runningSnapshot(id: "c1")
+        try await withTopApp(LibpodContainerTopRoute(client: TopClientMock(containers: [snapshot]), runPs: makeRunner(fake))) { app in
+            try await app.testing().test(.GET, "/v1.51/libpod/containers/c1/top?ps_args=command&ps_args=pid") { res async throws in
+                #expect(res.status == .ok)
+                let report = try res.content.decode(TopReport.self)
+                // The requested COMMAND-then-PID order, with the command's
+                // arguments kept together in the COMMAND column.
+                #expect(report.Titles == ["COMMAND", "PID"])
+                #expect(report.Processes == [["sleep 1000", "1"]])
+            }
+        }
+        let calls = await fake.calls
+        #expect(calls.map(\.argv) == [["-eo", "pid,args"]])
+    }
+
+    @Test("podman top with a comm-only request filters the ps self-row via the appended args column")
+    func libpodTopCommOnlyFiltersSelfRow() async throws {
+        // "ps -eo pid,comm,args" output: the self row's args column carries
+        // the full command line so the filter drops it; the comm column keeps
+        // just the executable name; the appended args column is stripped.
+        let fake = FakePs(
+            output: """
+                PID COMMAND COMMAND
+                1 sleep sleep 1000
+                2 ps ps -eo pid,comm,args
+                """)
+        let snapshot = try runningSnapshot(id: "c1")
+        try await withTopApp(LibpodContainerTopRoute(client: TopClientMock(containers: [snapshot]), runPs: makeRunner(fake))) { app in
+            try await app.testing().test(.GET, "/v1.51/libpod/containers/c1/top?ps_args=pid&ps_args=comm") { res async throws in
+                #expect(res.status == .ok)
+                let report = try res.content.decode(TopReport.self)
+                #expect(report.Titles == ["PID", "COMMAND"])
+                #expect(report.Processes == [["1", "sleep"]])
+            }
+        }
     }
 
     @Test("podman top without a command column appends args for self-row filtering, then strips it")

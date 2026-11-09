@@ -565,6 +565,40 @@ struct HealthCheckManagerStartIntervalTests {
         await mgr.stop(containerId: "grace-closed")
     }
 
+    @Test("a manual probe failure below Retries preserves the current status (no grace reopening)")
+    func manualProbeFailurePreservesStatus() async throws {
+        // Success (healthy), then a MANUAL `podman healthcheck run` failure
+        // below Retries: the persisted status must stay healthy. Demoting it
+        // to "starting" would hand the next background failure the
+        // startup-forgiveness branch and delay the unhealthy transition.
+        let script = ProbeScript(initialResult: 0)
+        let mgr = HealthCheckManager(
+            probe: { _, _, _ in
+                await script.probe()
+            },
+            intervalFloorNs: 200_000_000
+        )
+        let cfg = HealthcheckConfig(
+            Test: ["CMD", "false"],
+            Interval: 1_000_000,
+            Timeout: 1_000_000_000,
+            Retries: 3,
+            StartPeriod: 5_000_000_000,
+            StartInterval: 1_000_000
+        )
+        await mgr.start(containerId: "manual-fail", config: cfg)
+        try await Self.waitForStatus("healthy", on: mgr, id: "manual-fail")
+        // Flip to failing and run one MANUAL probe.
+        await script.startFailing()
+        let manual = await mgr.runProbeOnce(containerId: "manual-fail", config: cfg)
+        #expect(manual?.Status == "unhealthy", "the manual probe's own result reports the failure")
+        // The PERSISTED status below the retry threshold stays healthy.
+        let persisted = await mgr.currentHealth(for: "manual-fail")
+        #expect(persisted?.Status == "healthy", "a manual failure below Retries must not demote the persisted status to starting")
+        #expect(persisted?.FailingStreak == 1)
+        await mgr.stop(containerId: "manual-fail")
+    }
+
     @Test("the first startup probe waits one StartInterval (moby arms its first timer with getInterval)")
     func firstStartupProbeWaitsStartInterval() async throws {
         let timeline = ProbeTimeline()

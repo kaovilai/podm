@@ -51,6 +51,7 @@ struct LibpodContainerTopRoute: RouteCollection {
                 containerId: containerId,
                 psArgs: args.argv,
                 appendedCommandColumn: args.appendedCommandColumn,
+                reorder: args.reorder,
                 runPs: runPs
             )
         }

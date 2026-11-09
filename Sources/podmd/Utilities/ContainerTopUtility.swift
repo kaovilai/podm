@@ -104,6 +104,26 @@ enum ContainerTopUtility {
         return psArgs.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
     }
 
+    /// libpod dialect ps arguments plus the post-parse fixups `top()` must
+    /// apply. `appendedCommandColumn`: an `args` column was appended purely
+    /// so the self-row filter has a command line — strip it from the report.
+    /// `reorder`: the command column was rendered LAST internally (parse
+    /// merges overhanging words into the last column, which is only correct
+    /// when that column is the command) — reorder parsed columns back to the
+    /// requested order through this permutation (requested position →
+    /// internal index).
+    struct LibpodTopArgs: Equatable, Sendable {
+        let argv: [String]
+        let appendedCommandColumn: Bool
+        let reorder: [Int]?
+
+        init(argv: [String], appendedCommandColumn: Bool = false, reorder: [Int]? = nil) {
+            self.argv = argv
+            self.appendedCommandColumn = appendedCommandColumn
+            self.reorder = reorder
+        }
+    }
+
     /// libpod dialect: podman's remote CLI sends ps(1) AIX format descriptors
     /// — one per repeated `ps_args` query value (`ps_args=user&ps_args=pid`)
     /// or comma-joined in one (`ps_args=user,pid`); the newer `descriptors`
@@ -120,19 +140,21 @@ enum ContainerTopUtility {
     /// user's tty-attached processes (in a container, usually nothing) —
     /// busybox ps ignores it harmlessly (it never filters).
     ///
-    /// When the requested descriptors contain no command-ish column, `args`
-    /// is appended so the self-row filter has a command line to match on;
-    /// `top()` strips the extra column from the parsed report. The return
-    /// value carries that flag. `[]` means "no args given" — the caller then
-    /// applies `defaultPsArgs`.
-    static func libpodArgv(psArgs: [String]) -> (argv: [String], appendedCommandColumn: Bool) {
+    /// Column fixups (see LibpodTopArgs): only `args` carries the full
+    /// command line the self-row filter matches on — `comm` is just the
+    /// executable name, so a `comm`-only request still gets `args` appended.
+    /// A command column that is not LAST is rendered last internally and
+    /// restored to the requested position after parsing, because parse()
+    /// merges overhanging command words into the last column.
+    /// `[]` means "no args given" — the caller then applies `defaultPsArgs`.
+    static func libpodArgv(psArgs: [String]) -> LibpodTopArgs {
         let trimmed = psArgs.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        guard !trimmed.isEmpty else { return ([], false) }
+        guard !trimmed.isEmpty else { return LibpodTopArgs(argv: []) }
         // Raw ps-argument mode is decided on the ORIGINAL values, before any
         // comma-splitting or aliasing: a leading dash is always a flag, and
         // comma-splitting "-o pid,args" would destroy the option value.
         if trimmed.contains(where: { $0.hasPrefix("-") }) {
-            return (shlexSplitSingle(trimmed), false)
+            return LibpodTopArgs(argv: shlexSplitSingle(trimmed))
         }
         let tokens =
             trimmed
@@ -141,15 +163,39 @@ enum ContainerTopUtility {
             .filter { !$0.isEmpty }
         if tokens.allSatisfy({ isKnownDescriptor($0) }) {
             let mapped = tokens.map { descriptorAliases[$0] ?? $0 }
-            let hasCommandColumn = mapped.contains(where: { $0 == "args" || $0 == "comm" })
-            if hasCommandColumn {
-                return (["-eo", mapped.joined(separator: ",")], false)
+            guard let commandIndex = mapped.firstIndex(of: "args") else {
+                // No command column at all: append args so the self-row filter
+                // has a command line to match on; top() strips it after.
+                return LibpodTopArgs(
+                    argv: ["-eo", (mapped + ["args"]).joined(separator: ",")],
+                    appendedCommandColumn: true)
             }
-            return (["-eo", (mapped + ["args"]).joined(separator: ",")], true)
+            if commandIndex == mapped.count - 1 {
+                // Command already last — ps output merges cleanly as-is.
+                return LibpodTopArgs(argv: ["-eo", mapped.joined(separator: ",")])
+            }
+            // Command not last: render it last internally, then restore the
+            // requested column order after parsing.
+            var internalColumns = mapped
+            internalColumns.remove(at: commandIndex)
+            internalColumns.append("args")
+            var permutation: [Int] = []
+            var nonCommandPosition = 0
+            for column in mapped {
+                if column == "args" {
+                    permutation.append(internalColumns.count - 1)
+                } else {
+                    permutation.append(nonCommandPosition)
+                    nonCommandPosition += 1
+                }
+            }
+            return LibpodTopArgs(
+                argv: ["-eo", internalColumns.joined(separator: ",")],
+                reorder: permutation)
         }
         // Unknown descriptor → ps(1) arguments (podman's ErrUnknownDescriptor
         // fallback): "aux" and friends reach the container's ps verbatim.
-        return (shlexSplitSingle(trimmed), false)
+        return LibpodTopArgs(argv: shlexSplitSingle(trimmed))
     }
 
     /// podman (google/shlex, containers/podman#12452) splits a single
@@ -378,13 +424,16 @@ enum ContainerTopUtility {
     /// Resolves the container, checks it is running, runs ps inside it and
     /// parses the output. Shared by the Docker and libpod top routes.
     /// `appendedCommandColumn` strips the trailing `args` column that
-    /// `libpodArgv` adds when the requested descriptors have no command-ish
+    /// `libpodArgv` adds when the requested descriptors have no command
     /// column — it existed only so the self-row filter could match.
+    /// `reorder` restores the requested column order when the command column
+    /// had to be rendered last internally.
     static func top(
         client: ClientContainerProtocol,
         containerId: String,
         psArgs: [String],
         appendedCommandColumn: Bool = false,
+        reorder: [Int]? = nil,
         runPs: PsRunner = execPs
     ) async throws -> TopReport {
         let container: ContainerSnapshot
@@ -405,11 +454,25 @@ enum ContainerTopUtility {
 
         let arguments = psArgs.isEmpty ? defaultPsArgs : psArgs
         let output = try await runPs(container, arguments)
-        let report = parse(output)
-        guard appendedCommandColumn else { return report }
-        return TopReport(
-            Titles: Array(report.Titles.dropLast()),
-            Processes: report.Processes.map { Array($0.dropLast()) }
-        )
+        var report = parse(output)
+        if appendedCommandColumn {
+            report = TopReport(
+                Titles: Array(report.Titles.dropLast()),
+                Processes: report.Processes.map { Array($0.dropLast()) }
+            )
+        }
+        if let reorder {
+            // Requested position → internal index; rows can be shorter than
+            // the header (ps omits trailing empty columns), hence the bounds
+            // check instead of a force-unwrap.
+            func column(_ row: [String], at index: Int) -> String {
+                row.indices.contains(index) ? row[index] : ""
+            }
+            report = TopReport(
+                Titles: reorder.map { column(report.Titles, at: $0) },
+                Processes: report.Processes.map { row in reorder.map { column(row, at: $0) } }
+            )
+        }
+        return report
     }
 }
