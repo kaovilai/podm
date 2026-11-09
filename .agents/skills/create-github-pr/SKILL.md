@@ -224,7 +224,7 @@ The command outputs the PR URL and number.
 **Display the URL using markdown link syntax** so it's easily clickable:
 
 ```
-Created PR [#123](https://github.com/socktainer/socktainer/pull/123)
+Created PR [#123](https://github.com/kaovilai/pacman/pull/123)
 ```
 
 ### Monitor CI (Optional)
