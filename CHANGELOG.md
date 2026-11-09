@@ -40,5 +40,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`make installer[-signed|-notarized]`).
 - Documentation set: README rewrite, `docs/architecture.md`,
   `docs/no-machine.md`, `docs/multi-arch.md`, `CONTRIBUTING.md`.
+- Dockerfile `HEALTHCHECK` propagation: Apple's `ContainerizationOCI`
+  `ImageConfig` does not model the OCI image config's `healthcheck` field, so
+  a HEALTHCHECK baked into an image at build time was dropped — image inspect
+  hardcoded `Healthcheck: null` and container create only persisted a
+  healthcheck sent in the request body (Compose-style clients), leaving
+  `podman healthcheck run` and the background probe loop inert for plain
+  `docker run`. The raw config blob is now read from the daemon's content
+  store (addressed by the image manifest's config descriptor digest) and:
+  - surfaced in `GET /images/{name}/json` (`Config.Healthcheck`);
+  - used as the container-create fallback with Docker's precedence — a
+    request healthcheck always wins (including the `{"Test":["NONE"]}`
+    disable sentinel, which suppresses the image's), the image's applies
+    only when the request carries none.
 
 [Unreleased]: https://github.com/kaovilai/pacman/compare/6264b64...HEAD

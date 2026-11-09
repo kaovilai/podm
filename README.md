@@ -151,6 +151,7 @@ docker context use pacman
 |---|---|---|
 | `PACMAN_IDLE_EXIT_SECS` | launchd default | Seconds of zero connections **and** zero running containers before `pacmand` exits (the launchd LaunchAgent restarts it on demand) |
 | `PACMAN_DNS_PORT` | `2054` | Host-side port of pacman's embedded DNS resolver |
+| `PACMAN_DNS_UPSTREAM` | `1.1.1.1:53` | Upstream resolver for names the embedded DNS server cannot answer locally: IPv4 literal with optional `:port` (default `1.1.1.1:53`); `--dns-upstream` flag wins, invalid env warns and keeps the default |
 | `PACMAN_CLEAN_VOLUMES` | enabled | Set `false` to opt out of removing `/lost+found` from named-volume EXT4 images (it breaks Postgres `initdb`; per-volume opt-out label: `pacman.clean-volumes=false`) |
 | `CONTAINER_HOST` / `DOCKER_HOST` | set by shim | Point the real CLIs at `unix://$HOME/.pacman/container.sock` — normally you never set these yourself |
 

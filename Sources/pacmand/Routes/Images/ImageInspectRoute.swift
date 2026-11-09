@@ -257,13 +257,27 @@ extension ImageInspectRoute {
 
             if let selectedVariant {
                 let selectedManifest = try? await image.manifest(for: selectedVariant.platform)
+                // Apple's typed OCI image config drops `config.Healthcheck`, so a
+                // Dockerfile HEALTHCHECK is invisible through
+                // `selectedVariant.config`. Read it from the raw config blob the
+                // selected manifest's config descriptor points at instead.
+                let imageHealthcheck: HealthcheckConfig?
+                if let configDigest = selectedManifest?.config.digest {
+                    imageHealthcheck = await ImageHealthcheckExtractor.healthcheck(
+                        configDigest: configDigest,
+                        appSupportURL: appleContainerAppSupportUrl,
+                        logger: req.logger
+                    )
+                } else {
+                    imageHealthcheck = nil
+                }
                 let imageConfig: ImageConfig? = selectedVariant.config.config.map { ociConfig in
                     ImageConfig(
                         User: ociConfig.user,
                         ExposedPorts: nil,
                         Env: ociConfig.env,
                         Cmd: ociConfig.cmd,
-                        Healthcheck: nil,
+                        Healthcheck: HealthConfig(imageHealthcheck),
                         ArgsEscaped: nil,
                         Volumes: nil,
                         WorkingDir: ociConfig.workingDir,
