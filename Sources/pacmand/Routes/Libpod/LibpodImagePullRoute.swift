@@ -49,7 +49,7 @@ struct LibpodImagePullRoute: RouteCollection {
                 return buffer
             }
 
-            response.body = .init(stream: { writer in
+            response.body = .idleTracked(stream: { writer in
                 Task {
                     do {
                         for try await progress in progressStream {

@@ -49,8 +49,9 @@ struct ContainerWaitRoute: RouteCollection {
             headers.add(name: "Content-Type", value: "application/json")
 
             // Flush the response head before the body so docker run can issue /start
-            // without waiting for the container to exit first.
-            let body = Response.Body(asyncStream: { writer in
+            // without waiting for the container to exit first. idleTracked keeps
+            // the idle-exit monitor aware of the open wait stream.
+            let body = Response.Body.idleTracked(asyncStream: { writer in
                 _ = try? await writer.write(.buffer(sharedAllocator.buffer(capacity: 0)))
 
                 let result: RESTContainerWait

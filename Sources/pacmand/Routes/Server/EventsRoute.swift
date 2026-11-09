@@ -22,7 +22,9 @@ extension EventsRoute {
             let response = Response(status: .ok)
             response.headers.add(name: .contentType, value: "application/json")
 
-            response.body = .init(asyncStream: { writer in
+            // idleTracked: keep the idle-exit monitor aware that this
+            // long-lived events stream is an active client connection.
+            response.body = .idleTracked(asyncStream: { writer in
                 for await event in stream {
                     if let json = try? JSONEncoder().encode(event) {
                         var buffer = req.application.allocator.buffer(capacity: json.count + 1)

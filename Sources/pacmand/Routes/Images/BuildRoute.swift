@@ -354,7 +354,7 @@ extension BuildRoute {
             let labels = BuildRoute.parseBuildQueryParam(query.labels)
 
             // Create streaming response for build output
-            let body = Response.Body { writer in
+            let body = Response.Body.idleTracked(stream: { writer in
                 Task.detached {
                     do {
                         try await BuildRoute.performBuild(
@@ -422,7 +422,7 @@ extension BuildRoute {
                         _ = writer.write(.end)
                     }
                 }
-            }
+            })
 
             return Response(
                 status: .ok,

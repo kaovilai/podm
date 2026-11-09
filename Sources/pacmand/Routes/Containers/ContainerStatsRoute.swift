@@ -24,7 +24,7 @@ struct ContainerStatsRoute: RouteCollection {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json")
 
-        let body = Response.Body { writer in
+        let body = Response.Body.idleTracked(stream: { writer in
             Task.detached {
                 defer { _ = writer.write(.end) }
 
@@ -70,7 +70,7 @@ struct ContainerStatsRoute: RouteCollection {
                     // Container gone or stats unavailable — close stream cleanly
                 }
             }
-        }
+        })
 
         return Response(status: .ok, headers: headers, body: body)
     }
