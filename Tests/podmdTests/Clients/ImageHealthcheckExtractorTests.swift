@@ -42,7 +42,7 @@ struct ImageHealthcheckExtractorTests {
     func validHealthcheckIsDecoded() async throws {
         let appSupport = try makeContentStore(
             blob:
-                #"{"architecture":"arm64","os":"linux","config":{"Env":["A=1"],"Healthcheck":{"Test":["CMD-SHELL","curl -f http://localhost/ || exit 1"],"Interval":30000000000,"Timeout":5000000000,"StartPeriod":10000000000,"Retries":3}}}"#,
+                #"{"architecture":"arm64","os":"linux","config":{"Env":["A=1"],"Healthcheck":{"Test":["CMD-SHELL","curl -f http://localhost/ || exit 1"],"Interval":30000000000,"Timeout":5000000000,"StartPeriod":10000000000,"StartInterval":5000000000,"Retries":3}}}"#,
             digestHex: String(repeating: "a1", count: 32)
         )
 
@@ -56,7 +56,55 @@ struct ImageHealthcheckExtractorTests {
         #expect(healthcheck?.Interval == 30_000_000_000)
         #expect(healthcheck?.Timeout == 5_000_000_000)
         #expect(healthcheck?.StartPeriod == 10_000_000_000)
+        #expect(healthcheck?.StartInterval == 5_000_000_000)
         #expect(healthcheck?.Retries == 3)
+    }
+
+    @Test("StartInterval is optional — a healthcheck without it decodes with nil")
+    func absentStartIntervalYieldsNil() async throws {
+        let appSupport = try makeContentStore(
+            blob:
+                #"{"config":{"Healthcheck":{"Test":["CMD","true"],"Interval":1000000000,"StartPeriod":3000000000}}}"#,
+            digestHex: String(repeating: "9b", count: 32)
+        )
+
+        let healthcheck = await ImageHealthcheckExtractor.healthcheck(
+            configDigest: "sha256:" + String(repeating: "9b", count: 32),
+            appSupportURL: appSupport,
+            logger: logger
+        )
+
+        #expect(healthcheck?.Test == ["CMD", "true"])
+        #expect(healthcheck?.StartInterval == nil)
+    }
+
+    @Test("zero and negative StartInterval pass through raw, like the other time fields")
+    func zeroAndNegativeStartIntervalPassThrough() async throws {
+        // Extraction mirrors the image config verbatim (Docker's image inspect
+        // echoes the config blob as-is); treating 0/negative as "unset" is the
+        // create route's job (`resolveHealthcheck`), exactly as for Interval
+        // and friends.
+        let zeroSupport = try makeContentStore(
+            blob: #"{"config":{"Healthcheck":{"Test":["CMD","true"],"StartInterval":0}}}"#,
+            digestHex: String(repeating: "9c", count: 32)
+        )
+        let zero = await ImageHealthcheckExtractor.healthcheck(
+            configDigest: "sha256:" + String(repeating: "9c", count: 32),
+            appSupportURL: zeroSupport,
+            logger: logger
+        )
+        #expect(zero?.StartInterval == 0)
+
+        let negativeSupport = try makeContentStore(
+            blob: #"{"config":{"Healthcheck":{"Test":["CMD","true"],"StartInterval":-5000000000}}}"#,
+            digestHex: String(repeating: "9d", count: 32)
+        )
+        let negative = await ImageHealthcheckExtractor.healthcheck(
+            configDigest: "sha256:" + String(repeating: "9d", count: 32),
+            appSupportURL: negativeSupport,
+            logger: logger
+        )
+        #expect(negative?.StartInterval == -5_000_000_000)
     }
 
     @Test("an image config without a healthcheck yields nil")
@@ -254,7 +302,8 @@ struct HealthConfigMappingTests {
             Interval: 30_000_000_000,
             Timeout: 5_000_000_000,
             Retries: 3,
-            StartPeriod: 10_000_000_000
+            StartPeriod: 10_000_000_000,
+            StartInterval: 5_000_000_000
         )
 
         let health = HealthConfig(config)
@@ -264,7 +313,7 @@ struct HealthConfigMappingTests {
         #expect(health?.Timeout == 5_000_000_000)
         #expect(health?.Retries == 3)
         #expect(health?.StartPeriod == 10_000_000_000)
-        #expect(health?.StartInterval == nil)
+        #expect(health?.StartInterval == 5_000_000_000)
     }
 
     @Test("a NONE sentinel maps through unchanged")

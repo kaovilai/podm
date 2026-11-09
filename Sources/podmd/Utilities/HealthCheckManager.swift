@@ -227,7 +227,28 @@ actor HealthCheckManager {
         let timeoutNs = max(configTimeoutNs, Self.minimumTimeoutNs)
         let maxRetries = config.Retries ?? Self.defaultRetries
 
-        if startPeriodNs > 0 {
+        // Docker 25+ `StartInterval` (`start_interval`): while the start period
+        // is open, probes fire at this cadence and their failures do not count
+        // toward `Retries` (moby daemon/health.go: `monitor`'s `getInterval`
+        // picks the start interval for a still-starting container inside the
+        // start period, and `handleProbeResult` forgives such failures). It
+        // only applies when BOTH a start interval and a start period are set —
+        // moby defaults an absent StartPeriod to 0, which makes "within the
+        // start period" immediately false, so a lone StartInterval is inert.
+        // An absent StartInterval keeps podm's long-standing behavior of not
+        // probing during the start period (moby would probe at its built-in
+        // 5s default — a deliberate divergence, kept to avoid changing the
+        // cadence of every existing StartPeriod-only healthcheck).
+        let configStartIntervalNs = UInt64(max(config.StartInterval ?? 0, 0))
+        let probesDuringStartPeriod = configStartIntervalNs > 0 && startPeriodNs > 0
+        let startIntervalNs = max(configStartIntervalNs, intervalFloorNs)
+        // Monotonic start-period deadline measured from loop start (≈ the
+        // container's start, matching moby's comparison against StartedAt).
+        let startPeriodEndNs = DispatchTime.now().uptimeNanoseconds + startPeriodNs
+
+        // Without startup probing the start period simply delays the first
+        // probe (podm's pre-Docker-25 behavior for StartPeriod-only configs).
+        if startPeriodNs > 0 && !probesDuringStartPeriod {
             try? await Task.sleep(nanoseconds: startPeriodNs)
         }
 
@@ -236,6 +257,7 @@ actor HealthCheckManager {
         while !Task.isCancelled {
             guard isActive(id: containerId) else { return }
 
+            let probeStartNs = DispatchTime.now().uptimeNanoseconds
             let start = Date()
             let exitCode = await runCheck(containerId: containerId, config: config, timeoutNs: timeoutNs)
             let end = Date()
@@ -255,14 +277,45 @@ actor HealthCheckManager {
                 failingStreaks[containerId] = 0
                 updateStatus(id: containerId, health: ContainerHealth(Status: "healthy", FailingStreak: 0, Log: []), logEntry: entry)
             } else {
-                let failingStreak = (failingStreaks[containerId] ?? 0) + 1
-                failingStreaks[containerId] = failingStreak
-                let status = failingStreak >= maxRetries ? "unhealthy" : "starting"
-                updateStatus(id: containerId, health: ContainerHealth(Status: status, FailingStreak: failingStreak, Log: []), logEntry: entry)
-                log.debug("[healthcheck] \(containerId) → \(status) (streak=\(failingStreak), exit=\(exitCode))")
+                // moby handleProbeResult: a failure of a still-starting
+                // container whose probe began inside the start period is
+                // forgiven — the streak is not incremented, so startup
+                // flakiness never eats into the Retries budget.
+                let withinStartPeriod = probesDuringStartPeriod && probeStartNs < startPeriodEndNs
+                let stillStarting = statuses[containerId]?.Status == "starting"
+                if withinStartPeriod && stillStarting {
+                    updateStatus(
+                        id: containerId,
+                        health: ContainerHealth(
+                            Status: "starting",
+                            FailingStreak: failingStreaks[containerId] ?? 0,
+                            Log: []
+                        ),
+                        logEntry: entry
+                    )
+                    log.debug("[healthcheck] \(containerId) startup failure forgiven (start period, exit=\(exitCode))")
+                } else {
+                    let failingStreak = (failingStreaks[containerId] ?? 0) + 1
+                    failingStreaks[containerId] = failingStreak
+                    let status = failingStreak >= maxRetries ? "unhealthy" : "starting"
+                    updateStatus(id: containerId, health: ContainerHealth(Status: status, FailingStreak: failingStreak, Log: []), logEntry: entry)
+                    log.debug("[healthcheck] \(containerId) → \(status) (streak=\(failingStreak), exit=\(exitCode))")
+                }
             }
 
-            try? await Task.sleep(nanoseconds: intervalNs)
+            // Delay before the next probe (moby getInterval): StartInterval
+            // cadence while the start period is still open and the container
+            // has not turned healthy yet; regular Interval otherwise.
+            let nextDelayNs: UInt64 =
+                if probesDuringStartPeriod,
+                    DispatchTime.now().uptimeNanoseconds < startPeriodEndNs,
+                    statuses[containerId]?.Status == "starting"
+                {
+                    startIntervalNs
+                } else {
+                    intervalNs
+                }
+            try? await Task.sleep(nanoseconds: nextDelayNs)
         }
     }
 
