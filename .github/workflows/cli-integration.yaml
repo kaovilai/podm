@@ -110,10 +110,10 @@ jobs:
           # rotates the kernel archive on their CDN and older runtime pins carry
           # stale expected digests -- `container system start
           # --enable-kernel-install` then fails with "kernel archive digest
-          # mismatch" on fresh runners (seen 2026-11-09 with the 1.2.0 pin).
+          # mismatch" on fresh runners (seen 2026-11-09 with the 1.2.0 and 1.6.1 pins).
           # The daemon only warns on linked-vs-runtime version mismatch, so a
           # current runtime is both safer and compatible.
-          APPLE_CONTAINER_VERSION=${APPLE_CONTAINER_VERSION:-1.6.1}
+          APPLE_CONTAINER_VERSION=${APPLE_CONTAINER_VERSION:-1.7.1}
           wget "https://github.com/apple/container/releases/download/${APPLE_CONTAINER_VERSION}/container-installer-unsigned.pkg" \
             -O container-installer-signed.pkg
 
@@ -337,10 +337,10 @@ jobs:
           # rotates the kernel archive on their CDN and older runtime pins carry
           # stale expected digests -- `container system start
           # --enable-kernel-install` then fails with "kernel archive digest
-          # mismatch" on fresh runners (seen 2026-11-09 with the 1.2.0 pin).
+          # mismatch" on fresh runners (seen 2026-11-09 with the 1.2.0 and 1.6.1 pins).
           # The daemon only warns on linked-vs-runtime version mismatch, so a
           # current runtime is both safer and compatible.
-          APPLE_CONTAINER_VERSION=${APPLE_CONTAINER_VERSION:-1.6.1}
+          APPLE_CONTAINER_VERSION=${APPLE_CONTAINER_VERSION:-1.7.1}
           wget "https://github.com/apple/container/releases/download/${APPLE_CONTAINER_VERSION}/container-installer-unsigned.pkg" \
             -O container-installer-signed.pkg
 

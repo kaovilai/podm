@@ -151,14 +151,14 @@ else
 fi
 
 # container version: env pin wins, else the Package.resolved pin (what CI
-# installs) floored at 1.6.1 — Apple rotates the kernel archive on their CDN
+# installs) floored at 1.7.1 — Apple rotates the kernel archive on their CDN
 # and older runtimes carry stale expected digests, so a fresh-box kernel
 # install under an old pin fails with "kernel archive digest mismatch"
-# (seen 2026-11-09 with the 1.2.0 pin). The daemon only warns on
+# (seen 2026-11-09 with the 1.2.0 and 1.6.1 pins). The daemon only warns on
 # linked-vs-runtime version mismatch, so a current runtime is compatible.
 if [[ -z $CONTAINER_VERSION ]]; then
-  PINNED=$(python3 -c "import json; d=json.load(open('$REPO/Package.resolved')); print([p['state']['version'] for p in d['pins'] if p['identity']=='container'][0])" 2>/dev/null || echo 1.6.1)
-  CONTAINER_VERSION=$(printf '%s\n%s\n' "$PINNED" 1.6.1 | sort -V | tail -1)
+  PINNED=$(python3 -c "import json; d=json.load(open('$REPO/Package.resolved')); print([p['state']['version'] for p in d['pins'] if p['identity']=='container'][0])" 2>/dev/null || echo 1.7.1)
+  CONTAINER_VERSION=$(printf '%s\n%s\n' "$PINNED" 1.7.1 | sort -V | tail -1)
 fi
 
 # ── Xcode / swift ────────────────────────────────────────────────────────────

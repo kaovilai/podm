@@ -144,7 +144,14 @@ jobs:
 
       - name: fetch apple container
         run: |
-          APPLE_CONTAINER_VERSION=$(python3 -c "import json; d=json.load(open('Package.resolved')); print([p['state']['version'] for p in d['pins'] if p['identity']=='container'][0])")
+          # Runtime version, deliberately NOT the Package.resolved pin: Apple
+          # rotates the kernel archive on their CDN and older runtime pins carry
+          # stale expected digests -- `container system start
+          # --enable-kernel-install` then fails with "kernel archive digest
+          # mismatch" on fresh runners (seen 2026-11-09 with both the 1.2.0 and
+          # 1.6.1 pins after Apple rotated the artifact mid-day). The daemon
+          # only warns on linked-vs-runtime version mismatch.
+          APPLE_CONTAINER_VERSION=${APPLE_CONTAINER_VERSION:-1.7.1}
           wget "https://github.com/apple/container/releases/download/${APPLE_CONTAINER_VERSION}/container-installer-unsigned.pkg" \
             -O container-installer-signed.pkg
 
@@ -458,7 +465,14 @@ jobs:
 
       - name: Fetch Apple Container installer
         run: |
-          APPLE_CONTAINER_VERSION=$(python3 -c "import json; d=json.load(open('Package.resolved')); print([p['state']['version'] for p in d['pins'] if p['identity']=='container'][0])")
+          # Runtime version, deliberately NOT the Package.resolved pin: Apple
+          # rotates the kernel archive on their CDN and older runtime pins carry
+          # stale expected digests -- `container system start
+          # --enable-kernel-install` then fails with "kernel archive digest
+          # mismatch" on fresh runners (seen 2026-11-09 with both the 1.2.0 and
+          # 1.6.1 pins after Apple rotated the artifact mid-day). The daemon
+          # only warns on linked-vs-runtime version mismatch.
+          APPLE_CONTAINER_VERSION=${APPLE_CONTAINER_VERSION:-1.7.1}
           wget "https://github.com/apple/container/releases/download/${APPLE_CONTAINER_VERSION}/container-installer-unsigned.pkg" \
             -O container-installer-signed.pkg
 
