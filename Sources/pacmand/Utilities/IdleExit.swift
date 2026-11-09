@@ -117,8 +117,11 @@ struct IdleExitConfiguration: Sendable, Equatable {
         }
         // Duration's .seconds factory is integer-only; go through
         // milliseconds so fractional values ("90.5") keep sub-second
-        // precision.
-        let graceMs = Int64((seconds * 1000).rounded())
+        // precision. Checked conversion: absurd-but-parseable values
+        // ("1e20", "inf") must not trap at startup — fall back instead.
+        guard let graceMs = Int64(exactly: (seconds * 1000).rounded()) else {
+            return fallback
+        }
         return IdleExitConfiguration(grace: .milliseconds(graceMs))
     }
 }
@@ -132,6 +135,10 @@ struct IdleExitSnapshot: Sendable, Equatable {
     var inFlightRequests: Int
     var activeStreams: Int
     var runningContainers: Int?
+    /// When the most recent request/stream began. `nil` = none ever. Kept for
+    /// one grace period after the fact so short requests that live entirely
+    /// between two monitor ticks still reset the idle window.
+    var lastActivityAt: ContinuousClock.Instant?
 }
 
 /// The idle-exit decision for one state-machine update.
@@ -171,10 +178,21 @@ struct IdleExitStateMachine: Sendable {
         // Unknown running-container count is treated as "not idle": never
         // exit on missing information.
         let runningContainers = snapshot.runningContainers ?? 1
+        // Recent activity counts as busy even after the request/stream ends:
+        // a request that begins and finishes between two monitor ticks leaves
+        // the counters at zero, but its begin timestamp keeps the idle window
+        // reset for a full grace period.
+        let recentlyActive: Bool
+        if let lastActivity = snapshot.lastActivityAt {
+            recentlyActive = now - lastActivity < grace
+        } else {
+            recentlyActive = false
+        }
         let idle =
             snapshot.inFlightRequests == 0
             && snapshot.activeStreams == 0
             && runningContainers == 0
+            && !recentlyActive
 
         guard idle else {
             idleSince = nil
@@ -224,6 +242,11 @@ final class IdleActivityCounters: Sendable {
         var nextStreamID: UInt64 = 1
         /// Cached running-container count. `nil` = unknown, blocks exit.
         var runningContainerCount: Int? = nil
+        /// Monotonic wall time of the most recent request/stream beginning.
+        /// Requests that begin and finish between two monitor ticks are
+        /// invisible to the counters by tick time; this timestamp keeps them
+        /// visible for a full grace period afterwards.
+        var lastActivityAt: ContinuousClock.Instant? = nil
     }
 
     private let state = Mutex(State())
@@ -231,7 +254,10 @@ final class IdleActivityCounters: Sendable {
     // MARK: Requests
 
     func beginRequest() {
-        state.withLock { $0.inFlightRequests += 1 }
+        state.withLock {
+            $0.inFlightRequests += 1
+            $0.lastActivityAt = ContinuousClock().now
+        }
     }
 
     func endRequest() {
@@ -245,6 +271,7 @@ final class IdleActivityCounters: Sendable {
             let id = state.nextStreamID
             state.nextStreamID += 1
             state.activeStreamIDs.insert(id)
+            state.lastActivityAt = ContinuousClock().now
             return id
         }
         return IdleStreamToken(id: id)
@@ -273,7 +300,8 @@ final class IdleActivityCounters: Sendable {
             IdleExitSnapshot(
                 inFlightRequests: state.inFlightRequests,
                 activeStreams: state.activeStreamIDs.count,
-                runningContainers: state.runningContainerCount
+                runningContainers: state.runningContainerCount,
+                lastActivityAt: state.lastActivityAt
             )
         }
     }
@@ -419,6 +447,23 @@ final class IdleExitMonitor: Sendable {
                 logger.info(
                     "idle-exit: aborted exit — fresh poll found \(String(describing: fresh)) running container(s)"
                 )
+                return revised
+            }
+            // The poll itself can suspend for up to ~10s; a request or stream
+            // may have been admitted while it ran (an image pull creates no
+            // running container). Re-read the counters before stopping the
+            // daemon and abort if anything became active.
+            let current = counters.snapshot()
+            let active =
+                current.inFlightRequests > 0
+                || current.activeStreams > 0
+                || (current.lastActivityAt.map { now - $0 < configuration.grace } ?? false)
+            if active {
+                let revised = loopState.withLock {
+                    $0.machine.rearm()
+                    return $0.machine.update(current, now: now)
+                }
+                logger.info("idle-exit: aborted exit — client activity arrived during the fresh poll")
                 return revised
             }
             logger.info(

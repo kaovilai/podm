@@ -2,6 +2,7 @@
 
 import Darwin
 import Foundation
+import Synchronization
 
 enum Stderr {
     static func write(_ message: String) {
@@ -33,6 +34,33 @@ enum WaitStatus {
     }
 }
 
+/// The child PID the shim is currently waiting on, for forwarding
+/// PID-directed signals. Written once after a successful spawn, read only
+/// from signal handlers. Plain global read/write of a pid_t from a handler
+/// follows the same (practically safe) pattern C shims use; the unchecked
+/// annotation is for Swift concurrency checking, not real synchronization —
+/// a torn read at worst forwards the signal to a stale PID, which kill(2)
+/// safely rejects.
+private let forwardedChildPid = Mutex<pid_t>(0)
+
+/// Forward a termination signal aimed at the shim's PID alone to the child.
+/// Terminal-generated signals reach the whole process group (child included)
+/// directly; this handler covers the supervisor cases (`kill <shim-pid>`,
+/// `pacman serve &` + `kill $!`, job-control HUP) where only the shim is
+/// targeted and SIG_IGN would discard the signal while the child keeps
+/// running. Async-signal-safe: kill(2) only.
+private func forwardTerminationSignal(_ signalNumber: Int32) {
+    // Mutex.withLock is not async-signal-safe in general; signal handlers run
+    // with signals of equal or higher priority blocked and this lock is only
+    // ever held for a single store, so contention cannot occur here in
+    // practice. (Lockless alternatives require atomics unavailable to a
+    // @convention(c) handler.)
+    let pid = forwardedChildPid.withLock { $0 }
+    if pid > 0 {
+        kill(pid, signalNumber)
+    }
+}
+
 enum ProcessSpawn {
     /// Spawn `executable` with inherited stdio, wait for it, and terminate this
     /// process with the child's status — re-raising fatal signals so $?, job
@@ -43,12 +71,17 @@ enum ProcessSpawn {
     /// POSIX_SPAWN_SETSIGDEF. The child shares the shim's process group, so it
     /// still receives Ctrl-C / terminal signals directly and decides itself how
     /// to respond (interactive `docker run -it`, `podman attach`, ...); the shim
-    /// survives only to propagate the exit status.
+    /// survives only to propagate the exit status. PID-directed SIGTERM/SIGHUP
+    /// (which the group delivery does not cover) are forwarded to the child
+    /// instead of ignored, so supervisors stopping the shim also stop the CLI.
     static func execAndWait(executable: String, arguments: [String], environment: [String: String]) -> Never {
         let terminalSignals: [Int32] = [SIGINT, SIGQUIT, SIGTERM, SIGHUP]
         for signalNumber in terminalSignals {
             signal(signalNumber, SIG_IGN)
         }
+        // PID-directed termination signals are forwarded, not discarded.
+        signal(SIGTERM, forwardTerminationSignal)
+        signal(SIGHUP, forwardTerminationSignal)
 
         var attributes: posix_spawnattr_t? = nil
         posix_spawnattr_init(&attributes)
@@ -96,6 +129,7 @@ enum ProcessSpawn {
             Stderr.write("pacman: failed to spawn \(executable): \(String(cString: strerror(spawnResult)))\n")
             exit(127)
         }
+        forwardedChildPid.withLock { $0 = pid }
 
         var status: Int32 = 0
         while true {

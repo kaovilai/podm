@@ -37,6 +37,16 @@ enum PersonaExec {
         var environment = ProcessInfo.processInfo.environment
         environment[persona.hostEnvironmentKey] = PacmanPaths.containerHostURL
 
+        // docker CLI precedence: an inherited DOCKER_CONTEXT environment
+        // variable beats DOCKER_HOST, so a user exporting a Docker Desktop or
+        // remote context would have the shim run commands against that other
+        // engine while waking pacman's daemon. Unset it for the docker persona
+        // (an explicit `--context` flag on the command line still wins; the
+        // user's configured default context does not beat DOCKER_HOST).
+        if persona == .docker {
+            environment.removeValue(forKey: "DOCKER_CONTEXT")
+        }
+
         ProcessSpawn.execAndWait(executable: cliPath, arguments: [cliPath] + arguments, environment: environment)
     }
 
@@ -55,11 +65,14 @@ enum PersonaExec {
         _ = ProcessSpawn.run(
             "/bin/launchctl", ["kickstart", PacmanPaths.launchdServiceTarget], discardOutput: true)
 
-        // Bounded wait: the daemon needs a moment to bind the socket after
-        // launchd spawns it. Bail early the moment it answers.
-        for _ in 0..<50 {
+        // Bounded wait for the daemon to answer after launchd spawns it. A
+        // cold start runs startup housekeeping (container-apiserver bring-up,
+        // healthcheck resume) before the socket answers — up to ~30s on a slow
+        // machine — so the overall deadline is 60s, matching the integration
+        // CI's readiness budget. Bail early the moment it answers.
+        for _ in 0..<600 {
             if daemonReachable(socketPath: socketPath) { return }
-            usleep(100_000)  // 100ms → up to 5s total
+            usleep(100_000)  // 100ms → up to 60s total
         }
     }
 

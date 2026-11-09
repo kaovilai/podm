@@ -379,7 +379,15 @@ extension ContainerAttachRoute {
                             while let data = try? stdoutHandle.read(upToCount: 8192), !data.isEmpty {
                                 var buf = channel.allocator.buffer(capacity: data.count + (isTTY ? 0 : 8))
                                 buf.writeDockerFrame(streamType: frameType, data: data, ttyMode: isTTY)
-                                _ = channel.writeAndFlush(buf)
+                                // Await the socket write before reading on: the task group
+                                // completing with writes still in flight would let the close
+                                // below truncate output for large responses or slow clients.
+                                // A failed write means the client is gone — stop reading.
+                                do {
+                                    try await channel.writeAndFlush(buf).get()
+                                } catch {
+                                    break
+                                }
                             }
                         }
                     }
@@ -391,7 +399,11 @@ extension ContainerAttachRoute {
                             while let data = try? stderrHandle.read(upToCount: 8192), !data.isEmpty {
                                 var buf = channel.allocator.buffer(capacity: data.count + 8)
                                 buf.writeDockerFrame(streamType: .stderr, data: data, ttyMode: false)
-                                _ = channel.writeAndFlush(buf)
+                                do {
+                                    try await channel.writeAndFlush(buf).get()
+                                } catch {
+                                    break
+                                }
                             }
                         }
                     }

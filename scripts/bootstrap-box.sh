@@ -127,9 +127,21 @@ if [[ -n ${1:-} ]]; then
 else
   REPO=$HOME/pacman
   if [[ -d $REPO/.git ]]; then
+    # Fast-forward only: a hard `checkout -B` reset of an existing checkout
+    # silently drops committed local development work when the working tree is
+    # clean. Diverged checkouts are left alone and reported instead.
     if git -C $REPO fetch -q origin; then
-      git -C $REPO checkout -q -B $PACMAN_BRANCH origin/$PACMAN_BRANCH \
-        || pend "repo update" "branch $PACMAN_BRANCH not found on origin; keeping current checkout"
+      if git -C $REPO rev-parse -q --verify "origin/$PACMAN_BRANCH" >/dev/null; then
+        if git -C $REPO merge-base --is-ancestor HEAD "origin/$PACMAN_BRANCH"; then
+          git -C $REPO merge -q --ff-only "origin/$PACMAN_BRANCH" \
+            && ok "repo updated to origin/$PACMAN_BRANCH" \
+            || pend "repo update" "fast-forward failed (dirty working tree?); keeping current checkout"
+        else
+          pend "repo update" "local $REPO has commits not on origin/$PACMAN_BRANCH; not resetting — update manually if intended"
+        fi
+      else
+        pend "repo update" "branch $PACMAN_BRANCH not found on origin; keeping current checkout"
+      fi
     else
       pend "repo update" "git fetch failed (offline?); keeping current checkout"
     fi
@@ -139,9 +151,14 @@ else
 fi
 
 # container version: env pin wins, else the Package.resolved pin (what CI
-# installs), else a floor default
+# installs) floored at 1.6.1 — Apple rotates the kernel archive on their CDN
+# and older runtimes carry stale expected digests, so a fresh-box kernel
+# install under an old pin fails with "kernel archive digest mismatch"
+# (seen 2026-11-09 with the 1.2.0 pin). The daemon only warns on
+# linked-vs-runtime version mismatch, so a current runtime is compatible.
 if [[ -z $CONTAINER_VERSION ]]; then
-  CONTAINER_VERSION=$(python3 -c "import json; d=json.load(open('$REPO/Package.resolved')); print([p['state']['version'] for p in d['pins'] if p['identity']=='container'][0])" 2>/dev/null || echo 1.6.0)
+  PINNED=$(python3 -c "import json; d=json.load(open('$REPO/Package.resolved')); print([p['state']['version'] for p in d['pins'] if p['identity']=='container'][0])" 2>/dev/null || echo 1.6.1)
+  CONTAINER_VERSION=$(printf '%s\n%s\n' "$PINNED" 1.6.1 | sort -V | tail -1)
 fi
 
 # ── Xcode / swift ────────────────────────────────────────────────────────────

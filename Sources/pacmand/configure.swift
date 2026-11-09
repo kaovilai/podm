@@ -55,7 +55,12 @@ func configure(_ app: Application) async throws {
             // returns, the instance lock is released, the process exits 0.
             app.running?.stop()
         }
-        idleMonitor.start()
+        // Created here but started by main.swift after app.startup() succeeds:
+        // configure() runs before the server is up, and startup (housekeeping
+        // included) can take tens of seconds — with a short grace the monitor
+        // would fire while app.running is still nil (the optional stop() would
+        // no-op, but the monitor's exit latch would burn its one shot and the
+        // daemon would never idle-exit for the rest of its life).
         app.storage[IdleExitMonitorKey.self] = idleMonitor
     }
 

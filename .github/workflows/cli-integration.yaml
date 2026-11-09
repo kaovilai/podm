@@ -45,6 +45,10 @@ on:
         description: 'Run the multi-arch build job (needs a Virtualization-framework-capable runner)'
         type: boolean
         default: false
+      vm-runner:
+        description: 'Runner label for VM-gated jobs/steps (a self-hosted runner with nested virtualization; hosted macos-26 has none)'
+        type: string
+        default: macos-26
   pull_request:
 
 concurrency:
@@ -57,7 +61,11 @@ permissions:
 jobs:
   cli-integration:
     name: docker + podman CLI smoke tests
-    runs-on: macos-26
+    # GitHub-hosted macOS runners expose no nested virtualization
+    # (actions/runner-images#12933): the VM-gated steps below only work when
+    # this workflow is dispatched with vm-runner pointing at a
+    # Virtualization-framework-capable (self-hosted) runner.
+    runs-on: ${{ inputs.vm-runner || 'macos-26' }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -98,7 +106,14 @@ jobs:
       # ── Apple container runtime setup (mirrors pr-check.yaml) ────────────────
       - name: fetch apple container
         run: |
-          APPLE_CONTAINER_VERSION=$(python3 -c "import json; d=json.load(open('Package.resolved')); print([p['state']['version'] for p in d['pins'] if p['identity']=='container'][0])")
+          # Runtime version, deliberately NOT the Package.resolved pin: Apple
+          # rotates the kernel archive on their CDN and older runtime pins carry
+          # stale expected digests -- `container system start
+          # --enable-kernel-install` then fails with "kernel archive digest
+          # mismatch" on fresh runners (seen 2026-11-09 with the 1.2.0 pin).
+          # The daemon only warns on linked-vs-runtime version mismatch, so a
+          # current runtime is both safer and compatible.
+          APPLE_CONTAINER_VERSION=${APPLE_CONTAINER_VERSION:-1.6.1}
           wget "https://github.com/apple/container/releases/download/${APPLE_CONTAINER_VERSION}/container-installer-unsigned.pkg" \
             -O container-installer-signed.pkg
 
@@ -170,7 +185,7 @@ jobs:
           # quay.io/podman/hello has no auth or rate-limit issues (see pr-check.yaml)
           sudo docker pull quay.io/podman/hello
           sudo docker pull alpine:latest
-          sudo docker image ls | grep alpine
+          sudo docker image ls --format '{{.Repository}}:{{.Tag}}' | grep alpine
           IMAGE_ID=$(sudo docker image inspect alpine | jq -r '.[0].Id')
           [[ $IMAGE_ID == sha256:* ]] || { echo "Error: Image ID does not start with sha256:"; exit 1; }
 
@@ -201,7 +216,7 @@ jobs:
           CMD ["cat", "/built.txt"]
           EOF
           sudo env DOCKER_BUILDKIT=0 docker build -t cli-int-build /tmp/testbuild
-          sudo docker image ls | grep 'cli-int-build'
+          sudo docker image ls --format '{{.Repository}}:{{.Tag}}' | grep 'cli-int-build'
           OUT=$(sudo docker run --rm cli-int-build)
           echo "$OUT"
           [[ "$OUT" == *"built by docker CLI"* ]] || { echo "docker run of built image failed"; exit 1; }
@@ -301,7 +316,7 @@ jobs:
     name: multi-arch build test (amd64 + arm64 + s390x)
     needs: cli-integration
     if: inputs.enable-multiarch == true
-    runs-on: macos-26
+    runs-on: ${{ inputs.vm-runner || 'macos-26' }}
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -318,7 +333,14 @@ jobs:
 
       - name: Fetch Apple Container installer
         run: |
-          APPLE_CONTAINER_VERSION=$(python3 -c "import json; d=json.load(open('Package.resolved')); print([p['state']['version'] for p in d['pins'] if p['identity']=='container'][0])")
+          # Runtime version, deliberately NOT the Package.resolved pin: Apple
+          # rotates the kernel archive on their CDN and older runtime pins carry
+          # stale expected digests -- `container system start
+          # --enable-kernel-install` then fails with "kernel archive digest
+          # mismatch" on fresh runners (seen 2026-11-09 with the 1.2.0 pin).
+          # The daemon only warns on linked-vs-runtime version mismatch, so a
+          # current runtime is both safer and compatible.
+          APPLE_CONTAINER_VERSION=${APPLE_CONTAINER_VERSION:-1.6.1}
           wget "https://github.com/apple/container/releases/download/${APPLE_CONTAINER_VERSION}/container-installer-unsigned.pkg" \
             -O container-installer-signed.pkg
 
@@ -383,7 +405,7 @@ jobs:
               -H "Content-Type: application/x-tar" \
               --data-binary @- \
               "http://localhost/build?t=test-multiarch%3Arosetta&platform=linux%2Farm64%2Clinux%2Famd64"
-          sudo docker image ls | grep 'test-multiarch:rosetta'
+          sudo docker image ls --format '{{.Repository}}:{{.Tag}}' | grep 'test-multiarch:rosetta'
 
       # ── QEMU path: s390x ─────────────────────────────────────────────────────
       - name: docker build – s390x (QEMU builder)
@@ -394,7 +416,7 @@ jobs:
               -H "Content-Type: application/x-tar" \
               --data-binary @- \
               "http://localhost/build?t=test-multiarch%3As390x&platform=linux%2Fs390x"
-          sudo docker image ls | grep 'test-multiarch:s390x'
+          sudo docker image ls --format '{{.Repository}}:{{.Tag}}' | grep 'test-multiarch:s390x'
 
       # ── Combined manifest list: arm64 + amd64 + s390x ────────────────────────
       - name: docker build – combined amd64+arm64+s390x manifest list
@@ -405,7 +427,7 @@ jobs:
               -H "Content-Type: application/x-tar" \
               --data-binary @- \
               "http://localhost/build?t=test-multiarch%3Alatest&platform=linux%2Farm64%2Clinux%2Famd64%2Clinux%2Fs390x"
-          sudo docker image ls | grep 'test-multiarch:latest'
+          sudo docker image ls --format '{{.Repository}}:{{.Tag}}' | grep 'test-multiarch:latest'
 
       - name: Verify manifest list contains amd64, arm64, and s390x
         run: |

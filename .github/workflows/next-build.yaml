@@ -74,10 +74,15 @@ jobs:
             SHORT_SHA1=$(git rev-parse --short HEAD)
             # grab the latest tags
             git fetch --tags
-            # nearest tag on main
-            # fresh clones of pacman have no tags yet (unlike the socktainer
-            # fork this repo was imported from) — fall back so the bump math works
-            PACMAND_VERSION=$(git describe --tags --abbrev=0 main 2>/dev/null || echo v0.0.0)
+            # nearest stable tag on main
+            # - fresh clones of pacman have no tags yet (unlike the socktainer
+            #   fork this repo was imported from) — fall back so the bump math works
+            # - exclude the generated v<version>-next.<timestamp>-<sha> prerelease
+            #   tags this workflow pushes to the same repository: git describe
+            #   would otherwise select the previous prerelease tag, and its
+            #   parsing then makes "minor" non-numeric and the bump arithmetic
+            #   fails, stopping all subsequent prerelease builds
+            PACMAND_VERSION=$(git describe --tags --abbrev=0 --exclude='*-next.*' main 2>/dev/null || echo v0.0.0)
             STRIPPED_VERSION=${PACMAND_VERSION#v}
             echo "Current version is $STRIPPED_VERSION"
             tmp=${STRIPPED_VERSION%.*}
@@ -170,7 +175,7 @@ jobs:
       - name: zip the binary
         run: |
           cd ./.build/arm64-apple-macosx/release/
-          zip pacmand.zip pacmand
+          zip pacmand.zip pacmand pacman
 
       - name: Submit for notarization
         run: |

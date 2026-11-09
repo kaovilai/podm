@@ -165,7 +165,7 @@ jobs:
       - name: zip the binary
         run: |
           cd ./.build/arm64-apple-macosx/release/
-          zip pacmand.zip pacmand
+          zip pacmand.zip pacmand pacman
 
       - name: Submit for notarization
         run: |
