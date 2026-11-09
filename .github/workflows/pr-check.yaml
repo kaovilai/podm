@@ -140,7 +140,7 @@ jobs:
       - name: List downloaded artifact
         run: |
           ls -la
-          chmod 755 pacman
+          chmod 755 pacmand
 
       - name: fetch apple container
         run: |
@@ -193,7 +193,7 @@ jobs:
 
       - name: run pacman
         run: |
-          nohup sudo -i $PWD/pacman > service.log 2>&1 &
+          nohup sudo -i $PWD/pacmand > service.log 2>&1 &
           echo $! > service.pid
           sudo ln -s /var/root/.pacman/container.sock /var/run/docker.sock
           sleep 5
@@ -452,7 +452,7 @@ jobs:
       - name: Prepare pacman binary
         run: |
           ls -la
-          chmod 755 pacman
+          chmod 755 pacmand
 
       - name: Fetch Apple Container installer
         run: |
@@ -512,7 +512,7 @@ jobs:
 
       - name: Start pacman
         run: |
-          PACMAND_BIN="$(pwd)/pacman"
+          PACMAND_BIN="$(pwd)/pacmand"
           nohup sudo -i "$PACMAND_BIN" > service.log 2>&1 &
           echo $! > service.pid
           sudo ln -s /var/root/.pacman/container.sock /var/run/docker.sock
@@ -593,7 +593,7 @@ jobs:
       # --platform alone does not produce a multi-arch image on the real
       # podman client. Podman's own --manifest flow (BuildRoute now reads the
       # `manifest` query param and registers the built image via
-      # `manifestClient.addBuiltImage` — see pacman#201) isn't exercised by
+      # `manifestClient.addBuiltImage` — see socktainer#201) isn't exercised by
       # this step either, since it never sends that param. This step only
       # proves the Docker-compat build endpoint itself can assemble a
       # multi-platform manifest list when asked directly via curl; it is not

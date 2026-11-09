@@ -42,7 +42,7 @@ jobs:
       contents: write
     outputs:
       githubTag: ${{ steps.TAG_UTIL.outputs.githubTag}}
-      desktopVersion: ${{ steps.TAG_UTIL.outputs.desktopVersion}}
+      pacmanVersion: ${{ steps.TAG_UTIL.outputs.pacmanVersion}}
       releaseId: ${{ steps.create_release.outputs.id}}
 
     steps:
@@ -54,11 +54,12 @@ jobs:
         run: |
             TAG_PATTERN=${{ github.event.inputs.version }}
             echo "githubTag=v$TAG_PATTERN" >> ${GITHUB_OUTPUT}
-            echo "desktopVersion=$TAG_PATTERN" >> ${GITHUB_OUTPUT}
+            echo "pacmanVersion=$TAG_PATTERN" >> ${GITHUB_OUTPUT}
 
       - name: tag
         run: |
           git config --local user.name ${{ github.actor }}
+          git config --local user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
           echo "Tagging with ${{ steps.TAG_UTIL.outputs.githubTag }}"
           git tag ${{ steps.TAG_UTIL.outputs.githubTag }}
           git push origin ${{ steps.TAG_UTIL.outputs.githubTag }}
@@ -78,6 +79,9 @@ jobs:
     needs: tag
     permissions:
       contents: write
+    # signing/notarization needs the Apple certificates; skip (rather than
+    # fail) until they are configured on this repository
+    if: secrets.CERTIFICATE_P12_BASE64 != ''
     runs-on: macos-26
     timeout-minutes: 60
     env:
@@ -149,7 +153,7 @@ jobs:
       - name: zip the binary
         run: |
           cd ./.build/arm64-apple-macosx/release/
-          zip -r pacman.zip pacman
+          zip pacman.zip pacmand
 
       - name: Submit for notarization
         run: |
@@ -167,7 +171,7 @@ jobs:
         run: |
           make installer-notarized
         env:
-          BUILD_VERSION: ${{ needs.tag.outputs.desktopVersion}}
+          BUILD_VERSION: ${{ needs.tag.outputs.pacmanVersion}}
           APPLE_APPLICATION_ID: ${{ secrets.APPLE_APPLICATION_ID}}
           APPLE_PRODUCT_ID: ${{ secrets.APPLE_PRODUCT_ID}}  
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -185,6 +189,7 @@ jobs:
     name: Release
     permissions:
       contents: write
+    if: needs.build.result == 'success'
     runs-on: ubuntu-24.04
     steps:
       - name: id
