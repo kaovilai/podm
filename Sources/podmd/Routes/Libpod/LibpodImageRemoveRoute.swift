@@ -141,8 +141,12 @@ extension LibpodImageRemoveRoute {
         guard let query, !query.isEmpty else { return nil }
         for pair in query.split(separator: "&") {
             let parts = pair.split(separator: "=", maxSplits: 1)
-            let key = (parts.first.map(String.init) ?? String(pair)).removingPercentEncoding ?? String(parts.first ?? "")
-            guard key == name else { continue }
+            // Decode the key once — `parts.first` is nil only for a degenerate
+            // empty/`=`-only pair, where no key can match anyway.
+            guard let rawKey = parts.first.map(String.init),
+                let key = rawKey.removingPercentEncoding ?? rawKey.nilIfEmpty,
+                key == name
+            else { continue }
             guard let raw = parts.dropFirst().first.map(String.init)?.removingPercentEncoding,
                 !raw.isEmpty
             else {
@@ -152,6 +156,13 @@ extension LibpodImageRemoveRoute {
             return lowered == "true" || lowered == "t" || lowered == "1"
         }
         return nil
+    }
+}
+
+extension String {
+    /// "" → nil, anything else unchanged — used to bail early on degenerate keys.
+    fileprivate var nilIfEmpty: String? {
+        isEmpty ? nil : self
     }
 }
 

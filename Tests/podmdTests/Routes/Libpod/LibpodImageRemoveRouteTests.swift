@@ -223,8 +223,6 @@ struct LibpodImageRemoveRouteTests {
         #expect(mock.deletedIds.isEmpty)
     }
 
-    // MARK: - Helpers
-
     @Test("queryFlag matches podman truthiness — bare/empty flags are false")
     func queryFlagSemantics() {
         // Absent key: nil (distinguishes from an explicit false).
@@ -245,7 +243,16 @@ struct LibpodImageRemoveRouteTests {
         #expect(LibpodImageRemoveRoute.queryFlag("all", in: "all=0") == false)
         // A similar-looking key must not match.
         #expect(LibpodImageRemoveRoute.queryFlag("all", in: "allow=true") == nil)
+        // Degenerate pairs (empty or "="-only) never match a key.
+        #expect(LibpodImageRemoveRoute.queryFlag("all", in: "=true&all=true") == true)
     }
+
+    // NOTE: the over-limit body path (`try await req.body.collect()` throwing)
+    // is enforced by the real HTTP server's streaming layer before the route
+    // runs, and cannot be reached through VaporTesting — beforeRequest bodies
+    // are pre-collected, so collect() is always a no-op success there.
+
+    // MARK: - Helpers
 
     /// Registers BOTH the pre-existing wildcard delete route and the new remove
     /// route, in the same order configure.swift registers them (delete at ~250,

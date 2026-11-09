@@ -465,7 +465,7 @@ enum ContainerTopUtility {
                 Processes: report.Processes.map { Array($0.dropLast()) }
             )
         }
-        if let reorder {
+        if let reorder, !report.Titles.isEmpty {
             // Requested position → internal index; rows can be shorter than
             // the header (ps omits trailing empty columns), hence the bounds
             // check instead of a force-unwrap.

@@ -554,7 +554,7 @@ struct HealthCheckManagerStartIntervalTests {
         #expect(midHealth?.FailingStreak == 1)
         // Second failure: streak reaches Retries → unhealthy, while the start
         // period is still open — if grace were (wrongly) reopened, the streak
-        // would stay 0 and unhealthy would only arrive after the 2s period.
+        // would stay 0 and unhealthy would only arrive after the 5s period.
         try await Self.waitForStatus("unhealthy", on: mgr, id: "grace-closed")
         let endHealth = await mgr.currentHealth(for: "grace-closed")
         #expect(endHealth?.Status == "unhealthy")
