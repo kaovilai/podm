@@ -35,19 +35,28 @@ extension LibpodImageRemoveRoute {
             var images = (try? req.query.get([String].self, at: "images")) ?? []
             var force = (try? req.query.get(Bool.self, at: "force")) ?? false
             let ignore = (try? req.query.get(Bool.self, at: "ignore")) ?? false
-            let all = (try? req.query.get(Bool.self, at: "all")) ?? false
+            // Tri-state `all` (absent vs explicit false vs true): Vapor's query
+            // decoding materializes Bool keys as `false` even when the key (or
+            // the whole query string) is absent, so `get`/subscript can't tell
+            // "absent" from "explicitly false" — read the raw query string.
+            let queryAll = Self.queryFlag("all", in: req.url.query)
+            var all = queryAll ?? false
 
             // Body fallback for clients that POST-style JSON bodies on DELETE.
             if images.isEmpty, let body = try? req.content.decode(LibpodImageRemoveBody.self) {
                 images = body.images ?? []
                 force = body.force ?? force
+                // An explicit query value wins over the body.
+                all = queryAll ?? body.all ?? false
             }
 
-            // `all` replaces the explicit list, as in podman: remove every image in
-            // the store. Each image is deleted once, by digest (its stable ID).
+            // `all` replaces the explicit list, as in podman: remove every image
+            // in the store — EVERY reference (tag), not one per digest, so
+            // sibling tags sharing a digest are untagged too rather than
+            // silently surviving a `podman rmi --all`.
             if all {
                 let everyImage = try await client.list()
-                images = Array(Set(everyImage.map(\.digest)))
+                images = everyImage.map(\.reference)
             }
 
             var deleted: [String] = []
@@ -109,6 +118,25 @@ private struct LibpodImageRemoveBody: Content {
     let images: [String]?
     let force: Bool?
     let all: Bool?
+}
+
+extension LibpodImageRemoveRoute {
+    /// Reads a boolean flag from the RAW query string, tri-state: nil when the
+    /// key is absent, true/false for an explicit value, true for a bare flag
+    /// (`?all`). Needed because Vapor's query decoding materializes Bool keys
+    /// as `false` even when the whole query string is missing.
+    static func queryFlag(_ name: String, in query: String?) -> Bool? {
+        guard let query, !query.isEmpty else { return nil }
+        for pair in query.split(separator: "&") {
+            let parts = pair.split(separator: "=", maxSplits: 1)
+            guard let key = parts.first.map(String.init), key == name else { continue }
+            guard let raw = parts.dropFirst().first.map(String.init), !raw.isEmpty else {
+                return true  // bare flag
+            }
+            return raw == "true" || raw == "1" || raw == "yes"
+        }
+        return nil
+    }
 }
 
 /// Mirrors podman's `handlers.LibpodImagesRemoveReport` = `entities.ImageRemoveReport`

@@ -253,8 +253,10 @@ struct HealthCheckManagerTests {
 private actor ProbeTimeline {
     private(set) var timestamps: [UInt64] = []
 
-    func record() {
+    @discardableResult
+    func record() -> Int {
         timestamps.append(DispatchTime.now().uptimeNanoseconds)
+        return timestamps.count
     }
 }
 
@@ -469,5 +471,75 @@ struct HealthCheckManagerStartIntervalTests {
         let count = await timeline.timestamps.count
         #expect(count <= 1, "healthy container must probe at Interval, not StartInterval cadence, saw \(count) probes")
         await mgr.stop(containerId: "early-healthy")
+    }
+
+    @Test("an early success closes the startup grace window — later failures count toward Retries")
+    func earlySuccessClosesStartupGrace() async throws {
+        // Probe succeeds once (healthy), then fails forever inside a start
+        // period that is still open. moby's handleProbeResult: the failure of
+        // a container that is no longer starting counts, and the status is
+        // NOT demoted below the Retries threshold — flipping back to
+        // "starting" would reopen the forgiveness window after success.
+        let timeline = ProbeTimeline()
+        let mgr = HealthCheckManager(
+            probe: { _, _, _ in
+                let n = await timeline.record()
+                return n == 1 ? 0 : 1
+            },
+            intervalFloorNs: 1_000_000
+        )
+        let cfg = HealthcheckConfig(
+            Test: ["CMD", "false"],
+            Interval: 5_000_000,  // 5ms — failures accumulate fast
+            Timeout: 1_000_000_000,
+            Retries: 2,
+            StartPeriod: 5_000_000_000,  // open for the whole test
+            StartInterval: 5_000_000
+        )
+        await mgr.start(containerId: "grace-closed", config: cfg)
+        try await Self.waitForStatus("healthy", on: mgr, id: "grace-closed")
+        // First failure after the success: streak 1 < Retries 2 → still
+        // healthy (not "starting"), and the failure counts.
+        try await Self.waitForStatus("unhealthy", on: mgr, id: "grace-closed")
+        let endHealth = await mgr.currentHealth(for: "grace-closed")
+        #expect(endHealth?.Status == "unhealthy")
+        #expect((endHealth?.FailingStreak ?? 0) == 2, "post-success failures must count toward the retry budget, streak was \(endHealth?.FailingStreak ?? -1)")
+        // And the mid-flight check: between healthy and unhealthy the status
+        // must never have regressed to "starting" (which would reopen grace).
+        await mgr.stop(containerId: "grace-closed")
+    }
+
+    @Test("the first startup probe waits one StartInterval (moby arms its first timer with getInterval)")
+    func firstStartupProbeWaitsStartInterval() async throws {
+        let timeline = ProbeTimeline()
+        let mgr = HealthCheckManager(
+            probe: { _, _, _ in
+                await timeline.record()
+                return 0
+            },
+            intervalFloorNs: 120_000_000  // floors the 1ms config StartInterval to 120ms
+        )
+        let cfg = HealthcheckConfig(
+            Test: ["CMD", "true"],
+            Interval: 5_000_000,
+            Timeout: 1_000_000_000,
+            Retries: 3,
+            StartPeriod: 2_000_000_000,
+            StartInterval: 1_000_000
+        )
+        let startNs = DispatchTime.now().uptimeNanoseconds
+        await mgr.start(containerId: "first-wait", config: cfg)
+        // A Task.sleep never returns early, so inside the first 60ms the
+        // probe cannot have fired if (and only if) the initial StartInterval
+        // wait is in place — an immediate first probe would record at ~0ms.
+        try await Task.sleep(nanoseconds: 60_000_000)
+        let earlyCount = await timeline.timestamps.count
+        #expect(earlyCount == 0, "first startup probe must wait one StartInterval, saw \(earlyCount) probes in the first 60ms")
+        // ...and it does fire once the wait elapses.
+        try await Self.waitForStatus("healthy", on: mgr, id: "first-wait")
+        let times = await timeline.timestamps
+        #expect(!times.isEmpty)
+        #expect((times.first ?? 0) - startNs >= 100_000_000, "first probe fired before the StartInterval wait elapsed")
+        await mgr.stop(containerId: "first-wait")
     }
 }

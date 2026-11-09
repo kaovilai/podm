@@ -51,18 +51,15 @@ enum ContainerTopUtility {
     }
 
     /// Parses `ps` output: the first line becomes `Titles`, every following
-    /// line a `Processes` row.
+    /// line a `Processes` row. Rows wider than the header (a COMMAND column
+    /// with arguments splits into several whitespace fields) are merged back
+    /// into the last column, keeping every row exactly `Titles.count` wide —
+    /// moby v28.5.2 `appendProcess2ProcList` ("merging overhanging fields")
+    /// and podman's compat handler ("combine any extras") both do this.
     ///
-    /// The two dialects disagree on rows wider than the header (a COMMAND
-    /// column with arguments splits into several whitespace fields):
-    /// - moby leaves the row split, so rows can be longer than `Titles`;
-    /// - podman's handler assumes the last column is the command and merges
-    ///   the extras back into it, keeping every row exactly `Titles.count`
-    ///   wide. `rejoinCommandExtras` selects podman's behavior.
-    ///
-    /// Empty or unparseable output (e.g. an image whose ps failed) yields an
-    /// empty report rather than an error, matching how minimal images behave.
-    static func parse(_ output: String, rejoinCommandExtras: Bool) -> TopReport {
+    /// Empty output from a successful ps yields an empty report rather than
+    /// an error, matching how minimal images behave.
+    static func parse(_ output: String) -> TopReport {
         // Split on "\n" AND the combined "\r\n" Character — in Swift they are
         // distinct Characters, so a plain `split(separator: "\n")` would leave
         // CRLF output as one giant line.
@@ -78,10 +75,11 @@ enum ContainerTopUtility {
         for line in lines.dropFirst() {
             let fields = fieldsASCII(line)
             guard !fields.isEmpty else { continue }
-            if rejoinCommandExtras, fields.count > titles.count {
-                // podman (pkg/api/handlers/compat/containers_top.go): "Docker
-                // assumes the last entry is *always* command which can include
-                // spaces. So combine any extras."
+            if fields.count > titles.count {
+                // moby appendProcess2ProcList: "Make sure number of fields
+                // equals number of header titles merging 'overhanging'
+                // fields" — same words in podman's compat handler ("combine
+                // any extras").
                 let lastColumn = titles.count - 1
                 let command = fields[lastColumn...].joined(separator: " ")
                 var row = Array(fields[0..<lastColumn])
@@ -109,23 +107,60 @@ enum ContainerTopUtility {
     /// libpod dialect: podman's remote CLI sends ps(1) AIX format descriptors
     /// — one per repeated `ps_args` query value (`ps_args=user&ps_args=pid`)
     /// or comma-joined in one (`ps_args=user,pid`); the newer `descriptors`
-    /// parameter carries the same values. Since we exec real ps instead of
-    /// reading /proc via psgo, descriptors map to `ps -o d1,d2,...` (procps
-    /// and busybox ps both accept that). Values that already look like flags
-    /// (leading "-") pass through unchanged. `[]` means "no args given".
+    /// parameter carries the same values.
+    ///
+    /// podman's own decision (`libpod/container_top_linux.go` `Top`): the
+    /// comma-split tokens must ALL be known psgo descriptors — on
+    /// `ErrUnknownDescriptor` it falls back to treating the ORIGINAL values
+    /// as a ps(1) command line (a single value shlex-split on spaces, commas
+    /// preserved, so `ps -o pid,args` survives). We mirror that: known
+    /// descriptors map to `ps -eo d1,d2,...` (we exec real ps instead of
+    /// reading /proc via psgo), anything else passes through as raw ps
+    /// arguments. The `-e` matters: procps with only `-o` selects the current
+    /// user's tty-attached processes (in a container, usually nothing) —
+    /// busybox ps ignores it harmlessly (it never filters).
+    /// `[]` means "no args given" — the caller then applies `defaultPsArgs`.
     static func libpodArgv(psArgs: [String]) -> [String] {
+        let trimmed = psArgs.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard !trimmed.isEmpty else { return [] }
+        // Raw ps-argument mode is decided on the ORIGINAL values, before any
+        // comma-splitting or aliasing: a leading dash is always a flag, and
+        // comma-splitting "-o pid,args" would destroy the option value.
+        if trimmed.contains(where: { $0.hasPrefix("-") }) {
+            return shlexSplitSingle(trimmed)
+        }
         let tokens =
-            psArgs
+            trimmed
             .flatMap { $0.split(separator: ",") }
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-            .map { descriptorAliases[$0] ?? $0 }
-        guard !tokens.isEmpty else { return [] }
-        if tokens.contains(where: { $0.hasPrefix("-") }) {
-            return tokens
+        if tokens.allSatisfy({ isKnownDescriptor($0) }) {
+            return ["-eo", (tokens.map { descriptorAliases[$0] ?? $0 }).joined(separator: ",")]
         }
-        return ["-o", tokens.joined(separator: ",")]
+        // Unknown descriptor → ps(1) arguments (podman's ErrUnknownDescriptor
+        // fallback): "aux" and friends reach the container's ps verbatim.
+        return shlexSplitSingle(trimmed)
     }
+
+    /// podman (google/shlex, containers/podman#12452) splits a single
+    /// descriptor string into a ps(1) argv; several separate values are
+    /// already an argv. Whitespace-split is the quote-free subset of shlex.
+    private static func shlexSplitSingle(_ values: [String]) -> [String] {
+        guard values.count == 1 else { return values }
+        return values[0].split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+    }
+
+    /// The descriptors psgo accepts without falling back to ps(1) (its AIX
+    /// format set), plus the ps(1) spellings we alias — anything else is a
+    /// raw ps argument as far as the decision is concerned.
+    private static func isKnownDescriptor(_ token: String) -> Bool {
+        psgoDescriptors.contains(token) || descriptorAliases[token] != nil
+    }
+
+    private static let psgoDescriptors: Set<String> = [
+        "args", "comm", "%cpu", "cgroup", "etime", "gid", "group", "%mem",
+        "pid", "ppid", "time", "tty", "uid", "user", "%vmem",
+    ]
 
     /// procps accepts both spellings, busybox ps only the short ones — the
     /// aliases normalize to a name both implementations understand.
@@ -175,31 +210,77 @@ enum ContainerTopUtility {
         // before waiting (via collectOutput) so a ps writing more than the
         // pipe buffer can't deadlock, and the wait goes through the bounded
         // retry helper so a transient XPC error doesn't fail the request.
+        //
+        // The collector is an UNSTRUCTURED task, not a task-group child: a
+        // group's scope waits for every child at exit, and cancellation
+        // doesn't unblock a stalled XPC wait() or the detached pipe readers —
+        // the timeout branch would never actually return. Racing this way,
+        // the request path never awaits the collector after the deadline.
         typealias PsOutput = (exitCode: Int32, stdout: Data, stderr: Data)
-        let outcome: PsOutput? = await withTaskGroup(of: PsOutput?.self) { group in
-            group.addTask {
-                try? await pipes.collectOutput {
-                    await ContainerExitCodeStore.resolveExitCode(wait: { try await process.wait() })
-                }
+        let collector = Task<PsOutput?, Never> {
+            try? await pipes.collectOutput {
+                await ContainerExitCodeStore.resolveExitCode(wait: { try await process.wait() })
             }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: execTimeoutNs)
-                return nil
-            }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
         }
+        let outcome = await raceFirstOrTimeout(collector, timeoutNs: execTimeoutNs)
 
         guard let outcome else {
             // Timed out: kill ps so Apple closes the write ends (letting the
-            // background drain tasks finish and close the read fds), then
-            // report an empty table rather than hanging the request.
+            // collector's drain tasks finish and close the read fds), then
+            // report an empty table rather than hanging the request. If even
+            // the kill doesn't unblock a dead XPC wait, the collector leaks —
+            // the request is already home.
             try? await process.kill(SIGTERM)
             return ""
         }
+        // A failed ps must not masquerade as "no processes": report it with
+        // the captured diagnostic (moby surfaces host-ps failures too).
+        guard outcome.exitCode == 0 else {
+            let diagnostic =
+                String(data: outcome.stderr, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            throw Abort(
+                .internalServerError,
+                reason: "ps failed in container (exit \(outcome.exitCode))\(diagnostic.isEmpty ? "" : ": \(diagnostic)")"
+            )
+        }
         let text = String(data: outcome.stdout, encoding: .utf8) ?? ""
         return filterPsSelfRow(text, command: (["ps"] + arguments).joined(separator: " "))
+    }
+
+    /// Resumes with the task's result, or `nil` if the timeout elapses first.
+    /// The loser is never awaited on the winning path: whichever finishes
+    /// second finds the continuation already consumed and is ignored.
+    private static func raceFirstOrTimeout<T: Sendable>(_ task: Task<T?, Never>, timeoutNs: UInt64) async -> T? {
+        await withCheckedContinuation { (cont: CheckedContinuation<T?, Never>) in
+            let once = ResumeOnce(cont)
+            Task {
+                once.resume(returning: await task.value)
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: timeoutNs)
+                once.resume(returning: nil)
+            }
+        }
+    }
+
+    /// One-shot continuation wrapper — the second resume is a no-op instead
+    /// of a fatal error (the losing racer is guaranteed to fire late).
+    private final class ResumeOnce<T: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<T, Never>?
+
+        init(_ continuation: CheckedContinuation<T, Never>) {
+            self.continuation = continuation
+        }
+
+        func resume(returning value: T) {
+            lock.lock()
+            let cont = continuation
+            continuation = nil
+            lock.unlock()
+            cont?.resume(returning: value)
+        }
     }
 
     /// moby runs ps on the HOST filtered to the container's pids, so the ps
@@ -224,7 +305,6 @@ enum ContainerTopUtility {
         client: ClientContainerProtocol,
         containerId: String,
         psArgs: [String],
-        rejoinCommandExtras: Bool,
         runPs: PsRunner = execPs
     ) async throws -> TopReport {
         let container: ContainerSnapshot
@@ -245,6 +325,6 @@ enum ContainerTopUtility {
 
         let arguments = psArgs.isEmpty ? defaultPsArgs : psArgs
         let output = try await runPs(container, arguments)
-        return parse(output, rejoinCommandExtras: rejoinCommandExtras)
+        return parse(output)
     }
 }

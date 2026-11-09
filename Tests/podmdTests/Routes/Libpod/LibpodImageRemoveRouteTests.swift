@@ -126,16 +126,19 @@ struct LibpodImageRemoveRouteTests {
         }
     }
 
-    @Test("all=true removes every listed image by digest")
+    @Test("all=true removes every listed reference — including sibling tags sharing a digest")
     func allRemovesEveryImage() async throws {
         let mock = BatchRemoveImageMock()
         mock.listedImages = [
             makeClientImage(reference: "docker.io/library/alpine:latest", digest: "sha256:aaa"),
+            makeClientImage(reference: "docker.io/library/alpine:3.21", digest: "sha256:aaa"),
             makeClientImage(reference: "docker.io/library/busybox:latest", digest: "sha256:bbb"),
         ]
-        mock.results["sha256:aaa"] = .success(
-            ImageDeletionResult(untagged: "docker.io/library/alpine:latest", digest: "sha256:aaa", deletedDigest: "sha256:aaa"))
-        mock.results["sha256:bbb"] = .success(
+        mock.results["docker.io/library/alpine:latest"] = .success(
+            ImageDeletionResult(untagged: "docker.io/library/alpine:latest", digest: "sha256:aaa", deletedDigest: nil))
+        mock.results["docker.io/library/alpine:3.21"] = .success(
+            ImageDeletionResult(untagged: "docker.io/library/alpine:3.21", digest: "sha256:aaa", deletedDigest: nil))
+        mock.results["docker.io/library/busybox:latest"] = .success(
             ImageDeletionResult(untagged: "docker.io/library/busybox:latest", digest: "sha256:bbb", deletedDigest: "sha256:bbb"))
 
         try await withRemoveApp(mock) { app in
@@ -143,10 +146,14 @@ struct LibpodImageRemoveRouteTests {
                 #expect(res.status == .ok)
                 let report = try JSONDecoder().decode(LibpodImageRemoveReport.self, from: Data(buffer: res.body))
                 #expect(report.ExitCode == 0)
-                #expect(Set(report.Deleted ?? []) == Set(["sha256:aaa", "sha256:bbb"]))
+                #expect(report.Deleted == ["sha256:bbb"])
             }
         }
-        #expect(Set(mock.deletedIds) == Set(["sha256:aaa", "sha256:bbb"]))
+        // Every reference is deleted — deduplicating by digest would leave
+        // the second alpine tag behind while reporting success.
+        #expect(
+            Set(mock.deletedIds)
+                == Set(["docker.io/library/alpine:latest", "docker.io/library/alpine:3.21", "docker.io/library/busybox:latest"]))
     }
 
     @Test("JSON body {images, force, all} is accepted as a fallback transport")
@@ -169,6 +176,35 @@ struct LibpodImageRemoveRouteTests {
             }
         }
         #expect(mock.deletedIds == ["alpine:latest"])
+    }
+
+    @Test("JSON body {all: true} removes every listed image")
+    func jsonBodyAllFallback() async throws {
+        let mock = BatchRemoveImageMock()
+        mock.listedImages = [
+            makeClientImage(reference: "docker.io/library/alpine:latest", digest: "sha256:aaa"),
+            makeClientImage(reference: "docker.io/library/busybox:latest", digest: "sha256:bbb"),
+        ]
+        mock.results["docker.io/library/alpine:latest"] = .success(
+            ImageDeletionResult(untagged: "docker.io/library/alpine:latest", digest: "sha256:aaa", deletedDigest: "sha256:aaa"))
+        mock.results["docker.io/library/busybox:latest"] = .success(
+            ImageDeletionResult(untagged: "docker.io/library/busybox:latest", digest: "sha256:bbb", deletedDigest: "sha256:bbb"))
+
+        try await withRemoveApp(mock) { app in
+            try await app.testing().test(
+                .DELETE, "/v1.51/libpod/images/remove",
+                beforeRequest: { req in
+                    try req.content.encode(RemoveRequestBody(images: nil, force: nil, all: true))
+                }
+            ) { res async throws in
+                #expect(res.status == .ok)
+                let report = try JSONDecoder().decode(LibpodImageRemoveReport.self, from: Data(buffer: res.body))
+                #expect(report.ExitCode == 0)
+                #expect(Set(report.Deleted ?? []) == Set(["sha256:aaa", "sha256:bbb"]))
+            }
+        }
+        #expect(
+            Set(mock.deletedIds) == Set(["docker.io/library/alpine:latest", "docker.io/library/busybox:latest"]))
     }
 
     @Test("empty batch returns an empty report with exit code 0")

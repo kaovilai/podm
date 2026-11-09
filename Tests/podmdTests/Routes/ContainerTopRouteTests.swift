@@ -83,20 +83,21 @@ struct ContainerTopRouteTests {
 
     // MARK: - Parse matrix
 
-    @Test("procps ps -ef output parses header and rows, command args stay split (docker)")
+    @Test("procps ps -ef output parses header and rows, command extras merge into the last column")
     func parseProcpsEf() {
         let output = """
             UID  PID  PPID  C STIME TTY  TIME CMD
             root     1     0  0 12:34 ?    00:00:00 /sbin/init
             root    42     1  0 12:34 ?    00:00:00 sh -c sleep 1000
             """
-        let report = ContainerTopUtility.parse(output, rejoinCommandExtras: false)
+        let report = ContainerTopUtility.parse(output)
         #expect(report.Titles == ["UID", "PID", "PPID", "C", "STIME", "TTY", "TIME", "CMD"])
         #expect(report.Processes.count == 2)
         #expect(report.Processes[0] == ["root", "1", "0", "0", "12:34", "?", "00:00:00", "/sbin/init"])
-        // moby leaves the row split — a command with args spans several fields
-        // (7 fixed columns + "sh -c sleep 1000" = 4 more).
-        #expect(report.Processes[1] == ["root", "42", "1", "0", "12:34", "?", "00:00:00", "sh", "-c", "sleep", "1000"])
+        // moby appendProcess2ProcList merges "overhanging" fields — a command
+        // with args spans several whitespace fields and is rejoined into the
+        // last column, keeping every row exactly Titles.count wide.
+        #expect(report.Processes[1] == ["root", "42", "1", "0", "12:34", "?", "00:00:00", "sh -c sleep 1000"])
     }
 
     @Test("ps aux output parses (%CPU-style headers and decimal columns)")
@@ -105,7 +106,7 @@ struct ContainerTopRouteTests {
             USER PID %CPU %MEM    VSZ   RSS TTY STAT START TIME COMMAND
             root   1  0.0  0.1  12345  678 ?  Ss  12:34  0:00 /sbin/init
             """
-        let report = ContainerTopUtility.parse(output, rejoinCommandExtras: false)
+        let report = ContainerTopUtility.parse(output)
         #expect(report.Titles == ["USER", "PID", "%CPU", "%MEM", "VSZ", "RSS", "TTY", "STAT", "START", "TIME", "COMMAND"])
         #expect(report.Processes == [["root", "1", "0.0", "0.1", "12345", "678", "?", "Ss", "12:34", "0:00", "/sbin/init"]])
     }
@@ -116,44 +117,44 @@ struct ContainerTopRouteTests {
             PID   USER     TIME  COMMAND
                 1 root      0:00 sleep 1000
             """
-        let report = ContainerTopUtility.parse(output, rejoinCommandExtras: false)
+        let report = ContainerTopUtility.parse(output)
         #expect(report.Titles == ["PID", "USER", "TIME", "COMMAND"])
-        #expect(report.Processes == [["1", "root", "0:00", "sleep", "1000"]])
+        #expect(report.Processes == [["1", "root", "0:00", "sleep 1000"]])
     }
 
-    @Test("rejoin mode merges command extras into the last column (libpod/podman)")
+    @Test("rows wider than the header merge command extras into the last column")
     func parseRejoinsCommandExtras() {
         let output = """
             UID PID PPID C STIME TTY TIME CMD
             root 42 1 0 12:34 ? 00:00:00 sh -c sleep 1000
             """
-        let report = ContainerTopUtility.parse(output, rejoinCommandExtras: true)
+        let report = ContainerTopUtility.parse(output)
         #expect(report.Titles == ["UID", "PID", "PPID", "C", "STIME", "TTY", "TIME", "CMD"])
-        // podman's handler keeps every row exactly Titles.count wide.
+        // Every row stays exactly Titles.count wide (moby + podman compat).
         #expect(report.Processes == [["root", "42", "1", "0", "12:34", "?", "00:00:00", "sh -c sleep 1000"]])
     }
 
-    @Test("rejoin mode leaves rows that fit the header untouched")
+    @Test("rows that fit the header are untouched")
     func parseRejoinShortRow() {
         let output = """
             PID COMMAND
             2 ps
             1 /bin/sh
             """
-        let report = ContainerTopUtility.parse(output, rejoinCommandExtras: true)
+        let report = ContainerTopUtility.parse(output)
         #expect(report.Processes == [["2", "ps"], ["1", "/bin/sh"]])
     }
 
     @Test("empty output yields an empty report, not an error")
     func parseEmpty() {
-        let report = ContainerTopUtility.parse("", rejoinCommandExtras: false)
+        let report = ContainerTopUtility.parse("")
         #expect(report.Titles.isEmpty)
         #expect(report.Processes.isEmpty)
     }
 
     @Test("header-only output yields titles with no processes")
     func parseHeaderOnly() {
-        let report = ContainerTopUtility.parse("PID USER COMMAND\n", rejoinCommandExtras: false)
+        let report = ContainerTopUtility.parse("PID USER COMMAND\n")
         #expect(report.Titles == ["PID", "USER", "COMMAND"])
         #expect(report.Processes.isEmpty)
     }
@@ -161,15 +162,15 @@ struct ContainerTopRouteTests {
     @Test("CRLF and blank lines are tolerated")
     func parseCRLF() {
         let output = "PID COMMAND\r\n1 sleep 1000\r\n\r\n2 ps\r\n"
-        let report = ContainerTopUtility.parse(output, rejoinCommandExtras: false)
+        let report = ContainerTopUtility.parse(output)
         #expect(report.Titles == ["PID", "COMMAND"])
-        #expect(report.Processes == [["1", "sleep", "1000"], ["2", "ps"]])
+        #expect(report.Processes == [["1", "sleep 1000"], ["2", "ps"]])
     }
 
     @Test("non-ASCII whitespace inside a command does not split the field")
     func parseNonAsciiSpace() {
         let output = "PID COMMAND\n1 café\u{00A0}latte"
-        let report = ContainerTopUtility.parse(output, rejoinCommandExtras: false)
+        let report = ContainerTopUtility.parse(output)
         #expect(report.Processes == [["1", "café\u{00A0}latte"]])
     }
 
@@ -194,25 +195,33 @@ struct ContainerTopRouteTests {
         #expect(ContainerTopUtility.libpodArgv(psArgs: [""]) == [])
     }
 
-    @Test("libpodArgv maps descriptors — repeated, comma-joined, or via descriptors — to ps -o")
+    @Test("libpodArgv maps descriptors — repeated, comma-joined, or via descriptors — to ps -eo")
     func libpodArgvDescriptors() {
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["user", "pid"]) == ["-o", "user,pid"])
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["user,pid,command"]) == ["-o", "user,pid,args"])
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["user", "pid,command"]) == ["-o", "user,pid,args"])
-        #expect(ContainerTopUtility.libpodArgv(psArgs: [" user , pid "]) == ["-o", "user,pid"])
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["user", "pid"]) == ["-eo", "user,pid"])
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["user,pid,command"]) == ["-eo", "user,pid,args"])
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["user", "pid,command"]) == ["-eo", "user,pid,args"])
+        #expect(ContainerTopUtility.libpodArgv(psArgs: [" user , pid "]) == ["-eo", "user,pid"])
     }
 
     @Test("libpodArgv aliases procps-only descriptor spellings to busybox-compatible ones")
     func libpodArgvAliases() {
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["command"]) == ["-o", "args"])
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["cmd"]) == ["-o", "args"])
-        #expect(ContainerTopUtility.libpodArgv(psArgs: ["pid,elapsed"]) == ["-o", "pid,etime"])
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["command"]) == ["-eo", "args"])
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["cmd"]) == ["-eo", "args"])
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["pid,elapsed"]) == ["-eo", "pid,etime"])
     }
 
-    @Test("libpodArgv passes flag-style values through unchanged")
+    @Test("libpodArgv passes flag-style values through unchanged, raw mode decided before normalization")
     func libpodArgvFlags() {
         #expect(ContainerTopUtility.libpodArgv(psArgs: ["-ef"]) == ["-ef"])
         #expect(ContainerTopUtility.libpodArgv(psArgs: ["aux", "-f"]) == ["aux", "-f"])
+        // A single flag-carrying value is shlex-split with commas preserved —
+        // comma-splitting first would destroy the "-o pid,args" option value
+        // (podman's ErrUnknownDescriptor fallback, google/shlex, #12452).
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["-o pid,args"]) == ["-o", "pid,args"])
+        // Unknown descriptors are raw ps arguments, not "-o" columns:
+        // "aux" would otherwise become "ps -eo aux", which ps rejects.
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["aux"]) == ["aux"])
+        #expect(ContainerTopUtility.libpodArgv(psArgs: ["-eo", "pid,args"]) == ["-eo", "pid,args"])
     }
 
     @Test("filterPsSelfRow drops the ps process's own row, keeps everything else")
@@ -322,7 +331,7 @@ struct ContainerTopRouteTests {
         #expect(calls.map(\.argv) == [["-ef"]])
     }
 
-    @Test("podman top maps repeated ps_args descriptors to ps -o")
+    @Test("podman top maps repeated ps_args descriptors to ps -eo")
     func libpodTopDescriptors() async throws {
         let fake = FakePs(output: "USER PID COMMAND\n")
         let snapshot = try runningSnapshot(id: "c1")
@@ -332,10 +341,10 @@ struct ContainerTopRouteTests {
             }
         }
         let calls = await fake.calls
-        #expect(calls.map(\.argv) == [["-o", "user,pid"]])
+        #expect(calls.map(\.argv) == [["-eo", "user,pid"]])
     }
 
-    @Test("podman top maps comma-joined descriptors and the descriptors parameter to ps -o")
+    @Test("podman top maps comma-joined descriptors and the descriptors parameter to ps -eo")
     func libpodTopCommaAndDescriptorsParam() async throws {
         let fake = FakePs(output: "USER PID COMMAND\n")
         let snapshot = try runningSnapshot(id: "c1")
@@ -348,7 +357,7 @@ struct ContainerTopRouteTests {
             }
         }
         let calls = await fake.calls
-        #expect(calls.map(\.argv) == [["-o", "user,pid,args"], ["-o", "user,pid"]])
+        #expect(calls.map(\.argv) == [["-eo", "user,pid,args"], ["-eo", "user,pid"]])
     }
 
     @Test("podman top returns 404 for an unknown container and 409 when stopped")

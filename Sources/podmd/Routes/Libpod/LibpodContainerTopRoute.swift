@@ -49,7 +49,6 @@ struct LibpodContainerTopRoute: RouteCollection {
                 client: client,
                 containerId: containerId,
                 psArgs: ContainerTopUtility.libpodArgv(psArgs: raw),
-                rejoinCommandExtras: true,
                 runPs: runPs
             )
         }

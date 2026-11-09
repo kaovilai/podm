@@ -38,7 +38,6 @@ struct ContainerTopRoute: RouteCollection {
                 client: client,
                 containerId: containerId,
                 psArgs: ContainerTopUtility.dockerArgv(psArgs: psArgs),
-                rejoinCommandExtras: false,
                 runPs: runPs
             )
         }

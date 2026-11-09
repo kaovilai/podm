@@ -251,6 +251,13 @@ actor HealthCheckManager {
         if startPeriodNs > 0 && !probesDuringStartPeriod {
             try? await Task.sleep(nanoseconds: startPeriodNs)
         }
+        // With startup probing, the first probe waits one StartInterval —
+        // moby's `monitor` arms its first timer with getInterval(), which
+        // returns the start interval for a still-starting container, so
+        // StartPeriod=30s/StartInterval=5s probes at t=5s, not t=0.
+        if probesDuringStartPeriod {
+            try? await Task.sleep(nanoseconds: startIntervalNs)
+        }
 
         let generation = generations[containerId] ?? 0
 
@@ -297,7 +304,12 @@ actor HealthCheckManager {
                 } else {
                     let failingStreak = (failingStreaks[containerId] ?? 0) + 1
                     failingStreaks[containerId] = failingStreak
-                    let status = failingStreak >= maxRetries ? "unhealthy" : "starting"
+                    // moby handleProbeResult: below the Retries threshold the
+                    // status is NOT demoted — an already-healthy container
+                    // stays healthy until the streak exhausts the budget.
+                    // (Flipping it back to "starting" here would also reopen
+                    // the startup-forgiveness window after an early success.)
+                    let status = failingStreak >= maxRetries ? "unhealthy" : (statuses[containerId]?.Status ?? "starting")
                     updateStatus(id: containerId, health: ContainerHealth(Status: status, FailingStreak: failingStreak, Log: []), logEntry: entry)
                     log.debug("[healthcheck] \(containerId) → \(status) (streak=\(failingStreak), exit=\(exitCode))")
                 }
