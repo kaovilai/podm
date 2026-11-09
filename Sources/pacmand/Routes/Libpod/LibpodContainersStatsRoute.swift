@@ -293,7 +293,11 @@ struct LibpodContainersStatsRoute: RouteCollection {
                             try await writer.write(.buffer(buf))
                         }
                         if !stream { break }
-                        try await Task.sleep(nanoseconds: UInt64(interval) * 1_000_000_000)
+                        // Clamp before multiplying: a huge ?interval would
+                        // overflow UInt64 nanoseconds and trap, killing the
+                        // daemon. One day is far past any sane stats cadence.
+                        let clampedInterval = min(interval, 86_400)
+                        try await Task.sleep(nanoseconds: UInt64(clampedInterval) * 1_000_000_000)
                         // Re-resolve the target set each tick — containers may
                         // start or stop while the stream is open (podman
                         // re-lists every interval too). Best-effort: on
