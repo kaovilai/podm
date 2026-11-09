@@ -45,10 +45,12 @@ struct LibpodContainerTopRoute: RouteCollection {
             var raw = allQueryValues(named: "ps_args", from: req.url.query)
             raw += allQueryValues(named: "descriptors", from: req.url.query)
 
+            let args = ContainerTopUtility.libpodArgv(psArgs: raw)
             return try await ContainerTopUtility.top(
                 client: client,
                 containerId: containerId,
-                psArgs: ContainerTopUtility.libpodArgv(psArgs: raw),
+                psArgs: args.argv,
+                appendedCommandColumn: args.appendedCommandColumn,
                 runPs: runPs
             )
         }

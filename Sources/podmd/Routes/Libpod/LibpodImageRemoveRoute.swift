@@ -45,10 +45,11 @@ extension LibpodImageRemoveRoute {
             // Body fallback for clients that POST-style JSON bodies on DELETE.
             // Vapor streams request bodies unless they were collected; decode
             // needs the buffered bytes, so collect explicitly (a no-op when
-            // already collected) — a streamed body would otherwise fail the
-            // `try?` decode and silently turn into empty success.
+            // already collected). Collection errors (e.g. body over the max
+            // size) propagate rather than silently decode-failing into an
+            // empty-success report.
             if images.isEmpty {
-                try? await req.body.collect()
+                try await req.body.collect()
             }
             if images.isEmpty, let body = try? req.content.decode(LibpodImageRemoveBody.self) {
                 images = body.images ?? []
@@ -131,16 +132,22 @@ extension LibpodImageRemoveRoute {
     /// Reads a boolean flag from the RAW query string, tri-state: nil when the
     /// key is absent, true/false for an explicit value, true for a bare flag
     /// (`?all`). Needed because Vapor's query decoding materializes Bool keys
-    /// as `false` even when the whole query string is missing.
+    /// as `false` even when the whole query string is missing. Keys and values
+    /// are percent-decoded and compared case-insensitively (`all=True`,
+    /// `all=%74rue` both count as true).
     static func queryFlag(_ name: String, in query: String?) -> Bool? {
         guard let query, !query.isEmpty else { return nil }
         for pair in query.split(separator: "&") {
             let parts = pair.split(separator: "=", maxSplits: 1)
-            guard let key = parts.first.map(String.init), key == name else { continue }
-            guard let raw = parts.dropFirst().first.map(String.init), !raw.isEmpty else {
+            let key = (parts.first.map(String.init) ?? String(pair)).removingPercentEncoding ?? String(parts.first ?? "")
+            guard key == name else { continue }
+            guard let raw = parts.dropFirst().first.map(String.init)?.removingPercentEncoding,
+                !raw.isEmpty
+            else {
                 return true  // bare flag
             }
-            return raw == "true" || raw == "1" || raw == "yes"
+            let lowered = raw.lowercased()
+            return lowered == "true" || lowered == "1" || lowered == "yes"
         }
         return nil
     }

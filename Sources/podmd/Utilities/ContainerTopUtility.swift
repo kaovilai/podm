@@ -119,15 +119,20 @@ enum ContainerTopUtility {
     /// arguments. The `-e` matters: procps with only `-o` selects the current
     /// user's tty-attached processes (in a container, usually nothing) —
     /// busybox ps ignores it harmlessly (it never filters).
-    /// `[]` means "no args given" — the caller then applies `defaultPsArgs`.
-    static func libpodArgv(psArgs: [String]) -> [String] {
+    ///
+    /// When the requested descriptors contain no command-ish column, `args`
+    /// is appended so the self-row filter has a command line to match on;
+    /// `top()` strips the extra column from the parsed report. The return
+    /// value carries that flag. `[]` means "no args given" — the caller then
+    /// applies `defaultPsArgs`.
+    static func libpodArgv(psArgs: [String]) -> (argv: [String], appendedCommandColumn: Bool) {
         let trimmed = psArgs.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        guard !trimmed.isEmpty else { return [] }
+        guard !trimmed.isEmpty else { return ([], false) }
         // Raw ps-argument mode is decided on the ORIGINAL values, before any
         // comma-splitting or aliasing: a leading dash is always a flag, and
         // comma-splitting "-o pid,args" would destroy the option value.
         if trimmed.contains(where: { $0.hasPrefix("-") }) {
-            return shlexSplitSingle(trimmed)
+            return (shlexSplitSingle(trimmed), false)
         }
         let tokens =
             trimmed
@@ -135,31 +140,87 @@ enum ContainerTopUtility {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         if tokens.allSatisfy({ isKnownDescriptor($0) }) {
-            return ["-eo", (tokens.map { descriptorAliases[$0] ?? $0 }).joined(separator: ",")]
+            let mapped = tokens.map { descriptorAliases[$0] ?? $0 }
+            let hasCommandColumn = mapped.contains(where: { $0 == "args" || $0 == "comm" })
+            if hasCommandColumn {
+                return (["-eo", mapped.joined(separator: ",")], false)
+            }
+            return (["-eo", (mapped + ["args"]).joined(separator: ",")], true)
         }
         // Unknown descriptor → ps(1) arguments (podman's ErrUnknownDescriptor
         // fallback): "aux" and friends reach the container's ps verbatim.
-        return shlexSplitSingle(trimmed)
+        return (shlexSplitSingle(trimmed), false)
     }
 
     /// podman (google/shlex, containers/podman#12452) splits a single
     /// descriptor string into a ps(1) argv; several separate values are
-    /// already an argv. Whitespace-split is the quote-free subset of shlex.
+    /// already an argv. This is a quote/escape-aware shell-word splitter
+    /// (single quotes, double quotes, backslash escapes) so a value like
+    /// `-eo 'pid,args'` reaches ps as two clean words, quotes stripped.
     private static func shlexSplitSingle(_ values: [String]) -> [String] {
         guard values.count == 1 else { return values }
-        return values[0].split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        return shellWords(values[0])
+    }
+
+    /// Minimal shlex: splits on unquoted whitespace, honors '…', "…", and
+    /// backslash escapes; empty words are dropped.
+    private static func shellWords(_ input: String) -> [String] {
+        var words: [String] = []
+        var current = ""
+        var hasWord = false
+        var iterator = input.makeIterator()
+        while let ch = iterator.next() {
+            switch ch {
+            case " ", "\t":
+                if hasWord {
+                    words.append(current)
+                    current = ""
+                    hasWord = false
+                }
+            case "'":
+                // Single-quoted: everything until the closing quote is literal.
+                while let inner = iterator.next(), inner != "'" {
+                    current.append(inner)
+                }
+                hasWord = true
+            case "\"":
+                // Double-quoted: backslash escapes are honored.
+                while let inner = iterator.next(), inner != "\"" {
+                    if inner == "\\", let escaped = iterator.next() {
+                        current.append(escaped)
+                    } else {
+                        current.append(inner)
+                    }
+                }
+                hasWord = true
+            case "\\":
+                if let escaped = iterator.next() {
+                    current.append(escaped)
+                }
+                hasWord = true
+            default:
+                current.append(ch)
+                hasWord = true
+            }
+        }
+        if hasWord {
+            words.append(current)
+        }
+        return words
     }
 
     /// The descriptors psgo accepts without falling back to ps(1) (its AIX
-    /// format set), plus the ps(1) spellings we alias — anything else is a
-    /// raw ps argument as far as the decision is concerned.
+    /// format set, per podman's top(1) documentation), plus the ps(1)
+    /// spellings we alias — anything else is a raw ps argument as far as the
+    /// decision is concerned.
     private static func isKnownDescriptor(_ token: String) -> Bool {
         psgoDescriptors.contains(token) || descriptorAliases[token] != nil
     }
 
     private static let psgoDescriptors: Set<String> = [
-        "args", "comm", "%cpu", "cgroup", "etime", "gid", "group", "%mem",
-        "pid", "ppid", "time", "tty", "uid", "user", "%vmem",
+        "args", "comm", "%cpu", "pcpu", "cgroup", "etime", "gid", "group", "%mem", "pmem",
+        "pid", "ppid", "time", "tty", "uid", "user", "%vmem", "pvmem",
+        "nice", "pgid", "rgroup", "ruser", "vsz", "rss", "stat",
     ]
 
     /// procps accepts both spellings, busybox ps only the short ones — the
@@ -216,10 +277,17 @@ enum ContainerTopUtility {
         // doesn't unblock a stalled XPC wait() or the detached pipe readers —
         // the timeout branch would never actually return. Racing this way,
         // the request path never awaits the collector after the deadline.
+        // The collector reports Result so a COLLECTION error (pipe read
+        // failure) stays distinguishable from a timeout.
         typealias PsOutput = (exitCode: Int32, stdout: Data, stderr: Data)
-        let collector = Task<PsOutput?, Never> {
-            try? await pipes.collectOutput {
-                await ContainerExitCodeStore.resolveExitCode(wait: { try await process.wait() })
+        let collector = Task<Result<PsOutput, Error>?, Never> {
+            do {
+                return .success(
+                    try await pipes.collectOutput {
+                        await ContainerExitCodeStore.resolveExitCode(wait: { try await process.wait() })
+                    })
+            } catch {
+                return .failure(error)
             }
         }
         let outcome = await raceFirstOrTimeout(collector, timeoutNs: execTimeoutNs)
@@ -233,18 +301,26 @@ enum ContainerTopUtility {
             try? await process.kill(SIGTERM)
             return ""
         }
+        // A collection failure (e.g. a pipe read error) is not "no processes"
+        // either — surface it instead of silently returning an empty table.
+        let output: PsOutput
+        switch outcome {
+        case .success(let collected): output = collected
+        case .failure(let error):
+            throw Abort(.internalServerError, reason: "Failed to collect ps output from container: \(error)")
+        }
         // A failed ps must not masquerade as "no processes": report it with
         // the captured diagnostic (moby surfaces host-ps failures too).
-        guard outcome.exitCode == 0 else {
+        guard output.exitCode == 0 else {
             let diagnostic =
-                String(data: outcome.stderr, encoding: .utf8)?
+                String(data: output.stderr, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             throw Abort(
                 .internalServerError,
-                reason: "ps failed in container (exit \(outcome.exitCode))\(diagnostic.isEmpty ? "" : ": \(diagnostic)")"
+                reason: "ps failed in container (exit \(output.exitCode))\(diagnostic.isEmpty ? "" : ": \(diagnostic)")"
             )
         }
-        let text = String(data: outcome.stdout, encoding: .utf8) ?? ""
+        let text = String(data: output.stdout, encoding: .utf8) ?? ""
         return filterPsSelfRow(text, command: (["ps"] + arguments).joined(separator: " "))
     }
 
@@ -301,10 +377,14 @@ enum ContainerTopUtility {
 
     /// Resolves the container, checks it is running, runs ps inside it and
     /// parses the output. Shared by the Docker and libpod top routes.
+    /// `appendedCommandColumn` strips the trailing `args` column that
+    /// `libpodArgv` adds when the requested descriptors have no command-ish
+    /// column — it existed only so the self-row filter could match.
     static func top(
         client: ClientContainerProtocol,
         containerId: String,
         psArgs: [String],
+        appendedCommandColumn: Bool = false,
         runPs: PsRunner = execPs
     ) async throws -> TopReport {
         let container: ContainerSnapshot
@@ -325,6 +405,11 @@ enum ContainerTopUtility {
 
         let arguments = psArgs.isEmpty ? defaultPsArgs : psArgs
         let output = try await runPs(container, arguments)
-        return parse(output)
+        let report = parse(output)
+        guard appendedCommandColumn else { return report }
+        return TopReport(
+            Titles: Array(report.Titles.dropLast()),
+            Processes: report.Processes.map { Array($0.dropLast()) }
+        )
     }
 }

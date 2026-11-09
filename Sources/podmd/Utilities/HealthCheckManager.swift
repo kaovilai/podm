@@ -258,6 +258,11 @@ actor HealthCheckManager {
         if probesDuringStartPeriod {
             try? await Task.sleep(nanoseconds: startIntervalNs)
         }
+        // A stop() during either initial sleep cancels this task; `try?`
+        // swallows the CancellationError, and the generation read below would
+        // then observe the POST-stop generation and wrongly keep the loop
+        // alive for a stopped container. Bail out instead.
+        if Task.isCancelled { return }
 
         let generation = generations[containerId] ?? 0
 

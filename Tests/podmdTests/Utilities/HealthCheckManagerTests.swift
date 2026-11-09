@@ -260,6 +260,29 @@ private actor ProbeTimeline {
     }
 }
 
+/// Gated probe results for deterministic transition tests: the probe closure
+/// gets `initialResult` until the test calls `startFailing()`, then
+/// `failResult` — mid-flight states (e.g. "healthy with streak 1") hold for a
+/// full probe interval, so assertions can observe them without racing.
+private actor ProbeScript {
+    private var failing = false
+    private let initialResult: Int32
+    private let failResult: Int32
+
+    init(initialResult: Int32, failResult: Int32 = 1) {
+        self.initialResult = initialResult
+        self.failResult = failResult
+    }
+
+    func probe() -> Int32 {
+        failing ? failResult : initialResult
+    }
+
+    func startFailing() {
+        failing = true
+    }
+}
+
 /// Docker 25+ `StartInterval` (`start_interval`) startup semantics, mirroring
 /// moby's `daemon/health.go` (v28.5.2 — the version podm's API level targets):
 ///
@@ -495,32 +518,50 @@ struct HealthCheckManagerStartIntervalTests {
         // a container that is no longer starting counts, and the status is
         // NOT demoted below the Retries threshold — flipping back to
         // "starting" would reopen the forgiveness window after success.
-        let timeline = ProbeTimeline()
+        // Probes are GATED so the transitions are deterministic: the first
+        // probe succeeds, the test then flips a flag the probe closure reads,
+        // and every later probe fails. The interval floor of 200ms spaces the
+        // probes far enough apart that each mid-flight assertion is observed
+        // while it holds (the next probe is a full floor away).
+        let script = ProbeScript(initialResult: 0)
         let mgr = HealthCheckManager(
             probe: { _, _, _ in
-                let n = await timeline.record()
-                return n == 1 ? 0 : 1
+                await script.probe()
             },
-            intervalFloorNs: 1_000_000
+            intervalFloorNs: 200_000_000
         )
         let cfg = HealthcheckConfig(
             Test: ["CMD", "false"],
-            Interval: 5_000_000,  // 5ms — failures accumulate fast
+            Interval: 1_000_000,
             Timeout: 1_000_000_000,
             Retries: 2,
-            StartPeriod: 5_000_000_000,  // open for the whole test
-            StartInterval: 5_000_000
+            StartPeriod: 2_000_000_000,  // the whole gated sequence (~600ms) stays inside it
+            StartInterval: 1_000_000
         )
+        let startNs = DispatchTime.now().uptimeNanoseconds
         await mgr.start(containerId: "grace-closed", config: cfg)
         try await Self.waitForStatus("healthy", on: mgr, id: "grace-closed")
-        // First failure after the success: streak 1 < Retries 2 → still
-        // healthy (not "starting"), and the failure counts.
+        // From here on, every probe fails.
+        await script.startFailing()
+        // First failure after the success: streak 1 < Retries 2 → the status
+        // must STILL be healthy (not "starting", which would reopen grace).
+        // The next probe is ≥ 200ms away, so this observation is stable.
+        while await (mgr.currentHealth(for: "grace-closed")?.FailingStreak ?? 0) < 1 {
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        let midHealth = await mgr.currentHealth(for: "grace-closed")
+        #expect(midHealth?.Status == "healthy", "post-success failure below Retries must not demote to starting")
+        #expect(midHealth?.FailingStreak == 1)
+        // Second failure: streak reaches Retries → unhealthy, while the start
+        // period is still open — if grace were (wrongly) reopened, the streak
+        // would stay 0 and unhealthy would only arrive after the 2s period.
         try await Self.waitForStatus("unhealthy", on: mgr, id: "grace-closed")
         let endHealth = await mgr.currentHealth(for: "grace-closed")
         #expect(endHealth?.Status == "unhealthy")
-        #expect((endHealth?.FailingStreak ?? 0) == 2, "post-success failures must count toward the retry budget, streak was \(endHealth?.FailingStreak ?? -1)")
-        // And the mid-flight check: between healthy and unhealthy the status
-        // must never have regressed to "starting" (which would reopen grace).
+        #expect((endHealth?.FailingStreak ?? 0) >= 2, "post-success failures must count toward the retry budget")
+        #expect(
+            DispatchTime.now().uptimeNanoseconds - startNs < 2_000_000_000,
+            "unhealthy arrived only after the start period expired — the grace window was reopened")
         await mgr.stop(containerId: "grace-closed")
     }
 
@@ -544,13 +585,11 @@ struct HealthCheckManagerStartIntervalTests {
         )
         let startNs = DispatchTime.now().uptimeNanoseconds
         await mgr.start(containerId: "first-wait", config: cfg)
-        // A Task.sleep never returns early, so inside the first 60ms the
-        // probe cannot have fired if (and only if) the initial StartInterval
-        // wait is in place — an immediate first probe would record at ~0ms.
-        try await Task.sleep(nanoseconds: 60_000_000)
-        let earlyCount = await timeline.timestamps.count
-        #expect(earlyCount == 0, "first startup probe must wait one StartInterval, saw \(earlyCount) probes in the first 60ms")
-        // ...and it does fire once the wait elapses.
+        // The deterministic invariant: a Task.sleep never returns early, so
+        // the FIRST recorded probe timestamp is ≥ 120ms (the floored
+        // StartInterval) after loop start — an immediate first probe would
+        // record at ~0ms. No observation window needed; the timestamp itself
+        // proves the initial wait, whenever the test gets scheduled.
         try await Self.waitForStatus("healthy", on: mgr, id: "first-wait")
         let times = await timeline.timestamps
         #expect(!times.isEmpty)
