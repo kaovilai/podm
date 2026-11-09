@@ -207,6 +207,25 @@ extension ContainerCreateRoute {
 
             let imageConfig = try await img.config(for: requestedPlatform).config
 
+            // The image's Dockerfile HEALTHCHECK — a fallback for creates that
+            // don't carry their own healthcheck (Compose-style clients send one
+            // in the request body; plain `docker run` relies on the image's).
+            // Apple's typed OCI config drops the field, so read the raw config
+            // blob via the image manifest's config descriptor. Any failure
+            // degrades to nil (no fallback), never fails the create.
+            let imageHealthcheck: HealthcheckConfig?
+            if let appSupportURL = req.application.storage[AppleContainerAppSupportUrlKey.self],
+                let imageManifest = try? await img.manifest(for: requestedPlatform)
+            {
+                imageHealthcheck = await ImageHealthcheckExtractor.healthcheck(
+                    configDigest: imageManifest.config.digest,
+                    appSupportURL: appSupportURL,
+                    logger: req.logger
+                )
+            } else {
+                imageHealthcheck = nil
+            }
+
             let workingDirectory = imageConfig?.workingDir ?? "/"
 
             let imageConfigEnvironment = imageConfig?.env ?? []
@@ -427,11 +446,13 @@ extension ContainerCreateRoute {
                 containerLabels[LabelNormalization.mappingKey] = mapping
             }
 
-            // Persist the requested healthcheck across create → start so the
+            // Persist the effective healthcheck across create → start so the
             // start route can launch the probe loop and inspect can return it
             // in Config.Healthcheck. Apple Container has no native field for
-            // this, so a JSON-encoded label is the carrier.
-            if let healthcheck = body.Healthcheck {
+            // this, so a JSON-encoded label is the carrier. The effective value
+            // is the request's healthcheck, falling back to the image's
+            // Dockerfile HEALTHCHECK when the request carries none.
+            if let healthcheck = ContainerCreateRoute.resolveHealthcheck(requested: body.Healthcheck, image: imageHealthcheck) {
                 do {
                     let json = try JSONEncoder().encode(healthcheck)
                     if let jsonString = String(data: json, encoding: .utf8) {
@@ -739,6 +760,50 @@ extension ContainerCreateRoute {
             return .raw(userString: imageUser)
         }
         return .id(uid: 0, gid: 0)
+    }
+
+    /// Resolves the effective healthcheck with Docker's precedence: a healthcheck
+    /// in the create request always wins — including the explicit
+    /// `{"Test":["NONE"]}` disable sentinel, which must suppress the image's
+    /// Dockerfile HEALTHCHECK rather than fall through to it. Only when the
+    /// request carries none does the image's HEALTHCHECK apply. `nil` means
+    /// "no healthcheck anywhere" (the label is then not set at all).
+    /// Field-level healthcheck resolution with Docker-compatible semantics:
+    ///
+    /// - An explicit `{"Test":["NONE"]}` in the request disables probing outright
+    ///   (the sentinel wins over any image healthcheck).
+    /// - Otherwise the request's set fields override the image's, field by field:
+    ///   a request carrying only `Interval` keeps the image's `Test` (and every
+    ///   other field), and a request carrying only `Test` keeps the image's
+    ///   timing/retry settings — a bare `requested ?? image` discarded them.
+    /// - Zero or negative `Interval`/`Timeout`/`Retries`/`StartPeriod` count as
+    ///   unset: HealthCheckManager defaults only nil, so an image (or request)
+    ///   encoding an explicit 0 would otherwise produce a 1s interval floor or
+    ///   an immediate-unhealthy retry budget instead of Docker's defaults.
+    /// - No runnable `Test` after the merge → no healthcheck at all.
+    static func resolveHealthcheck(requested: HealthcheckConfig?, image: HealthcheckConfig?) -> HealthcheckConfig? {
+        // The disable sentinel is absolute, wherever it comes from.
+        if requested?.Test == ["NONE"] || image?.Test == ["NONE"] {
+            return HealthcheckConfig(Test: ["NONE"], Interval: nil, Timeout: nil, Retries: nil, StartPeriod: nil)
+        }
+        guard requested != nil || image != nil else { return nil }
+
+        func normalized(_ value: Int?) -> Int? {
+            guard let value, value > 0 else { return nil }
+            return value
+        }
+
+        let merged = HealthcheckConfig(
+            Test: requested?.Test ?? image?.Test,
+            Interval: normalized(requested?.Interval ?? image?.Interval),
+            Timeout: normalized(requested?.Timeout ?? image?.Timeout),
+            Retries: normalized(requested?.Retries ?? image?.Retries),
+            StartPeriod: normalized(requested?.StartPeriod ?? image?.StartPeriod)
+        )
+        // No runnable test after the merge (neither side carried one, or the
+        // value is empty) → no probe: persist nothing.
+        guard HealthCheckManager.parseTest(merged.Test) != nil else { return nil }
+        return merged
     }
 
     /// Mirrors moby's ShmSize handling: a positive request is used verbatim; 0 or omitted
