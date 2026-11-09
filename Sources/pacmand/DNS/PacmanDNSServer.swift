@@ -7,7 +7,8 @@ struct PacmanDNSServerKey: StorageKey {
     typealias Value = PacmanDNSServer
 }
 
-/// UDP DNS server that resolves container service names and forwards unknown queries to 1.1.1.1.
+/// UDP DNS server that resolves container service names and forwards unknown queries
+/// to a configurable upstream resolver (default 1.1.1.1 — see `upstream` below).
 ///
 /// Runs on 0.0.0.0:2054 (covers all interfaces including vmnet gateways).
 /// Port 2053 is reserved by Apple Container's own DNS handler.
@@ -17,6 +18,35 @@ final class PacmanDNSServer: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [String: [UInt8]] = [:]  // normalized hostname → 4-byte IPv4
     private var log = Logger(label: "pacman.dns")
+
+    /// Upstream resolver used by `forwardToUpstream` for names this server cannot
+    /// answer locally (default 1.1.1.1:53).
+    ///
+    /// configure.swift constructs `PacmanDNSServer()` with no arguments, so the value
+    /// resolved in main.swift from the `--dns-upstream` CLI option / `PACMAN_DNS_UPSTREAM`
+    /// environment variable is threaded in through this static rather than an initializer
+    /// parameter — the least invasive option that leaves the configure.swift call site
+    /// untouched. It is written exactly once from the main thread before `configure(_:)`
+    /// starts the server and never mutated afterwards, so `nonisolated(unsafe)` carries
+    /// no data-race risk.
+    nonisolated(unsafe) static var upstream: (ip: String, port: UInt16) = ("1.1.1.1", 53)
+
+    /// Parses an `ip[:port]` upstream specification: a literal IPv4 address with an
+    /// optional port (default 53). Returns nil unless the address is a valid IPv4
+    /// literal and the port, when present, is a whole number in 1...65535.
+    static func parseUpstream(_ value: String) -> (ip: String, port: UInt16)? {
+        let parts = value.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 1 || parts.count == 2 else { return nil }
+        let ip = String(parts[0])
+        var addr = in_addr()
+        guard inet_pton(AF_INET, ip, &addr) == 1 else { return nil }
+        var port: UInt16 = 53
+        if parts.count == 2 {
+            guard let parsed = UInt16(parts[1]), parsed > 0 else { return nil }
+            port = parsed
+        }
+        return (ip, port)
+    }
 
     func register(hostname: String, ip: String) {
         guard let addr = Self.parseIPv4(ip) else { return }
@@ -124,7 +154,7 @@ final class PacmanDNSServer: @unchecked Sendable {
         // Two-tier dispatch: local lookups (in-table A/AAAA/NODATA) are answered
         // inline so the Rust DNS forwarder sidecar receives the response within
         // microseconds — before any per-task scheduling latency. Upstream queries
-        // (external multi-label names that need 1.1.1.1) are still dispatched to
+        // (external multi-label names that need the upstream resolver) are still dispatched to
         // avoid blocking the recvfrom loop for the 2-second socket timeout.
         while true {
             var clientAddr = sockaddr_in()
@@ -218,7 +248,8 @@ final class PacmanDNSServer: @unchecked Sendable {
         let normalized = Self.normalize(qname)
 
         // Single-label names are container names, not real internet domains — never forward
-        // them to 1.1.1.1, whose authoritative NXDOMAIN can poison concurrent A+AAAA resolvers.
+        // them to the upstream resolver, whose authoritative NXDOMAIN can poison concurrent
+        // A+AAAA resolvers.
         let isSingleLabel = !normalized.contains(".")
 
         if qtype == 1 {  // A record
@@ -234,7 +265,7 @@ final class PacmanDNSServer: @unchecked Sendable {
                 return buildNxdomainResponse(packet: packet)
             }
         } else if qtype == 28 {  // AAAA — container names are IPv4-only
-            // For single-label names return NODATA unconditionally; forwarding to 1.1.1.1
+            // For single-label names return NODATA unconditionally; forwarding upstream
             // would yield an authoritative NXDOMAIN that poisons concurrent A+AAAA resolvers.
             if isSingleLabel { return buildNodataResponse(packet: packet) }
             lock.lock()
@@ -326,11 +357,14 @@ final class PacmanDNSServer: @unchecked Sendable {
         var timeout = timeval(tv_sec: 2, tv_usec: 0)
         setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
 
+        // Snapshot once so ip and port stay consistent within a single forward.
+        let resolver = Self.upstream
+
         var upstream = sockaddr_in()
         upstream.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         upstream.sin_family = sa_family_t(AF_INET)
-        upstream.sin_port = UInt16(53).bigEndian
-        inet_pton(AF_INET, "1.1.1.1", &upstream.sin_addr)
+        upstream.sin_port = resolver.port.bigEndian
+        inet_pton(AF_INET, resolver.ip, &upstream.sin_addr)
 
         let connected = withUnsafePointer(to: &upstream) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
