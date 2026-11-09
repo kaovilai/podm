@@ -21,6 +21,13 @@ struct CLIOptions: ParsableArguments {
             "Sync mode for named volumes: nosync (default, ~1.5x faster for write-heavy workloads), fsync (honors guest fsyncs for durability), full (fully synchronous writes). Override per-volume with: docker volume create -o sync=fsync <name>"
     )
     var volumeSync: String = "nosync"
+
+    @ArgumentParser.Option(
+        name: .long,
+        help:
+            "Upstream DNS resolver for names the embedded DNS server cannot answer locally: IPv4 literal with optional :port (default 1.1.1.1:53). Env fallback: PACMAN_DNS_UPSTREAM"
+    )
+    var dnsUpstream: String?
 }
 
 // Parse CLI before starting the app
@@ -29,6 +36,34 @@ let options = CLIOptions.parseOrExit()
 if options.version {
     print("pacman: \(getBuildVersion()) (git commit: \(getBuildGitCommit()))")
     exit(0)
+}
+
+// Resolve the DNS upstream before anything else touches the DNS server (it is
+// applied via PacmanDNSServer.upstream ahead of configure(_:), which starts the
+// server). The CLI flag wins; PACMAN_DNS_UPSTREAM is only consulted when the
+// flag is absent. An invalid CLI value is fatal, while an invalid env value only
+// warns and keeps the default (matching upstream socktainer's documented
+// semantics).
+if let cliUpstream = options.dnsUpstream {
+    guard let parsed = PacmanDNSServer.parseUpstream(cliUpstream) else {
+        FileHandle.standardError.write(
+            Data(
+                "pacman: invalid --dns-upstream '\(cliUpstream)' — expected an IPv4 literal with optional :port (e.g. 8.8.8.8 or 8.8.8.8:53)\n"
+                    .utf8))
+        exit(1)
+    }
+    PacmanDNSServer.upstream = parsed
+} else if let envUpstream = ProcessInfo.processInfo.environment["PACMAN_DNS_UPSTREAM"]?
+    .trimmingCharacters(in: .whitespacesAndNewlines), !envUpstream.isEmpty
+{
+    if let parsed = PacmanDNSServer.parseUpstream(envUpstream) {
+        PacmanDNSServer.upstream = parsed
+    } else {
+        FileHandle.standardError.write(
+            Data(
+                "pacman: ignoring invalid PACMAN_DNS_UPSTREAM '\(envUpstream)' — expected an IPv4 literal with optional :port; using default \(PacmanDNSServer.upstream.ip)\n"
+                    .utf8))
+    }
 }
 
 if options.checkCompatibility {
