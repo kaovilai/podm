@@ -115,9 +115,9 @@ enum ImageHealthcheckExtractor {
 extension HealthConfig {
     /// Maps the container-side healthcheck model (the create-route label /
     /// `HealthCheckManager` currency) onto the image-inspect response model,
-    /// widening the time fields from `Int` to `Int64`. `StartInterval` is a
-    /// newer Docker extension the container-side model does not carry, so it
-    /// maps to nil.
+    /// widening the time fields from `Int` to `Int64`. `StartInterval` rides
+    /// along like every other field — the raw-config decode above already
+    /// carries it now that `HealthcheckConfig` models it.
     init?(_ config: HealthcheckConfig?) {
         guard let config else { return nil }
         self.init(
@@ -126,7 +126,7 @@ extension HealthConfig {
             Timeout: config.Timeout.map(Int64.init),
             Retries: config.Retries,
             StartPeriod: config.StartPeriod.map(Int64.init),
-            StartInterval: nil
+            StartInterval: config.StartInterval.map(Int64.init)
         )
     }
 }

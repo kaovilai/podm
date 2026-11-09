@@ -12,6 +12,26 @@ struct HealthcheckConfig: Content {
     let Timeout: Int?
     let Retries: Int?
     let StartPeriod: Int?
+    /// Docker 25+ `start_interval`: probe cadence while the `StartPeriod`
+    /// window is open (failures in that window don't count toward `Retries`).
+    /// Nanoseconds, like the other time fields. Only consulted when a start
+    /// period is configured — see `HealthCheckManager.runLoop`.
+    let StartInterval: Int?
+
+    /// `StartInterval` defaults to nil so callers written against the
+    /// pre-Docker-25 field set (and `podm.healthcheck` labels persisted before
+    /// the field existed) keep compiling and decoding unchanged.
+    init(
+        Test: [String]?, Interval: Int?, Timeout: Int?, Retries: Int?, StartPeriod: Int?,
+        StartInterval: Int? = nil
+    ) {
+        self.Test = Test
+        self.Interval = Interval
+        self.Timeout = Timeout
+        self.Retries = Retries
+        self.StartPeriod = StartPeriod
+        self.StartInterval = StartInterval
+    }
 }
 
 struct HealthLogEntry: Content {

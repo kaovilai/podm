@@ -248,6 +248,7 @@ func configure(_ app: Application) async throws {
     try app.register(collection: LibpodImageListRoute(client: imageClient))
     try app.register(collection: LibpodImagePullRoute(client: imageClient))
     try app.register(collection: LibpodImageDeleteRoute(client: imageClient))
+    try app.register(collection: LibpodImageRemoveRoute(client: imageClient))
     try app.register(collection: LibpodImageInspectRoute(systemConfig: systemConfig))
     try app.register(collection: LibpodImageTagRoute(systemConfig: systemConfig))
     try app.register(collection: LibpodBuildRoute(client: containerClient, builderClient: builderClient, systemConfig: systemConfig, manifestClient: manifestClient))

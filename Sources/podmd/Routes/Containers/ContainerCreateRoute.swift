@@ -776,15 +776,16 @@ extension ContainerCreateRoute {
     ///   a request carrying only `Interval` keeps the image's `Test` (and every
     ///   other field), and a request carrying only `Test` keeps the image's
     ///   timing/retry settings — a bare `requested ?? image` discarded them.
-    /// - Zero or negative `Interval`/`Timeout`/`Retries`/`StartPeriod` count as
-    ///   unset: HealthCheckManager defaults only nil, so an image (or request)
-    ///   encoding an explicit 0 would otherwise produce a 1s interval floor or
-    ///   an immediate-unhealthy retry budget instead of Docker's defaults.
+    /// - Zero or negative `Interval`/`Timeout`/`Retries`/`StartPeriod`/
+    ///   `StartInterval` count as unset: HealthCheckManager defaults only nil,
+    ///   so an image (or request) encoding an explicit 0 would otherwise
+    ///   produce a 1s interval floor or an immediate-unhealthy retry budget
+    ///   instead of Docker's defaults.
     /// - No runnable `Test` after the merge → no healthcheck at all.
     static func resolveHealthcheck(requested: HealthcheckConfig?, image: HealthcheckConfig?) -> HealthcheckConfig? {
         // The disable sentinel is absolute, wherever it comes from.
         if requested?.Test == ["NONE"] || image?.Test == ["NONE"] {
-            return HealthcheckConfig(Test: ["NONE"], Interval: nil, Timeout: nil, Retries: nil, StartPeriod: nil)
+            return HealthcheckConfig(Test: ["NONE"], Interval: nil, Timeout: nil, Retries: nil, StartPeriod: nil, StartInterval: nil)
         }
         guard requested != nil || image != nil else { return nil }
 
@@ -798,7 +799,8 @@ extension ContainerCreateRoute {
             Interval: normalized(requested?.Interval ?? image?.Interval),
             Timeout: normalized(requested?.Timeout ?? image?.Timeout),
             Retries: normalized(requested?.Retries ?? image?.Retries),
-            StartPeriod: normalized(requested?.StartPeriod ?? image?.StartPeriod)
+            StartPeriod: normalized(requested?.StartPeriod ?? image?.StartPeriod),
+            StartInterval: normalized(requested?.StartInterval ?? image?.StartInterval)
         )
         // No runnable test after the merge (neither side carried one, or the
         // value is empty) → no probe: persist nothing.

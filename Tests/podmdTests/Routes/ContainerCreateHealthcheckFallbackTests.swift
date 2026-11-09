@@ -22,7 +22,8 @@ struct ContainerCreateHealthcheckFallbackTests {
         Interval: 30_000_000_000,
         Timeout: 5_000_000_000,
         Retries: 3,
-        StartPeriod: 10_000_000_000
+        StartPeriod: 10_000_000_000,
+        StartInterval: 5_000_000_000
     )
 
     @Test("no request healthcheck → the image's Dockerfile HEALTHCHECK is used")
@@ -31,6 +32,7 @@ struct ContainerCreateHealthcheckFallbackTests {
         #expect(resolved?.Test == imageHealthcheck.Test)
         #expect(resolved?.Interval == 30_000_000_000)
         #expect(resolved?.Retries == 3)
+        #expect(resolved?.StartInterval == 5_000_000_000)
     }
 
     @Test("a request healthcheck overrides the image's")
@@ -46,6 +48,9 @@ struct ContainerCreateHealthcheckFallbackTests {
         #expect(resolved?.Test == ["CMD", "/bin/true"])
         #expect(resolved?.Interval == 1_000_000_000)
         #expect(resolved?.Retries == 1)
+        // Field-level merge: the request is silent on StartInterval, so the
+        // image's startup cadence survives (same rule as Test/Timeout above).
+        #expect(resolved?.StartInterval == 5_000_000_000)
     }
 
     @Test("an explicit NONE in the request suppresses the image's HEALTHCHECK")
@@ -119,13 +124,14 @@ extension ContainerCreateHealthcheckFallbackTests {
     @Test("explicit zeros count as unset — Docker defaults apply instead of 1s floors or 0 retries")
     func explicitZerosNormalizeToUnset() {
         let zeroed = HealthcheckConfig(
-            Test: ["CMD", "true"], Interval: 0, Timeout: 0, Retries: 0, StartPeriod: 0)
+            Test: ["CMD", "true"], Interval: 0, Timeout: 0, Retries: 0, StartPeriod: 0, StartInterval: 0)
         let resolved = ContainerCreateRoute.resolveHealthcheck(requested: zeroed, image: nil)
         #expect(resolved?.Test == ["CMD", "true"])
         #expect(resolved?.Interval == nil, "0 interval must not become the 1s loop floor")
         #expect(resolved?.Timeout == nil)
         #expect(resolved?.Retries == nil, "0 retries must not mean immediately-unhealthy")
         #expect(resolved?.StartPeriod == nil)
+        #expect(resolved?.StartInterval == nil, "0 start interval must not enable startup probing")
 
         // An image-encoded zero also normalizes, and a request 0 suppresses
         // the image's value so the default applies.
@@ -137,6 +143,28 @@ extension ContainerCreateHealthcheckFallbackTests {
             image: imageZero)
         #expect(suppressed?.Interval == nil, "request 0 overrides the image's interval back to default")
         #expect(suppressed?.Retries == 5)
+    }
+
+    @Test("a negative StartInterval also counts as unset")
+    func negativeStartIntervalNormalizesToUnset() {
+        let resolved = ContainerCreateRoute.resolveHealthcheck(
+            requested: HealthcheckConfig(
+                Test: ["CMD", "true"], Interval: nil, Timeout: nil, Retries: nil, StartPeriod: nil,
+                StartInterval: -1),
+            image: nil)
+        #expect(resolved?.StartInterval == nil)
+    }
+
+    @Test("a request StartInterval overrides the image's field-by-field")
+    func requestStartIntervalOverridesImage() {
+        let resolved = ContainerCreateRoute.resolveHealthcheck(
+            requested: HealthcheckConfig(
+                Test: nil, Interval: nil, Timeout: nil, Retries: nil, StartPeriod: nil,
+                StartInterval: 1_000_000_000),
+            image: imageHealthcheck)
+        #expect(resolved?.Test == imageHealthcheck.Test, "image's Test survives a StartInterval-only request")
+        #expect(resolved?.StartInterval == 1_000_000_000, "request start interval wins")
+        #expect(resolved?.Interval == imageHealthcheck.Interval, "image's Interval survives")
     }
 
     @Test("a merged healthcheck with no runnable Test persists nothing")
