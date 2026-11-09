@@ -225,6 +225,28 @@ struct LibpodImageRemoveRouteTests {
 
     // MARK: - Helpers
 
+    @Test("queryFlag matches podman truthiness — bare/empty flags are false")
+    func queryFlagSemantics() {
+        // Absent key: nil (distinguishes from an explicit false).
+        #expect(LibpodImageRemoveRoute.queryFlag("all", in: nil) == nil)
+        #expect(LibpodImageRemoveRoute.queryFlag("all", in: "force=true") == nil)
+        #expect(LibpodImageRemoveRoute.queryFlag("all", in: "images=x") == nil)
+        // Explicit values, case-insensitive and percent-decoded (ParseBool set).
+        #expect(LibpodImageRemoveRoute.queryFlag("all", in: "all=true") == true)
+        #expect(LibpodImageRemoveRoute.queryFlag("all", in: "all=True") == true)
+        #expect(LibpodImageRemoveRoute.queryFlag("all", in: "all=t") == true)
+        #expect(LibpodImageRemoveRoute.queryFlag("all", in: "all=1") == true)
+        #expect(LibpodImageRemoveRoute.queryFlag("all", in: "all=%74rue") == true)
+        // Podman parity (httputils.BoolValue + strconv.ParseBool): a bare or
+        // empty flag is FALSE — never true on a delete-everything endpoint.
+        #expect(LibpodImageRemoveRoute.queryFlag("all", in: "all") == false)
+        #expect(LibpodImageRemoveRoute.queryFlag("all", in: "all=") == false)
+        #expect(LibpodImageRemoveRoute.queryFlag("all", in: "all=false") == false)
+        #expect(LibpodImageRemoveRoute.queryFlag("all", in: "all=0") == false)
+        // A similar-looking key must not match.
+        #expect(LibpodImageRemoveRoute.queryFlag("all", in: "allow=true") == nil)
+    }
+
     /// Registers BOTH the pre-existing wildcard delete route and the new remove
     /// route, in the same order configure.swift registers them (delete at ~250,
     /// remove at ~251), so precedence is exercised against the production

@@ -130,11 +130,13 @@ private struct LibpodImageRemoveBody: Content {
 
 extension LibpodImageRemoveRoute {
     /// Reads a boolean flag from the RAW query string, tri-state: nil when the
-    /// key is absent, true/false for an explicit value, true for a bare flag
-    /// (`?all`). Needed because Vapor's query decoding materializes Bool keys
-    /// as `false` even when the whole query string is missing. Keys and values
-    /// are percent-decoded and compared case-insensitively (`all=True`,
-    /// `all=%74rue` both count as true).
+    /// key is absent, true/false for an explicit value. Needed because Vapor's
+    /// query decoding materializes Bool keys as `false` even when the whole
+    /// query string is missing. Keys and values are percent-decoded and
+    /// compared case-insensitively. PODMAN PARITY on truthiness (httputils
+    /// BoolValue + strconv.ParseBool): a bare `?all` or an empty `?all=` is
+    /// FALSE, never true — this flag deletes every image in the store, so a
+    /// present-but-empty value must not trigger it.
     static func queryFlag(_ name: String, in query: String?) -> Bool? {
         guard let query, !query.isEmpty else { return nil }
         for pair in query.split(separator: "&") {
@@ -144,10 +146,10 @@ extension LibpodImageRemoveRoute {
             guard let raw = parts.dropFirst().first.map(String.init)?.removingPercentEncoding,
                 !raw.isEmpty
             else {
-                return true  // bare flag
+                return false  // bare flag or empty value — podman treats both as false
             }
             let lowered = raw.lowercased()
-            return lowered == "true" || lowered == "1" || lowered == "yes"
+            return lowered == "true" || lowered == "t" || lowered == "1"
         }
         return nil
     }
