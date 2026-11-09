@@ -51,8 +51,8 @@
       "kind": "remoteSourceControl",
       "location": "https://github.com/mw99/DataCompression.git",
       "state": {
-        "revision": "16f858982a077451ce3bdbd9144d3073ec85b6e4",
-        "version": "3.9.0"
+        "revision": "448d26cac72da105fc36549f85ab00e197eb56f4",
+        "version": "3.10.0"
       }
     },
     {
@@ -231,8 +231,8 @@
       "kind": "remoteSourceControl",
       "location": "https://github.com/apple/swift-log.git",
       "state": {
-        "revision": "3ffafb9722d5d918c614feb496c8789a3b59d222",
-        "version": "1.15.0"
+        "revision": "e3da04078777e6a1b72ce19981fbd6539b0847d8",
+        "version": "1.17.0"
       }
     },
     {
@@ -249,8 +249,8 @@
       "kind": "remoteSourceControl",
       "location": "https://github.com/apple/swift-nio.git",
       "state": {
-        "revision": "558f24a4647193b5a0e2104031b71c55d31ff83a",
-        "version": "2.97.1"
+        "revision": "2f58d8ef84438d6517fc78bcea2f8527e3c72936",
+        "version": "2.105.0"
       }
     },
     {
@@ -258,8 +258,8 @@
       "kind": "remoteSourceControl",
       "location": "https://github.com/apple/swift-nio-extras.git",
       "state": {
-        "revision": "abcf5312eb8ed2fb11916078aef7c46b06f20813",
-        "version": "1.33.0"
+        "revision": "8e1249b29f92574e05e0d91637f239e378a9a95b",
+        "version": "1.35.2"
       }
     },
     {
@@ -267,8 +267,8 @@
       "kind": "remoteSourceControl",
       "location": "https://github.com/apple/swift-nio-http2.git",
       "state": {
-        "revision": "6d8d596f0a9bfebb925733003731fe2d749b7e02",
-        "version": "1.42.0"
+        "revision": "0f3e54e29c944c2e835ad52159da7d9e1c94ac69",
+        "version": "1.46.0"
       }
     },
     {
@@ -348,8 +348,8 @@
       "kind": "remoteSourceControl",
       "location": "https://github.com/vapor/vapor.git",
       "state": {
-        "revision": "748ae8432a33e0965bbf0351fedd4e915e7f460c",
-        "version": "4.122.0"
+        "revision": "48852309b11230e62a89b41a9c578c93f4d2d916",
+        "version": "4.122.3"
       }
     },
     {
