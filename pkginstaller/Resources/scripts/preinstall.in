@@ -2,18 +2,18 @@
 
 set -e
 
-echo "Preparing to install pacman..."
+echo "Preparing to install podm..."
 
-# Remove any existing pacman installation to ensure clean installation
+# Remove any existing podm installation to ensure clean installation
 if [ -d "__INSTALL_PREFIX__" ]; then
-    echo "Removing existing pacman installation..."
+    echo "Removing existing podm installation..."
     rm -rf "__INSTALL_PREFIX__"
 fi
 
 # Remove any existing PATH entries
-if [ -f "/etc/paths.d/pacman" ]; then
+if [ -f "/etc/paths.d/podm" ]; then
     echo "Removing existing PATH configuration..."
-    rm -f "/etc/paths.d/pacman"
+    rm -f "/etc/paths.d/podm"
 fi
 
 # Ensure the target directory exists

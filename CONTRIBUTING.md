@@ -1,4 +1,4 @@
-# Contributing to pacman
+# Contributing to podm
 
 Thanks for contributing! This document covers the essentials: building,
 testing, commit conventions, and the one hard rule about file-descriptor
@@ -14,9 +14,9 @@ Requirements:
   build time
 
 ```bash
-git clone https://github.com/kaovilai/pacman.git
-cd pacman
-make            # debug build of pacmand
+git clone https://github.com/kaovilai/podm.git
+cd podm
+make            # debug build of podmd
 make test       # unit tests (runs the pipe-ownership lint first)
 make release    # release build
 make installer  # unsigned macOS .pkg (see make installer-help for signed/notarized)
@@ -41,7 +41,7 @@ CI checks for formatting drift: `make fmt` followed by `git diff --exit-code`.
   the fix — it should fail without the fix and pass with it.
 - **New features must include unit tests** covering the main behavior and
   relevant edge cases.
-- Place tests in `Tests/pacmandTests/` following the existing structure
+- Place tests in `Tests/podmdTests/` following the existing structure
   (`Routes/`, `Clients/`, `Utilities/`, `DNS/`, `Events/`, `Network/`).
 - When modifying behavior, update the corresponding tests.
 - Run `make test` before committing.
@@ -65,11 +65,11 @@ a lint failure fails the test target.
 ## License headers
 
 New source files must carry the Apache-2.0 SPDX identifier and copyright
-notice, matching the existing files (see `Sources/pacmand/main.swift` or the
+notice, matching the existing files (see `Sources/podmd/main.swift` or the
 `Makefile` for the header text):
 
 ```swift
-// Copyright © 2026 Pacman contributors. All rights reserved.
+// Copyright © 2026 Podm contributors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -97,7 +97,7 @@ recycled NIO socket. The double-close corrupts NIO's fd table, causing
 `writev`/`kevent` EBADF crashes under concurrent load (issue #107).
 
 **Use `StdioPipes`** (centralized allocation and cleanup,
-`Sources/pacmand/Utilities/DockerConnectionUtility.swift`):
+`Sources/podmd/Utilities/DockerConnectionUtility.swift`):
 
 ```swift
 guard let pipes = StdioPipes.make([.stdin, .stdout, .stderr]) else {  // or make(.all)
@@ -149,7 +149,7 @@ Ownership contract:
 ## Reporting bugs
 
 Bug reports should include: description (actual vs expected behavior),
-reproduction steps, environment info (macOS version, `pacman version`, apple
+reproduction steps, environment info (macOS version, `podm version`, apple
 container version), and relevant logs. See the issue templates in
 `.github/ISSUE_TEMPLATE/`.
 

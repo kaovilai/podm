@@ -10,10 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Import of the [socktainer](https://github.com/socktainer/socktainer) fork as
-  the pacman server (`pacmand`), carrying over:
+  the podm server (`podmd`), carrying over:
   - the podman libpod API layer (~65 route files covering containers, images,
     volumes, networks, manifests, exec, events, auth, system df, build), so the
-    stock `podman` CLI works in remote-client mode against pacman's socket;
+    stock `podman` CLI works in remote-client mode against podm's socket;
   - multi-arch build support: a second BuildKit builder VM with QEMU binfmt,
     Rosetta-vs-QEMU platform classification, concurrent split builds across
     both builders, and single-image-index merges for mixed `--platform` lists
@@ -24,16 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     into containers;
   - `StdioPipes` centralized fd ownership for Apple Container stdio handoff
     (fixes double-close / NIO EBADF crashes, issue #107) with a CI lint.
-- Rebrand to pacman/pacmand: socket at `~/.pacman/container.sock`, labels and
-  state under `~/.pacman`, `pacman` docker context auto-registration.
-- Client shim `pacman` (`Sources/pacman`): multi-call binary with argv[0]
-  dispatch for `podman`/`docker` personas, one-time `pacman install`
-  (symlinks in `~/.pacman/bin`, real-CLI paths recorded in
-  `~/.pacman/client-paths.json`), plus `uninstall`, `status`, `doctor`,
+- Rebrand to podm/podmd: socket at `~/.podm/container.sock`, labels and
+  state under `~/.podm`, `podm` docker context auto-registration.
+- Client shim `podm` (`Sources/podm`): multi-call binary with argv[0]
+  dispatch for `podman`/`docker` personas, one-time `podm install`
+  (symlinks in `~/.podm/bin`, real-CLI paths recorded in
+  `~/.podm/client-paths.json`), plus `uninstall`, `status`, `doctor`,
   `version`, and `serve` subcommands.
-- launchd on-demand lifecycle for `pacmand` (LaunchAgent
-  `io.github.pacman.daemon`): started on demand, woken via
-  `launchctl kickstart`, exits after `PACMAN_IDLE_EXIT_SECS` with zero API
+- launchd on-demand lifecycle for `podmd` (LaunchAgent
+  `io.github.podm.daemon`): started on demand, woken via
+  `launchctl kickstart`, exits after `PODM_IDLE_EXIT_SECS` with zero API
   connections and zero running containers.
 - CI workflows (PR checks: format, unit tests, release build, installer,
   integration; release; next-build) and macOS `.pkg` installer targets
@@ -54,4 +54,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     disable sentinel, which suppresses the image's), the image's applies
     only when the request carries none.
 
-[Unreleased]: https://github.com/kaovilai/pacman/compare/6264b64...HEAD
+[Unreleased]: https://github.com/kaovilai/podm/compare/6264b64...HEAD

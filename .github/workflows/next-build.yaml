@@ -44,14 +44,14 @@ jobs:
     steps:
       - id: check
         run: |
-          echo "has_bot_token=${{ secrets.PACMAN_BOT_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+          echo "has_bot_token=${{ secrets.PODM_BOT_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
           echo "has_certs=${{ secrets.CERTIFICATE_P12_BASE64 != '' }}" >> "$GITHUB_OUTPUT"
 
   tag:
     name: Tagging
     runs-on: ubuntu-24.04
     # disable on forks as secrets are not available; also skip until the
-    # release bot token is configured on kaovilai/pacman (the fork's
+    # release bot token is configured on kaovilai/podm (the fork's
     # socktainer-org bot token does not exist here)
     needs: check-secrets
     if: github.event.repository.fork == false && needs.check-secrets.outputs.has_bot_token == 'true'
@@ -59,13 +59,13 @@ jobs:
       contents: write
     outputs:
       githubTag: ${{ steps.TAG_UTIL.outputs.githubTag}}
-      pacmanVersion: ${{ steps.TAG_UTIL.outputs.pacmanVersion}}
+      podmVersion: ${{ steps.TAG_UTIL.outputs.podmVersion}}
       releaseId: ${{ steps.create_release.outputs.id}}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-         token: ${{ secrets.PACMAN_BOT_TOKEN }}
+         token: ${{ secrets.PODM_BOT_TOKEN }}
          fetch-depth: 0
       - name: Generate tag utilities
         id: TAG_UTIL
@@ -75,22 +75,22 @@ jobs:
             # grab the latest tags
             git fetch --tags
             # nearest stable tag on main
-            # - fresh clones of pacman have no tags yet (unlike the socktainer
+            # - fresh clones of podm have no tags yet (unlike the socktainer
             #   fork this repo was imported from) — fall back so the bump math works
             # - exclude the generated v<version>-next.<timestamp>-<sha> prerelease
             #   tags this workflow pushes to the same repository: git describe
             #   would otherwise select the previous prerelease tag, and its
             #   parsing then makes "minor" non-numeric and the bump arithmetic
             #   fails, stopping all subsequent prerelease builds
-            PACMAND_VERSION=$(git describe --tags --abbrev=0 --exclude='*-next.*' main 2>/dev/null || echo v0.0.0)
-            STRIPPED_VERSION=${PACMAND_VERSION#v}
+            PODMD_VERSION=$(git describe --tags --abbrev=0 --exclude='*-next.*' main 2>/dev/null || echo v0.0.0)
+            STRIPPED_VERSION=${PODMD_VERSION#v}
             echo "Current version is $STRIPPED_VERSION"
             tmp=${STRIPPED_VERSION%.*}
             minor=${tmp#*.}
             bumpedVersion=${STRIPPED_VERSION%%.*}.$((minor + 1)).0
             TAG_PATTERN=${STRIPPED_VERSION}-next.$(date +'%Y%m%d%H%M')-${SHORT_SHA1}
             echo "githubTag=v$TAG_PATTERN" >> ${GITHUB_OUTPUT}
-            echo "pacmanVersion=$TAG_PATTERN" >> ${GITHUB_OUTPUT}
+            echo "podmVersion=$TAG_PATTERN" >> ${GITHUB_OUTPUT}
       - name: tag
         run: |
           git config --local user.name ${{ github.actor }}
@@ -109,7 +109,7 @@ jobs:
           name: ${{ steps.TAG_UTIL.outputs.githubTag }}
           draft: true
           prerelease: true
-          token: ${{ secrets.PACMAN_BOT_TOKEN }}
+          token: ${{ secrets.PODM_BOT_TOKEN }}
 
   build:
     name: Build
@@ -170,16 +170,16 @@ jobs:
             --sign "${{ secrets.APPLE_APPLICATION_ID}}" \
             --options runtime \
             --entitlements entitlements.plist \
-            ./.build/arm64-apple-macosx/release/pacmand
+            ./.build/arm64-apple-macosx/release/podmd
     
       - name: zip the binary
         run: |
           cd ./.build/arm64-apple-macosx/release/
-          zip pacmand.zip pacmand pacman
+          zip podmd.zip podmd podm
 
       - name: Submit for notarization
         run: |
-          xcrun notarytool submit ./.build/arm64-apple-macosx/release/pacmand.zip \
+          xcrun notarytool submit ./.build/arm64-apple-macosx/release/podmd.zip \
             --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_ID_PASSWORD" \
@@ -193,20 +193,20 @@ jobs:
         run: |
           make installer-notarized
         env:
-          BUILD_VERSION: ${{ needs.tag.outputs.pacmanVersion}}
+          BUILD_VERSION: ${{ needs.tag.outputs.podmVersion}}
           APPLE_APPLICATION_ID: ${{ secrets.APPLE_APPLICATION_ID}}
           APPLE_PRODUCT_ID: ${{ secrets.APPLE_PRODUCT_ID}}  
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
-      - name: Upload pacman binary
+      - name: Upload podm binary
         run: |
-         gh release upload --repo "$GITHUB_REPOSITORY" ${{ needs.tag.outputs.githubTag}} ./.build/arm64-apple-macosx/release/pacmand
-         gh release upload --repo "$GITHUB_REPOSITORY" ${{ needs.tag.outputs.githubTag}} ./.build/arm64-apple-macosx/release/pacmand.zip
-         gh release upload --repo "$GITHUB_REPOSITORY" ${{ needs.tag.outputs.githubTag}} ./pkginstaller/out/pacman-installer.pkg
+         gh release upload --repo "$GITHUB_REPOSITORY" ${{ needs.tag.outputs.githubTag}} ./.build/arm64-apple-macosx/release/podmd
+         gh release upload --repo "$GITHUB_REPOSITORY" ${{ needs.tag.outputs.githubTag}} ./.build/arm64-apple-macosx/release/podmd.zip
+         gh release upload --repo "$GITHUB_REPOSITORY" ${{ needs.tag.outputs.githubTag}} ./pkginstaller/out/podm-installer.pkg
         env:
-          GITHUB_TOKEN: ${{ secrets.PACMAN_BOT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PODM_BOT_TOKEN }}
 
   release:
     needs: [tag, build]
@@ -220,7 +220,7 @@ jobs:
       - name: Publish release
         uses: StuYarrow/publish-release@01f2a1365bacd77bad861873a7fdf274ab49eefd # v1.1.2
         env:
-          GITHUB_TOKEN: ${{ secrets.PACMAN_BOT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PODM_BOT_TOKEN }}
         with:
           id: ${{ needs.tag.outputs.releaseId}}
 
@@ -229,18 +229,18 @@ jobs:
     name: Homebrew Tap
     runs-on: ubuntu-24.04
     # requires the kaovilai/homebrew-tap repository (with an
-    # update-formula-next.yml workflow) and PACMAN_BOT_TOKEN; skipped until then
+    # update-formula-next.yml workflow) and PODM_BOT_TOKEN; skipped until then
     if: needs.release.result == 'success' && needs.check-secrets.outputs.has_bot_token == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: kaovilai/homebrew-tap
-          token: ${{ secrets.PACMAN_BOT_TOKEN }}
+          token: ${{ secrets.PODM_BOT_TOKEN }}
           fetch-depth: 0
 
       - name: Trigger and wait for Homebrew formula update
         run: |
-          VERSION=${{ needs.tag.outputs.pacmanVersion}}
+          VERSION=${{ needs.tag.outputs.podmVersion}}
           echo "Triggering homebrew-tap workflow with version: $VERSION"
 
           # Trigger workflow run in homebrew-tap
@@ -262,4 +262,4 @@ jobs:
           # Watch until completion (streams logs & exits with same status)
           gh run watch "$run_id" --repo kaovilai/homebrew-tap
         env:
-          GITHUB_TOKEN: ${{ secrets.PACMAN_BOT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PODM_BOT_TOKEN }}

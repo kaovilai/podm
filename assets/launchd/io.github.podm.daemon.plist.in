@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  Copyright © 2026 the podm authors.
+
+  launchd LaunchAgent template for the podm daemon (podmd).
+
+  Rendered by scripts/install-launchd.sh, which substitutes:
+    __PODMD_BIN__  absolute path to the podmd binary
+    __HOME__         the installing user's home directory
+
+  Lifecycle: RunAtLoad=true + KeepAlive=false + podmd's built-in idle-exit
+  (PODM_IDLE_EXIT_SECS, default 90s) — the daemon binds
+  ~/.podm/container.sock at login, exits when fully idle (zero RAM), and is
+  woken on demand by the podm client shim via:
+    launchctl kickstart gui/$(id -u)/io.github.podm.daemon
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.github.podm.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PODMD_BIN__</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Never auto-restart: podmd exits on purpose when idle and is woken
+         by `launchctl kickstart` from the client shim. -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PODM_LAUNCHD</key>
+        <string>1</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- Future: TRUE socket activation. launchd binds the unix socket and
+         starts podmd on the first connection, removing the kickstart
+         round-trip entirely. Requires podmd to adopt launchd's listening
+         fd via launch_activate_socket("podm-listener", ...) — Vapor cannot
+         serve on a pre-bound fd today; see
+         Sources/podmd/Utilities/LaunchdSocketAdoption.swift for the full
+         investigation before enabling this.
+    <key>Sockets</key>
+    <dict>
+        <key>podm-listener</key>
+        <dict>
+            <key>SockType</key>
+            <string>stream</string>
+            <key>SockPathName</key>
+            <string>__HOME__/.podm/container.sock</string>
+            SockPathMode 438 (decimal) = 0666 (octal), matching what podmd
+            chmods the socket to so guest-side non-root processes can connect.
+            <key>SockPathMode</key>
+            <integer>438</integer>
+            SockNodeOwner / SockNodeGroup (optional): name the socket file's
+            user/group, only needed if the launchd-owned default is wrong.
+        </dict>
+    </dict>
+    -->
+</dict>
+</plist>

@@ -1,18 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
-    <title>Pacman __VERSION__</title>
+    <title>Podm __VERSION__</title>
     <welcome file="welcome.html"/>
     <conclusion file="conclusion.html"/>
-    <pkg-ref id="io.github.pacman"/>
+    <pkg-ref id="io.github.podm"/>
     <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
     <choices-outline>
         <line choice="default">
-            <line choice="io.github.pacman"/>
+            <line choice="io.github.podm"/>
         </line>
     </choices-outline>
     <choice id="default"/>
-    <choice id="io.github.pacman" visible="false">
-        <pkg-ref id="io.github.pacman"/>
+    <choice id="io.github.podm" visible="false">
+        <pkg-ref id="io.github.podm"/>
     </choice>
-    <pkg-ref id="io.github.pacman" version="__VERSION__" onConclusion="none">pacman.pkg</pkg-ref>
+    <pkg-ref id="io.github.podm" version="__VERSION__" onConclusion="none">podm.pkg</pkg-ref>
 </installer-gui-script>

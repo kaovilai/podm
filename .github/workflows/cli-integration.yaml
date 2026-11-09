@@ -15,15 +15,15 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Flagship proof workflow: builds pacmand from source, stands it up over
+# Flagship proof workflow: builds podmd from source, stands it up over
 # Apple's container runtime, and drives it with the REAL docker and podman
 # CLIs — no podman machine, no remote connection setup, exactly the user
-# experience pacman exists to provide.
+# experience podm exists to provide.
 #
 # Steps that need the Virtualization framework (docker/podman run, docker
 # build, multi-arch builds) are gated behind the `enable-vm-steps` /
 # `enable-multiarch` dispatch inputs (default false). GitHub-hosted macOS
-# runners run inside VMs without nested virtualization, so pacmand's
+# runners run inside VMs without nested virtualization, so podmd's
 # microVM-based container execution and BuildKit builder VM cannot boot
 # there ("Error Domain=VZErrorDomain Code=2 Virtualization is not
 # available on this hardware" — see the notes in pr-check.yaml and
@@ -85,22 +85,22 @@ jobs:
           which swift
           swift --version
 
-      - name: Build pacmand (release)
+      - name: Build podmd (release)
         timeout-minutes: 40
-        # Build only the daemon product. The `pacman` client shim target
-        # (Sources/pacman/) may not exist yet; it is built by the guarded
+        # Build only the daemon product. The `podm` client shim target
+        # (Sources/podm/) may not exist yet; it is built by the guarded
         # step below once it lands.
-        run: swift build -c release --product pacmand
+        run: swift build -c release --product podmd
 
-      - name: Build pacman client shim (if present)
+      - name: Build podm client shim (if present)
         # The client shim target is under active development and may not
         # exist on every branch; never fail the workflow because of it.
         run: |
-          if [ -d Sources/pacman ] && grep -q '"pacman"' Package.swift; then
-            swift build -c release --product pacman
-            .build/arm64-apple-macosx/release/pacman --help || true
+          if [ -d Sources/podm ] && grep -q '"podm"' Package.swift; then
+            swift build -c release --product podm
+            .build/arm64-apple-macosx/release/podm --help || true
           else
-            echo "Sources/pacman not present yet; skipping client shim build"
+            echo "Sources/podm not present yet; skipping client shim build"
           fi
 
       # ── Apple container runtime setup (mirrors pr-check.yaml) ────────────────
@@ -142,28 +142,28 @@ jobs:
       - name: Install default Linux kernel for container builds
         run: sudo container system kernel set --recommended --force
 
-      # ── Start pacmand ─────────────────────────────────────────────────────────
-      # The daemon derives its socket from $HOME (.pacman/container.sock);
-      # started via `sudo -i` that is /var/root/.pacman/container.sock, same
+      # ── Start podmd ─────────────────────────────────────────────────────────
+      # The daemon derives its socket from $HOME (.podm/container.sock);
+      # started via `sudo -i` that is /var/root/.podm/container.sock, same
       # as the fork's CI. The docker socket symlink lets the stock docker CLI
       # work with no DOCKER_HOST setup at all.
-      - name: Start pacmand and wait for its socket
+      - name: Start podmd and wait for its socket
         run: |
-          PACMAND_BIN="$(pwd)/.build/arm64-apple-macosx/release/pacmand"
-          chmod 755 "$PACMAND_BIN"
-          nohup sudo -i env PACMAN_IDLE_EXIT_SECS=0 "$PACMAND_BIN" > service.log 2>&1 &
+          PODMD_BIN="$(pwd)/.build/arm64-apple-macosx/release/podmd"
+          chmod 755 "$PODMD_BIN"
+          nohup sudo -i env PODM_IDLE_EXIT_SECS=0 "$PODMD_BIN" > service.log 2>&1 &
           echo $! > service.pid
-          sudo ln -sf /var/root/.pacman/container.sock /var/run/docker.sock
+          sudo ln -sf /var/root/.podm/container.sock /var/run/docker.sock
           START=$SECONDS
           TIMEOUT=60
           while [ $((SECONDS - START)) -lt $TIMEOUT ]; do
-            if sudo test -S /var/root/.pacman/container.sock; then
-              echo "pacmand socket is up after ${SECONDS}s"
+            if sudo test -S /var/root/.podm/container.sock; then
+              echo "podmd socket is up after ${SECONDS}s"
               break
             fi
             sleep 2
           done
-          sudo test -S /var/root/.pacman/container.sock || { echo "socket never appeared"; cat service.log || true; sudo cat /var/root/service.log 2>/dev/null || true; exit 1; }
+          sudo test -S /var/root/.podm/container.sock || { echo "socket never appeared"; cat service.log || true; sudo cat /var/root/service.log 2>/dev/null || true; exit 1; }
           sleep 2
           cat service.log || true
           sudo docker version || true
@@ -173,10 +173,10 @@ jobs:
         run: |
           brew install docker
 
-      - name: docker ps / version / images against pacmand
+      - name: docker ps / version / images against podmd
         run: |
           sudo docker ps
-          sudo docker version | grep 'pacman'
+          sudo docker version | grep 'podm'
           sudo docker version | grep 'v1.51'
           sudo docker images
 
@@ -203,10 +203,10 @@ jobs:
       - name: docker build a tiny Dockerfile
         if: inputs.enable-vm-steps == true
         run: |
-          # DOCKER_BUILDKIT=0 keeps the CLI on the classic builder: pacman
+          # DOCKER_BUILDKIT=0 keeps the CLI on the classic builder: podm
           # implements the classic tar-over-POST /build API; the buildx
           # docker-container driver would try to start a moby/buildkit
-          # container inside pacman, which is not supported (see
+          # container inside podm, which is not supported (see
           # pr-check.yaml's multi-arch job). The server-side builder still
           # needs the Virtualization framework.
           mkdir -p /tmp/testbuild
@@ -229,13 +229,13 @@ jobs:
       - name: setup podman socket
         run: |
           # /run is read-only on macOS, so use CONTAINER_HOST env var
-          echo "CONTAINER_HOST=unix:///var/root/.pacman/container.sock" >> "$GITHUB_ENV"
+          echo "CONTAINER_HOST=unix:///var/root/.podm/container.sock" >> "$GITHUB_ENV"
 
-      - name: podman ps / version against pacmand
+      - name: podman ps / version against podmd
         run: |
           sudo -E podman ps
           sudo -E podman version
-          # Verify pacman is responding with expected API version
+          # Verify podm is responding with expected API version
           sudo -E podman version | grep 'v1.51'
 
       - name: podman pull and list images
@@ -254,7 +254,7 @@ jobs:
       - name: podman build a tiny Dockerfile
         if: inputs.enable-vm-steps == true
         run: |
-          # Real podman CLI sends the build to pacmand's build API. Needs the
+          # Real podman CLI sends the build to podmd's build API. Needs the
           # BuildKit builder VM (Virtualization framework) on the runner.
           mkdir -p /tmp/testbuild-podman
           cat > /tmp/testbuild-podman/Dockerfile <<'EOF'
@@ -289,23 +289,23 @@ jobs:
             return 1
           }
           TAG="cli-int-$(date +%s)"
-          retry sudo -E podman push alpine:latest "ttl.sh/pacman-cli-int-${TAG}:5m"
+          retry sudo -E podman push alpine:latest "ttl.sh/podm-cli-int-${TAG}:5m"
           sudo -E podman manifest create cli-int-push-manifest
-          retry sudo -E podman manifest push cli-int-push-manifest "ttl.sh/pacman-cli-int-manifest-${TAG}:5m"
+          retry sudo -E podman manifest push cli-int-push-manifest "ttl.sh/podm-cli-int-manifest-${TAG}:5m"
 
       - name: dump service log
         if: always()
         run: |
           cat service.log || true
-          sudo pkill -f pacmand || true
+          sudo pkill -f podmd || true
 
       # Binary artifact for the multi-arch job below (same artifact name and
-      # layout as pr-check.yaml's build job: artifact `pacman`, file `pacmand`).
+      # layout as pr-check.yaml's build job: artifact `podm`, file `podmd`).
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: pacman
-          path: ./.build/arm64-apple-macosx/release/pacmand
+          name: podm
+          path: ./.build/arm64-apple-macosx/release/podmd
 
   # ── Multi-arch build test (mirrors pr-check.yaml's multi-arch-build job) ─────
   # Rosetta builder for amd64, QEMU builder for s390x, assembled manifest list.
@@ -324,12 +324,12 @@ jobs:
       # fetch the artifact from the cli-integration job
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: pacman
+          name: podm
 
-      - name: Prepare pacman binary
+      - name: Prepare podm binary
         run: |
           ls -la
-          chmod 755 pacmand
+          chmod 755 podmd
 
       - name: Fetch Apple Container installer
         run: |
@@ -364,12 +364,12 @@ jobs:
       - name: Install default Linux kernel for container builds
         run: sudo container system kernel set --recommended --force
 
-      - name: Start pacman
+      - name: Start podm
         run: |
-          PACMAND_BIN="$(pwd)/pacmand"
-          nohup sudo -i env PACMAN_IDLE_EXIT_SECS=0 "$PACMAND_BIN" > service.log 2>&1 &
+          PODMD_BIN="$(pwd)/podmd"
+          nohup sudo -i env PODM_IDLE_EXIT_SECS=0 "$PODMD_BIN" > service.log 2>&1 &
           echo $! > service.pid
-          sudo ln -s /var/root/.pacman/container.sock /var/run/docker.sock
+          sudo ln -s /var/root/.podm/container.sock /var/run/docker.sock
           sleep 5
           cat service.log
 
@@ -394,8 +394,8 @@ jobs:
 
       # ── Rosetta path: arm64 + amd64 ──────────────────────────────────────────
       # docker buildx build with the default docker-container driver would start
-      # a moby/buildkit container inside pacman, which is not supported.
-      # We call the Docker build API directly via curl instead; pacman routes
+      # a moby/buildkit container inside podm, which is not supported.
+      # We call the Docker build API directly via curl instead; podm routes
       # multi-platform requests to its Rosetta / QEMU builder containers.
       - name: docker build – arm64+amd64 (Rosetta builder)
         run: |
@@ -444,4 +444,4 @@ jobs:
         if: always()
         run: |
           cat service.log || true
-          sudo pkill -f pacmand || true
+          sudo pkill -f podmd || true

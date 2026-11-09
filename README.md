@@ -1,20 +1,24 @@
 <div align="center">
 
-# pacman
+# podm
 
-**`podman` and `docker` on macOS, the way they work on Linux — no `machine`, no `remote`.**
+**podman's promise, true on Mac — no `machine`, no `remote`, no resident daemon.**
+
+> *No manager daemon, for improved security and lower resource utilization at idle.*
+> — podman's own pledge, which its macOS story breaks with a resident VM.
+> `podm` keeps it: microVM per container, zero daemon RAM at idle.
 
 </div>
 
 <!-- Badges: enable once CI badge URLs are public. Do not fake them.
-[![CI](https://github.com/kaovilai/pacman/actions/workflows/pr-check.yaml/badge.svg)](https://github.com/kaovilai/pacman/actions/workflows/pr-check.yaml)
+[![CI](https://github.com/kaovilai/podm/actions/workflows/pr-check.yaml/badge.svg)](https://github.com/kaovilai/podm/actions/workflows/pr-check.yaml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-26%2B%20arm64-black.svg)](#requirements)
 -->
 
 ---
 
-`pacman` lets the stock `podman` and `docker` CLIs manage local containers on a Mac
+`podm` lets the stock `podman` and `docker` CLIs manage local containers on a Mac
 with zero setup and zero VM-machine concepts. It exposes **both** the Docker Engine
 API and the podman libpod API on a single unix socket, backed by Apple's
 [containerization](https://github.com/apple/containerization) framework — the same
@@ -29,25 +33,25 @@ docker build -t myapp .
 podman build --platform linux/amd64,linux/ppc64le --manifest myapp .
 ```
 
-## Why pacman?
+## Why podm?
 
 On macOS, `podman` normally requires `podman machine` — a resident Linux VM holding
 pinned RAM and a guest disk you have to resize — and `docker` requires Docker
-Desktop, a resident daemon plus VM that idles in the gigabytes. `pacman` replaces
+Desktop, a resident daemon plus VM that idles in the gigabytes. `podm` replaces
 both with:
 
 - **microVM per container** (the Apple `container` model) — no shared VM to keep
   alive, no guest disk to manage; each VM dies with its container and memory is
   overcommitted by macOS like any other process, so idle containers page out
   instead of pinning RAM.
-- **an on-demand daemon** — `pacmand` runs under a launchd LaunchAgent and exits
+- **an on-demand daemon** — `podmd` runs under a launchd LaunchAgent and exits
   when it has zero connections and zero running containers. Idle RAM for the whole
-  stack is **0 MB for pacman itself and ≈25 MB for Apple's helper services**
+  stack is **0 MB for podm itself and ≈25 MB for Apple's helper services**
   (measured: `container-apiserver` 9.8 MB + `container-core-images` 10.0 MB +
   `container-network-vmnet` 4.7 MB, 0% CPU — versus a multi-GB pinned VM).
-- **stock CLIs, maximal compatibility** — pacman's policy is to support *all*
+- **stock CLIs, maximal compatibility** — podm's policy is to support *all*
   flags and commands of both `podman` and `docker` by putting the **real CLIs** in
-  front of a socket that speaks both API dialects. `pacman` itself is a thin client
+  front of a socket that speaks both API dialects. `podm` itself is a thin client
   shim that dispatches to the real CLIs with the right environment. You never
   outgrow it: every new podman/docker flag works on day one, because it is the
   actual CLI.
@@ -66,43 +70,43 @@ and the hard limits we accept.
 ### From source
 
 ```bash
-git clone https://github.com/kaovilai/pacman.git
-cd pacman
-make                # builds pacmand (daemon) + pacman (client), debug
+git clone https://github.com/kaovilai/podm.git
+cd podm
+make                # builds podmd (daemon) + podm (client), debug
 ```
 
 A macOS `.pkg` is also available via `make installer` (system install to
-`/opt/pacman`, needs admin; see `make installer-help` for signed/notarized
+`/opt/podm`, needs admin; see `make installer-help` for signed/notarized
 variants).
 
-The source + `pacman install` flow below is entirely user-space — no sudo
+The source + `podm install` flow below is entirely user-space — no sudo
 needed.
 
-### Set up the client (`pacman install`)
+### Set up the client (`podm install`)
 
-One-time bootstrap — installs the `pacman` client, symlinks the `podman` and
+One-time bootstrap — installs the `podm` client, symlinks the `podman` and
 `docker` personas, and records the real CLI paths:
 
 ```bash
-.build/debug/pacman install
+.build/debug/podm install
 ```
 
-Add `--launchd-template assets/launchd/io.github.pacman.daemon.plist.in` to
+Add `--launchd-template assets/launchd/io.github.podm.daemon.plist.in` to
 also install the daemon's LaunchAgent (on-demand lifecycle: idle-exit +
 kickstart wake). Without it, start the daemon yourself when needed:
-`.build/debug/pacmand &` (or `pacman serve`).
+`.build/debug/podmd &` (or `podm serve`).
 
-Then put pacman's bin directory first on your `PATH` (in `~/.zshrc`):
+Then put podm's bin directory first on your `PATH` (in `~/.zshrc`):
 
 ```bash
-export PATH="$HOME/.pacman/bin:$PATH"
+export PATH="$HOME/.podm/bin:$PATH"
 ```
 
-`pacman install` places `podman → pacman` and `docker → pacman` symlinks in
-`~/.pacman/bin`. The shim dispatches on `argv[0]`, locates the *real* CLIs
-(recorded in `~/.pacman/client-paths.json`), and execs them with
-`CONTAINER_HOST` / `DOCKER_HOST` pointing at pacman's socket
-(`unix://$HOME/.pacman/container.sock`). Because it's the actual `podman` and
+`podm install` places `podman → podm` and `docker → podm` symlinks in
+`~/.podm/bin`. The shim dispatches on `argv[0]`, locates the *real* CLIs
+(recorded in `~/.podm/client-paths.json`), and execs them with
+`CONTAINER_HOST` / `DOCKER_HOST` pointing at podm's socket
+(`unix://$HOME/.podm/container.sock`). Because it's the actual `podman` and
 `docker` binaries doing the talking, every flag and subcommand they support works.
 
 ### Optional: `/var/run/docker.sock` compatibility
@@ -110,50 +114,50 @@ export PATH="$HOME/.pacman/bin:$PATH"
 Tools that hardcode `/var/run/docker.sock` work with one symlink (one-time sudo):
 
 ```bash
-sudo ln -s "$HOME/.pacman/container.sock" /var/run/docker.sock
+sudo ln -s "$HOME/.podm/container.sock" /var/run/docker.sock
 ```
 
 ### Optional: docker context
 
-`pacmand` registers a `pacman` docker context automatically. Instead of exporting
+`podmd` registers a `podm` docker context automatically. Instead of exporting
 `DOCKER_HOST`, you can make it your default once:
 
 ```bash
-docker context use pacman
+docker context use podm
 ```
 
 ## Usage
 
 ### Personas
 
-`pacman` is a multi-call binary: what it does depends on the name it was invoked as.
+`podm` is a multi-call binary: what it does depends on the name it was invoked as.
 
 | Invoked as | Behavior |
 |---|---|
-| `pacman` | pacman's own subcommands (below) |
-| `podman` | execs the real `podman` CLI against pacman's socket |
-| `docker` | execs the real `docker` CLI against pacman's socket |
+| `podm` | podm's own subcommands (below) |
+| `podman` | execs the real `podman` CLI against podm's socket |
+| `docker` | execs the real `docker` CLI against podm's socket |
 
-### pacman subcommands
+### podm subcommands
 
 | Command | Purpose |
 |---|---|
-| `pacman install` | One-time setup: symlinks, LaunchAgent, client-path discovery |
-| `pacman uninstall` | Remove symlinks, LaunchAgent, and pacman-managed state |
-| `pacman status` | Daemon state, socket, LaunchAgent, running containers |
-| `pacman doctor` | Diagnose the install (socket reachable, CLIs found, versions) |
-| `pacman version` | Version and build info |
-| `pacman serve` | Run the API daemon in the foreground (what launchd uses) |
+| `podm install` | One-time setup: symlinks, LaunchAgent, client-path discovery |
+| `podm uninstall` | Remove symlinks, LaunchAgent, and podm-managed state |
+| `podm status` | Daemon state, socket, LaunchAgent, running containers |
+| `podm doctor` | Diagnose the install (socket reachable, CLIs found, versions) |
+| `podm version` | Version and build info |
+| `podm serve` | Run the API daemon in the foreground (what launchd uses) |
 
 ### Environment variables
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PACMAN_IDLE_EXIT_SECS` | launchd default | Seconds of zero connections **and** zero running containers before `pacmand` exits (the launchd LaunchAgent restarts it on demand) |
-| `PACMAN_DNS_PORT` | `2054` | Host-side port of pacman's embedded DNS resolver |
-| `PACMAN_DNS_UPSTREAM` | `1.1.1.1:53` | Upstream resolver for names the embedded DNS server cannot answer locally: IPv4 literal with optional `:port` (default `1.1.1.1:53`); `--dns-upstream` flag wins, invalid env warns and keeps the default |
-| `PACMAN_CLEAN_VOLUMES` | enabled | Set `false` to opt out of removing `/lost+found` from named-volume EXT4 images (it breaks Postgres `initdb`; per-volume opt-out label: `pacman.clean-volumes=false`) |
-| `CONTAINER_HOST` / `DOCKER_HOST` | set by shim | Point the real CLIs at `unix://$HOME/.pacman/container.sock` — normally you never set these yourself |
+| `PODM_IDLE_EXIT_SECS` | launchd default | Seconds of zero connections **and** zero running containers before `podmd` exits (the launchd LaunchAgent restarts it on demand) |
+| `PODM_DNS_PORT` | `2054` | Host-side port of podm's embedded DNS resolver |
+| `PODM_DNS_UPSTREAM` | `1.1.1.1:53` | Upstream resolver for names the embedded DNS server cannot answer locally: IPv4 literal with optional `:port` (default `1.1.1.1:53`); `--dns-upstream` flag wins, invalid env warns and keeps the default |
+| `PODM_CLEAN_VOLUMES` | enabled | Set `false` to opt out of removing `/lost+found` from named-volume EXT4 images (it breaks Postgres `initdb`; per-volume opt-out label: `podm.clean-volumes=false`) |
+| `CONTAINER_HOST` / `DOCKER_HOST` | set by shim | Point the real CLIs at `unix://$HOME/.podm/container.sock` — normally you never set these yourself |
 
 ### Volume sync modes
 
@@ -170,7 +174,7 @@ docker volume create -o sync=fsync mydata   # honor guest fsyncs (durable)
 | `fsync` | honors guest `fsync` for durability |
 | `full` | fully synchronous writes |
 
-Daemon-wide default: `pacmand --volume-sync <mode>`.
+Daemon-wide default: `podmd --volume-sync <mode>`.
 
 ## Multi-arch builds
 
@@ -190,7 +194,7 @@ How it works:
   kernel; build and run both work (`uname -m` reports `x86_64`).
 - **`linux/ppc64le`, `s390x`, `riscv64`, …** — no Rosetta exists for these. Upstream
   `apple/container` cannot execute their `RUN` steps
-  ([apple/container#1496](https://github.com/apple/container/issues/1496)); pacman
+  ([apple/container#1496](https://github.com/apple/container/issues/1496)); podm
   solves it by provisioning a **second BuildKit builder VM with QEMU binfmt
   registered**, classifying each requested platform as Rosetta-eligible vs
   QEMU-only, splitting mixed `--platform` builds across both builders
@@ -202,14 +206,14 @@ Details and examples: [docs/multi-arch.md](docs/multi-arch.md).
 
 ```
 podman ─┐                                                ┌─ Docker Engine API (/v1.32–v1.51)
-docker ─┼─ pacman (client shim, argv0) ──────────────────┤                     one socket,
+docker ─┼─ podm (client shim, argv0) ──────────────────┤                     one socket,
         │   exec real CLI with CONTAINER_HOST/DOCKER_HOST ├─ podman libpod API (/libpod/*)  both dialects
         ▼                                                 ▼
-   unix socket  ~/.pacman/container.sock
+   unix socket  ~/.podm/container.sock
         │
-   launchd (LaunchAgent io.github.pacman.daemon) — on-demand, idle-exit → 0 MB daemon RAM
+   launchd (LaunchAgent io.github.podm.daemon) — on-demand, idle-exit → 0 MB daemon RAM
         │
-   pacmand (Swift/Vapor daemon)
+   podmd (Swift/Vapor daemon)
         │
    apple/containerization — one lightweight Linux VM per container
    (container-apiserver, BuildKit builder VMs, Rosetta + QEMU for multi-arch)
@@ -217,13 +221,13 @@ docker ─┼─ pacman (client shim, argv0) ───────────�
 
 | Piece | What it is |
 |---|---|
-| `pacman` | Client shim: dispatches by `argv[0]` (`pacman`/`podman`/`docker` symlinks), ensures the daemon is awake, execs the real `podman`/`docker` CLI with the right environment |
-| `pacmand` | Swift daemon (Vapor) serving Docker Engine API v1.51 + libpod API on one unix socket (`~/.pacman/container.sock`) |
-| launchd | `LaunchAgent` managing `pacmand` — started on demand, woken via `launchctl kickstart`, exits after `PACMAN_IDLE_EXIT_SECS` idle (0 connections + 0 running containers) |
+| `podm` | Client shim: dispatches by `argv[0]` (`podm`/`podman`/`docker` symlinks), ensures the daemon is awake, execs the real `podman`/`docker` CLI with the right environment |
+| `podmd` | Swift daemon (Vapor) serving Docker Engine API v1.51 + libpod API on one unix socket (`~/.podm/container.sock`) |
+| launchd | `LaunchAgent` managing `podmd` — started on demand, woken via `launchctl kickstart`, exits after `PODM_IDLE_EXIT_SECS` idle (0 connections + 0 running containers) |
 
 The one-socket-two-dialects point: `docker`, `compose`, `docker-py`, test tooling
 and friends speak Docker Engine API on `/v1.x/*`; the `podman` CLI speaks podman
-REST on `/libpod/*`. Both hit `~/.pacman/container.sock` and see the same
+REST on `/libpod/*`. Both hit `~/.podm/container.sock` and see the same
 containers, images, volumes and networks. Deep dive:
 [docs/architecture.md](docs/architecture.md).
 
@@ -246,7 +250,7 @@ Honest, inherited-from-the-model limits (details in
 
 ## Comparison
 
-| | pacman | podman machine | Docker Desktop | colima | socktainer | apple `container` | us/mocker |
+| | podm | podman machine | Docker Desktop | colima | socktainer | apple `container` | us/mocker |
 |---|---|---|---|---|---|---|---|
 | Model | microVM per container, on-demand daemon | shared Linux VM | shared VM + dockerd | shared Linux VM (Lima) | microVM per container, resident daemon | microVM per container | microVM per container |
 | Idle RAM | ~0 (25 MB Apple helpers) | multi-GB pinned VM | GB-scale | multi-GB pinned VM | ~25 MB helpers + daemon | ~25 MB helpers | ~25 MB helpers |
@@ -263,14 +267,14 @@ microVM-per-container + no resident daemon.** See
 
 ## FAQ
 
-**Isn't `pacman` Arch Linux's package manager?**
-Yes — we know. `pacman` here is a *host-side* CLI; inside container VMs the guest's
-own `pacman` (Arch) is untouched. If you regularly drive Arch-based containers from
-this Mac and muscle memory bites, invoke one of them by full path or keep an alias
-pointing at the real binary.
+**Why the name `podm`?**
+Type `podm` and hit TAB: the shell completes to `podman` — which is exactly the
+point. `podm` is the short, nimble form; `podm` + TAB is the full podman
+experience (the persona symlink). And the name states the mission: **podman's
+promise, true on Mac.**
 
 **Is this a fork?**
-The server (`pacmand`) was imported from
+The server (`podmd`) was imported from
 [socktainer](https://github.com/socktainer/socktainer) (Apache-2.0) with its podman
 libpod API layer and multi-arch build support, then rebranded and extended. See
 [NOTICE](NOTICE) for attribution of socktainer and Apple code; the license stays
@@ -280,16 +284,16 @@ Apache-2.0.
 Unverified, and in places genuinely hard: anything needing true host-privileged
 behavior (kind, k3s-in-container) only gets all-caps *inside the guest VM*, which is
 not the same thing. Plain API clients (docker-py, compose, Supabase-style tools that
-read `/var/run/docker.sock` inside a container — pacman vsock-relays that socket)
+read `/var/run/docker.sock` inside a container — podm vsock-relays that socket)
 have the best odds. Test before relying on it; report what you find.
 
 **Where does my data live?**
-Everything pacman-managed is under `~/.pacman` (socket, lock, client config) and
+Everything podm-managed is under `~/.podm` (socket, lock, client config) and
 Apple container's own image/content store. No data in `/var` except the optional
 `/var/run/docker.sock` symlink.
 
 **Why not just use `container system stop` when idle?**
-You can — pacman only needs Apple's helpers while containers/builds run and
+You can — podm only needs Apple's helpers while containers/builds run and
 auto-starts them on demand. The ~25 MB helper footprint is the floor the platform
 gives you; the point is nothing above it stays resident.
 
