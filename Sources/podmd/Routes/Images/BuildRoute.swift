@@ -697,9 +697,14 @@ extension BuildRoute {
             buildArgs: buildArgs,
             // TODO: Implement secrets once integration with buildkit materializes
             secrets: [:],
-            // apple/container 1.2.2 added the ssh parameter; "default" forwards
-            // the SSH agent — the only value our --ssh flag documents.
-            ssh: "default",
+            // apple/container 1.2.2 added the ssh parameter. Empty string =
+            // SSH disabled, matching the pre-1.2.2 behavior: the builder
+            // container configuration does not set up SSH forwarding or a
+            // guest agent socket, and "default" (agent forwarding) would fail
+            // provider initialization before the build starts. Plumbing the
+            // --ssh flag end-to-end (agent socket + forwarding config) is
+            // future work; until then builds are SSH-less.
+            ssh: "",
             contextDir: contextDir,
             dockerfile: dockerfileData,
             dockerignore: nil,
