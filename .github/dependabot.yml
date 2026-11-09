@@ -1,4 +1,6 @@
-# Set update schedule for GitHub Actions and Swift dependencies
+# Dependabot: all updates grouped — one PR per ecosystem, security included.
+# Security updates join the same groups (applies-to: security-updates) so a
+# advisory-driven bump arrives as one reviewable PR instead of ten.
 
 version: 2
 updates:
@@ -8,6 +10,11 @@ updates:
       interval: "daily"
       time: "03:00"
     open-pull-requests-limit: 20
+    groups:
+      github-actions:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: "swift"
     directory: "/"
@@ -16,12 +23,10 @@ updates:
       time: "03:00"
     open-pull-requests-limit: 20
     groups:
-      apple-container:
-        applies-to: version-updates
+      # Everything in one Swift PR — the finer-grained apple-container /
+      # apple-swift groups produced a PR per dependency (10 open at once),
+      # which nobody reviewed separately anyway.
+      swift-dependencies:
+        applies-to: security-updates
         patterns:
-          - "apple-container"
-          - "apple-containerization"
-      apple-swift:
-        applies-to: version-updates
-        patterns:
-          - "apple-swift-*"
+          - "*"
