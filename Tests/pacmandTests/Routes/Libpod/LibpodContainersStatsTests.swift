@@ -270,7 +270,7 @@ struct LibpodContainersStatsTests {
     func collectEntriesRecordsBaselines() async throws {
         let running = makeSnapshot(id: "c1", started: Date(timeIntervalSinceNow: -10))
         var baselines: [String: LibpodContainerStats.CPUBaseline] = [:]
-        let entries = await LibpodContainersStatsRoute.collectEntries(
+        let entries = try await LibpodContainersStatsRoute.collectEntries(
             snapshots: [running], sampler: { _ in makeSample(cpuUsec: 100_000) }, baselines: &baselines)
 
         #expect(entries.count == 1)
@@ -278,17 +278,27 @@ struct LibpodContainersStatsTests {
         #expect(baselines["c1"]?.cpuNano == 100_000_000)
     }
 
-    @Test("collectEntries skips a container whose sample throws (podman's skip-on-removal)")
-    func collectEntriesSkipsFailures() async throws {
+    @Test("collectEntries skips a container that vanished (notFound), propagates other failures")
+    func collectEntriesSkipVsPropagate() async throws {
         let running = makeSnapshot(id: "c2")
         var baselines: [String: LibpodContainerStats.CPUBaseline] = [:]
+
+        // Vanished container (notFound) → skipped, podman's skip-on-removal.
+        do {
+            let entries = try await LibpodContainersStatsRoute.collectEntries(
+                snapshots: [running],
+                sampler: { _ in throw ClientContainerError.notFound(id: "c2") },
+                baselines: &baselines)
+            #expect(entries.isEmpty)
+            #expect(baselines.isEmpty)
+        }
+
+        // Runtime/permission failure → propagated, never an empty success.
         struct Boom: Error {}
-
-        let entries = await LibpodContainersStatsRoute.collectEntries(
-            snapshots: [running], sampler: { _ in throw Boom() }, baselines: &baselines)
-
-        #expect(entries.isEmpty)
-        #expect(baselines.isEmpty)
+        await #expect(throws: (any Error).self) {
+            _ = try await LibpodContainersStatsRoute.collectEntries(
+                snapshots: [running], sampler: { _ in throw Boom() }, baselines: &baselines)
+        }
     }
 
     @Test("collectEntries emits a zero row for a stopped container in the target set")
@@ -296,7 +306,7 @@ struct LibpodContainersStatsTests {
         let stopped = makeSnapshot(id: "c3", status: .stopped)
         var baselines: [String: LibpodContainerStats.CPUBaseline] = [:]
 
-        let entries = await LibpodContainersStatsRoute.collectEntries(
+        let entries = try await LibpodContainersStatsRoute.collectEntries(
             snapshots: [stopped], sampler: { _ in makeSample(cpuUsec: 999) }, baselines: &baselines)
 
         #expect(entries.count == 1)

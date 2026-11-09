@@ -410,7 +410,19 @@ struct ClientManifestService: ClientManifestServiceProtocol {
     @discardableResult
     private func writeIndexAndTag(name: String, manifests: [Descriptor], annotations: [String: String]? = nil) async throws -> String {
         let normalized = try ClientImage.normalizeReference(name, containerSystemConfig: containerSystemConfig)
-        let index = Index(manifests: manifests, annotations: annotations)
+        // `annotations: nil` means "carry the existing index's annotations through
+        // this read-modify-write": member modifications (add/remove/addBuiltImage)
+        // rewrite the index with only `manifests`, and without this an annotate
+        // would be silently undone by the next member change. A name with no
+        // existing index (fresh creation) resolves to no annotations. An explicit
+        // non-nil value (the annotate path's merged map) is written as given.
+        let carriedAnnotations: [String: String]?
+        if let annotations {
+            carriedAnnotations = annotations
+        } else {
+            carriedAnnotations = (try? await inspect(name: name))?.annotations
+        }
+        let index = Index(manifests: manifests, annotations: carriedAnnotations)
         let data = try JSONEncoder().encode(index)
 
         // Computed independently rather than captured from inside the ingest closure

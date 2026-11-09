@@ -42,6 +42,13 @@ actor HealthCheckManager {
     private var statuses: [String: ContainerHealth] = [:]
     private var tasks: [String: Task<Void, Never>] = [:]
     private var logs: [String: [HealthLogEntry]] = [:]  // ring buffer, max 5 entries per container
+    /// Failing-streak counters shared by the background loop AND manual probes:
+    /// a manual success must reset the streak the next background failure counts
+    /// from, and a manual failure must count toward the loop's retry threshold.
+    private var failingStreaks: [String: Int] = [:]
+    /// Per-container generation, bumped on start/stop: a probe suspended across a
+    /// stop/restart must not apply its (now-stale) result to the new incarnation.
+    private var generations: [String: UInt64] = [:]
     private let log = Logger(label: "pacman.healthcheck")
     private let probe: HealthProbe
     private let intervalFloorNs: UInt64
@@ -72,6 +79,8 @@ actor HealthCheckManager {
     func start(containerId: String, config: HealthcheckConfig) {
         guard Self.parseTest(config.Test) != nil else { return }
         guard tasks[containerId] == nil else { return }
+        generations[containerId, default: 0] += 1
+        failingStreaks[containerId] = 0
         statuses[containerId] = ContainerHealth(Status: "starting", FailingStreak: 0, Log: [])
         let task = Task { [self] in
             await self.runLoop(containerId: containerId, config: config)
@@ -82,9 +91,11 @@ actor HealthCheckManager {
 
     /// Stop the healthcheck loop for a container.
     func stop(containerId: String) {
+        generations[containerId, default: 0] += 1
         tasks.removeValue(forKey: containerId)?.cancel()
         statuses.removeValue(forKey: containerId)
         logs.removeValue(forKey: containerId)
+        failingStreaks.removeValue(forKey: containerId)
     }
 
     /// Runs exactly one probe on demand — the backing for libpod's
@@ -112,6 +123,7 @@ actor HealthCheckManager {
         let configTimeoutNs = config.Timeout.map { UInt64(max($0, 0)) } ?? Self.defaultTimeoutNs
         let timeoutNs = max(configTimeoutNs, Self.minimumTimeoutNs)
 
+        let generation = generations[containerId] ?? 0
         let start = Date()
         let exitCode = await runCheck(containerId: containerId, config: config, timeoutNs: timeoutNs)
         let end = Date()
@@ -123,13 +135,35 @@ actor HealthCheckManager {
             Output: ""
         )
 
-        let streak = exitCode == 0 ? 0 : (statuses[containerId]?.FailingStreak ?? 0) + 1
+        // A stop/restart while the probe was suspended invalidates this result
+        // for tracked state — applying it would mark the NEW incarnation
+        // healthy/unhealthy based on the previous run.
+        guard (generations[containerId] ?? 0) == generation else { return nil }
+
+        // Shared streak: a manual success resets the counter the background
+        // loop counts from; a manual failure counts toward its retry threshold.
+        let streak: Int
+        if exitCode == 0 {
+            streak = 0
+            failingStreaks[containerId] = 0
+        } else {
+            streak = (failingStreaks[containerId] ?? 0) + 1
+            failingStreaks[containerId] = streak
+        }
+        // Immediate manual-run semantics (podman's Runtime.HealthCheck): the
+        // RESPONSE reports the probe outcome directly...
         let status = exitCode == 0 ? "healthy" : "unhealthy"
 
         if isActive(id: containerId) {
+            // ...but the PERSISTED transition respects Retries: one manual
+            // failure must not mark a tracked container unhealthy before its
+            // retry threshold (or during its start period, which the loop
+            // owns). A manual success always heals.
+            let maxRetries = config.Retries ?? Self.defaultRetries
+            let persistedStatus = exitCode == 0 ? "healthy" : (streak >= maxRetries ? "unhealthy" : "starting")
             updateStatus(
                 id: containerId,
-                health: ContainerHealth(Status: status, FailingStreak: streak, Log: []),
+                health: ContainerHealth(Status: persistedStatus, FailingStreak: streak, Log: []),
                 logEntry: entry
             )
         }
@@ -197,7 +231,7 @@ actor HealthCheckManager {
             try? await Task.sleep(nanoseconds: startPeriodNs)
         }
 
-        var failingStreak = 0
+        let generation = generations[containerId] ?? 0
 
         while !Task.isCancelled {
             guard isActive(id: containerId) else { return }
@@ -206,7 +240,9 @@ actor HealthCheckManager {
             let exitCode = await runCheck(containerId: containerId, config: config, timeoutNs: timeoutNs)
             let end = Date()
 
-            guard !Task.isCancelled else { return }
+            // Generation guard: a stop/restart while this probe was suspended
+            // means the result belongs to the previous incarnation.
+            guard !Task.isCancelled, generations[containerId] == generation else { return }
 
             let entry = HealthLogEntry(
                 Start: Self.formatISO8601(start),
@@ -216,10 +252,11 @@ actor HealthCheckManager {
             )
 
             if exitCode == 0 {
-                failingStreak = 0
+                failingStreaks[containerId] = 0
                 updateStatus(id: containerId, health: ContainerHealth(Status: "healthy", FailingStreak: 0, Log: []), logEntry: entry)
             } else {
-                failingStreak += 1
+                let failingStreak = (failingStreaks[containerId] ?? 0) + 1
+                failingStreaks[containerId] = failingStreak
                 let status = failingStreak >= maxRetries ? "unhealthy" : "starting"
                 updateStatus(id: containerId, health: ContainerHealth(Status: status, FailingStreak: failingStreak, Log: []), logEntry: entry)
                 log.debug("[healthcheck] \(containerId) → \(status) (streak=\(failingStreak), exit=\(exitCode))")

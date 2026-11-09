@@ -22,6 +22,7 @@ struct LibpodImageUntagRouteTests {
         let storedReference: String
         let digest: String
         private(set) var deleted: [String] = []
+        private(set) var dangled: [String] = []
         private var alive: [String]
         var resolveError: Error?
 
@@ -45,10 +46,45 @@ struct LibpodImageUntagRouteTests {
             alive.removeAll { $0 == reference }
         }
 
+        func ensureDanglingReference(reference: String, digest: String, systemConfig: ContainerSystemConfig) async throws {
+            dangled.append(digest)
+            alive.append(digest)
+        }
+
         var aliveReferences: [String] { alive }
     }
 
     // MARK: - Happy paths
+
+    @Test("removing the final tag preserves a digest-addressable dangling record")
+    func untagFinalTagPreservesDangling() async throws {
+        let store = FakeUntagStore(reference: "docker.io/library/solo:v1")
+
+        try await withUntagApp(store: store) { app in
+            try await app.testing().test(.POST, "/v1.51/libpod/images/solo/untag?repo=solo&tag=v1") { res async throws in
+                #expect(res.status == .created)
+            }
+        }
+        #expect(store.deleted == ["docker.io/library/solo:v1"])
+        #expect(store.dangled == [store.digest])
+        #expect(store.aliveReferences == [store.digest], "image stays reachable by digest after its last name is gone")
+    }
+
+    @Test("bare untag (no repo/tag) also leaves the digest-addressable record")
+    func untagAllPreservesDangling() async throws {
+        let store = FakeUntagStore(
+            reference: "docker.io/library/multi:v1",
+            otherReferences: ["docker.io/library/multi:v2"])
+
+        try await withUntagApp(store: store) { app in
+            try await app.testing().test(.POST, "/v1.51/libpod/images/multi/untag") { res async throws in
+                #expect(res.status == .created)
+            }
+        }
+        #expect(store.deleted.count == 2)
+        #expect(store.dangled == [store.digest])
+        #expect(store.aliveReferences == [store.digest])
+    }
 
     @Test("repo+tag removes exactly that reference, keeping the image's other tags")
     func untagOneReference() async throws {
@@ -105,7 +141,10 @@ struct LibpodImageUntagRouteTests {
             }
         }
         #expect(Set(store.deleted) == Set(["docker.io/library/myimg:v1", "docker.io/library/myimg:v2", "registry.example.com/other:latest"]))
-        #expect(store.aliveReferences.isEmpty)
+        // Every named reference is gone, but the digest-addressable dangling
+        // record remains — the image stays reachable by ID and its blobs are
+        // protected from a later garbage-collecting delete elsewhere.
+        #expect(store.aliveReferences == [store.digest])
     }
 
     // MARK: - Errors

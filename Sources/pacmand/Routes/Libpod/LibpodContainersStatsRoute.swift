@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import ContainerAPIClient
 import ContainerResource
+import ContainerizationError
 import Foundation
 import Vapor
 
@@ -283,8 +284,27 @@ struct LibpodContainersStatsRoute: RouteCollection {
                     var snapshots = initial
                     var baselines: [String: LibpodContainerStats.CPUBaseline] = [:]
                     while true {
-                        let entries = await Self.collectEntries(
-                            snapshots: snapshots, sampler: sampler, baselines: &baselines)
+                        let entries: [LibpodContainerStats]
+                        do {
+                            entries = try await Self.collectEntries(
+                                snapshots: snapshots, sampler: sampler, baselines: &baselines)
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch {
+                            // Sampling failed for a non-lifecycle reason (runtime
+                            // service down, XPC error): report a failure row like
+                            // podman's streaming error reports instead of an
+                            // empty successful report, then end the stream.
+                            let failure = LibpodContainerStatsReport(
+                                Error: "\(error)", Stats: [])
+                            if let data = try? JSONEncoder().encode(failure) {
+                                var buf = sharedAllocator.buffer(capacity: data.count + 1)
+                                buf.writeBytes(data)
+                                buf.writeString("\n")
+                                try await writer.write(.buffer(buf))
+                            }
+                            return
+                        }
                         let report = LibpodContainerStatsReport(Error: nil, Stats: entries)
                         if let data = try? JSONEncoder().encode(report) {
                             var buf = sharedAllocator.buffer(capacity: data.count + 1)
@@ -368,8 +388,7 @@ struct LibpodContainersStatsRoute: RouteCollection {
         snapshots: [ContainerSnapshot],
         sampler: @Sendable (String) async throws -> ContainerResource.ContainerStats,
         baselines: inout [String: LibpodContainerStats.CPUBaseline]
-    ) async -> [LibpodContainerStats] {
-        let now = Date()
+    ) async throws -> [LibpodContainerStats] {
         var entries: [LibpodContainerStats] = []
         for snapshot in snapshots {
             guard snapshot.status == .running else {
@@ -380,18 +399,39 @@ struct LibpodContainersStatsRoute: RouteCollection {
             }
             do {
                 let sample = try await sampler(snapshot.id)
+                // Capture the timestamp AFTER this container's sample returns:
+                // a single `now` taken before the loop pairs every CPU counter
+                // with an earlier wall time (overstating first-shot CPU% for
+                // recently started containers) and lets later containers
+                // inherit all preceding sampling latency.
+                let sampledAt = Date()
                 entries.append(
                     LibpodContainerStats.build(
                         snapshot: snapshot, sample: sample,
-                        baseline: baselines[snapshot.id], now: now))
+                        baseline: baselines[snapshot.id], now: sampledAt))
                 baselines[snapshot.id] = LibpodContainerStats.CPUBaseline(
                     cpuNano: (sample.cpuUsageUsec ?? 0) * 1000,
-                    systemNano: LibpodContainerStats.wallClockNano(now))
-            } catch {
-                // Stats unavailable — the container most likely exited between
+                    systemNano: LibpodContainerStats.wallClockNano(sampledAt))
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as ClientContainerError {
+                // Expected lifecycle race — the container exited between
                 // listing and sampling. podman skips such containers in its
                 // query-all path; keep the previous baseline so the next
                 // successful sample still yields a real delta.
+                guard case .notFound = error else { throw error }
+                continue
+            } catch let error as ContainerizationError {
+                guard error.code == .notFound else { throw error }
+                continue
+            } catch {
+                // Any other sampling failure (runtime service down, XPC permission
+                // errors, wedged apiserver) must not surface as an empty
+                // successful report: propagate it so one-shot requests get an
+                // honest HTTP error and streams can report a failure row.
+                throw Abort(
+                    .internalServerError,
+                    reason: "failed to sample stats for \(snapshot.id): \(error)")
             }
         }
         return entries

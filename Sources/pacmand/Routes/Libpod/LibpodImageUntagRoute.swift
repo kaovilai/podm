@@ -40,6 +40,11 @@ protocol ImageUntagStore: Sendable {
     func references(forDigest digest: String) async throws -> [String]
     /// Remove exactly one reference row; must never touch content blobs or snapshots.
     func delete(reference: String) async throws
+    /// Preserve a digest-addressable dangling record for the image before its final
+    /// named reference is removed: without it the image becomes inaccessible by ID
+    /// while its blobs stay on disk, and a later unrelated image deletion's garbage
+    /// collection can reclaim them. Idempotent.
+    func ensureDanglingReference(reference: String, digest: String, systemConfig: ContainerSystemConfig) async throws
 }
 
 /// Production implementation — delegates to Apple Container's `ClientImage` XPC API.
@@ -61,6 +66,15 @@ struct LiveImageUntagStore: ImageUntagStore {
         // tags (or left on disk for a later prune, mirroring podman's dangling image);
         // this must only remove the reference row itself.
         try await ClientImage.delete(reference: reference, garbageCollect: false)
+    }
+
+    func ensureDanglingReference(reference: String, digest: String, systemConfig: ContainerSystemConfig) async throws {
+        // Tag the image with its own digest as an additional reference: the record
+        // (and its blobs, against a later garbage-collecting delete elsewhere) stays
+        // reachable by ID/digest after the last human-meaningful name is gone —
+        // the analogue of docker/podman's dangling `<none>` image record.
+        let image = try await ClientImage.get(reference: reference, containerSystemConfig: systemConfig)
+        try await image.tag(new: digest)
     }
 }
 
@@ -111,6 +125,10 @@ struct LibpodImageUntagRoute: RouteCollection {
         // podman keeping the untagged, dangling image record, which likewise disappears
         // from default image listings while remaining in storage until pruned.
         guard let target = untagTargets.first else {
+            if !allReferences.isEmpty {
+                try await store.ensureDanglingReference(
+                    reference: resolved.reference, digest: resolved.digest, systemConfig: systemConfig)
+            }
             for reference in allReferences {
                 try await store.delete(reference: reference)
                 await broadcastUntag(req: req, digest: resolved.digest, reference: reference)
@@ -136,6 +154,10 @@ struct LibpodImageUntagRoute: RouteCollection {
             throw Abort(.notFound, reason: "\(target) is not a tag of \(name)")
         }
 
+        if allReferences.count == 1 {
+            try await store.ensureDanglingReference(
+                reference: resolved.reference, digest: resolved.digest, systemConfig: systemConfig)
+        }
         try await store.delete(reference: stored)
         await broadcastUntag(req: req, digest: resolved.digest, reference: stored)
         return Response(status: .created)
