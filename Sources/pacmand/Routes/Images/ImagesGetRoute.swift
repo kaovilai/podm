@@ -1,0 +1,85 @@
+import Containerization
+import Vapor
+
+struct ImagesGetRoute: RouteCollection {
+    let client: ClientImageProtocol
+
+    init(client: ClientImageProtocol) {
+        self.client = client
+    }
+
+    func boot(routes: RoutesBuilder) throws {
+        try routes.registerVersionedRoute(.GET, pattern: "/images/get", use: ImagesGetRoute.handlerMultiple(client: client))
+        try routes.registerVersionedRoute(.GET, pattern: "/images/{name:.*}/get", use: ImagesGetRoute.handlerSingle(client: client))
+    }
+
+    static func handlerSingle(client: ClientImageProtocol) -> @Sendable (Request) async throws -> Response {
+        { req in
+            guard let name = req.parameters.get("name") else {
+                throw Abort(.badRequest, reason: "Image name is required")
+            }
+
+            return try await saveImages(references: [name], req: req, client: client)
+        }
+    }
+
+    static func handlerMultiple(client: ClientImageProtocol) -> @Sendable (Request) async throws -> Response {
+        { req in
+            let names = try? req.query.get([String].self, at: "names")
+
+            guard let names = names, !names.isEmpty else {
+                throw Abort(.badRequest, reason: "At least one image name is required in 'names' query parameter")
+            }
+
+            return try await saveImages(references: names, req: req, client: client)
+        }
+    }
+
+    static func saveImages(references: [String], req: Request, client: ClientImageProtocol) async throws -> Response {
+        let platformString = try? req.query.get(String.self, at: "platform")
+        let platform = try platformString.map(platformOrThrow)
+
+        guard let appleContainerAppSupportUrl = req.application.storage[AppleContainerAppSupportUrlKey.self] else {
+            throw Abort(.internalServerError, reason: "AppleContainerAppSupportUrl not configured")
+        }
+
+        let tarballPath: URL
+        do {
+            tarballPath = try await client.save(references: references, platform: platform, appleContainerAppSupportUrl: appleContainerAppSupportUrl, logger: req.logger)
+        } catch let error as ClientImageError {
+            switch error {
+            case .notFound(let id):
+                throw Abort(.notFound, reason: id)
+            case .digestReferenceNotAllowed(let repo):
+                throw Abort(.badRequest, reason: "cannot reference \(repo) by digest")
+            }
+        }
+        let tempDir = tarballPath.deletingLastPathComponent()
+
+        // moby emits one "save" event per exported image with the digest as Actor.ID
+        // (daemon/containerd/image_exporter.go). A reference the store cannot resolve
+        // to a digest is carried as-is.
+        let digestsByReference = await client.digestsByReference()
+        let savedActorIds = references.map { digestsByReference[$0] ?? $0 }
+        let broadcaster = req.application.storage[EventBroadcasterKey.self]
+
+        let response = try await req.fileio.asyncStreamFile(at: tarballPath.path) { result in
+            guard case .success = result, let broadcaster else { return }
+            for actorId in savedActorIds {
+                await broadcaster.broadcast(
+                    DockerEvent.make(
+                        type: "image", action: "save", actorID: actorId,
+                        attributes: ["name": actorId]))
+            }
+        }
+
+        response.headers.contentType = HTTPMediaType(type: "application", subType: "x-tar")
+
+        Task {
+            try? await Task.sleep(for: .seconds(5))
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        return response
+    }
+}

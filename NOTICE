@@ -1,0 +1,11 @@
+pacman
+Copyright 2026 Pacman contributors
+
+This product includes software developed as part of the socktainer project
+(https://github.com/socktainer/socktainer), Copyright 2025 Red Hat, Inc. and
+socktainer contributors, licensed under the Apache License, Version 2.0.
+
+This product includes software developed by Apple Inc. as part of the
+container (https://github.com/apple/container) and containerization
+(https://github.com/apple/containerization) projects, licensed under the
+Apache License, Version 2.0.

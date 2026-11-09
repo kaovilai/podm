@@ -1,0 +1,199 @@
+#
+# Copyright (C) 2025 Red Hat, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release'
+        required: true
+      branch:
+        description: 'Branch to use for the release'
+        required: true
+        default: main
+env:
+  GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+
+permissions:
+  contents: read
+
+jobs:
+
+  tag:
+    name: Tagging
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      githubTag: ${{ steps.TAG_UTIL.outputs.githubTag}}
+      desktopVersion: ${{ steps.TAG_UTIL.outputs.desktopVersion}}
+      releaseId: ${{ steps.create_release.outputs.id}}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.branch }}
+      - name: Generate tag utilities
+        id: TAG_UTIL
+        run: |
+            TAG_PATTERN=${{ github.event.inputs.version }}
+            echo "githubTag=v$TAG_PATTERN" >> ${GITHUB_OUTPUT}
+            echo "desktopVersion=$TAG_PATTERN" >> ${GITHUB_OUTPUT}
+
+      - name: tag
+        run: |
+          git config --local user.name ${{ github.actor }}
+          echo "Tagging with ${{ steps.TAG_UTIL.outputs.githubTag }}"
+          git tag ${{ steps.TAG_UTIL.outputs.githubTag }}
+          git push origin ${{ steps.TAG_UTIL.outputs.githubTag }}
+      - name: Create Release
+        id: create_release
+        uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1.21.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag: ${{ steps.TAG_UTIL.outputs.githubTag }}
+          name: ${{ steps.TAG_UTIL.outputs.githubTag }}
+          draft: true
+          prerelease: true
+
+  build:
+    name: Build
+    needs: tag
+    permissions:
+      contents: write
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.tag.outputs.githubTag}}
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: latest-stable
+
+      - name: Display swift version
+        run: |
+          which swift
+          swift --version
+
+      - name: Display Xcode version
+        run: |
+          xcodebuild -version
+          xcode-select -p
+          xcrun --sdk macosx --show-sdk-path
+
+      - name: Run Build
+        timeout-minutes: 40
+        run: make release
+
+      - name: List Build
+        run: ls -la ./.build/arm64-apple-macosx/release/
+
+
+      - name: Decode .p12 certificate and setup keychain
+        run: |
+          # Decode certificate
+          echo "$CERTIFICATE_P12_BASE64" | base64 --decode > signing_cert.p12
+          echo "$DEVELOPER_ID_CERTIFICATE_P12_BASE64" | base64 --decode > developer_id_cert.p12
+          
+          # Setup keychain
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          security create-keychain -p "" "$KEYCHAIN"
+          security import signing_cert.p12 -k "$KEYCHAIN" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security import developer_id_cert.p12 -k "$KEYCHAIN" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/productsign
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN"
+          security unlock-keychain -p "" "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" "$KEYCHAIN"
+          
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.CERTIFICATE_P12_BASE64 }}
+          DEVELOPER_ID_CERTIFICATE_P12_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+
+      - name: Sign binary
+        run: |
+          codesign --force \
+            --sign "${{ secrets.APPLE_APPLICATION_ID}}" \
+            --options runtime \
+            --entitlements entitlements.plist \
+            ./.build/arm64-apple-macosx/release/pacmand
+    
+      - name: zip the binary
+        run: |
+          cd ./.build/arm64-apple-macosx/release/
+          zip -r pacman.zip pacman
+
+      - name: Submit for notarization
+        run: |
+          xcrun notarytool submit ./.build/arm64-apple-macosx/release/pacmand.zip \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --wait
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+
+      - name: Create & sign the installer
+        run: |
+          make installer-notarized
+        env:
+          BUILD_VERSION: ${{ needs.tag.outputs.desktopVersion}}
+          APPLE_APPLICATION_ID: ${{ secrets.APPLE_APPLICATION_ID}}
+          APPLE_PRODUCT_ID: ${{ secrets.APPLE_PRODUCT_ID}}  
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Upload pacman binary
+        run: |
+         gh release upload ${{ needs.tag.outputs.githubTag}} ./.build/arm64-apple-macosx/release/pacmand
+         gh release upload ${{ needs.tag.outputs.githubTag}} ./.build/arm64-apple-macosx/release/pacmand.zip
+         gh release upload ${{ needs.tag.outputs.githubTag}} ./pkginstaller/out/pacman-installer.pkg
+
+  release:
+    needs: [tag, build]
+    name: Release
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    steps:
+      - name: id
+        run: echo the release id is ${{ needs.tag.outputs.releaseId}}
+
+      - name: Publish release
+        uses: StuYarrow/publish-release@01f2a1365bacd77bad861873a7fdf274ab49eefd # v1.1.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          id: ${{ needs.tag.outputs.releaseId}}
+
