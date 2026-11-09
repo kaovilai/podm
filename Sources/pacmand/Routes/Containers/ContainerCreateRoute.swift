@@ -768,8 +768,42 @@ extension ContainerCreateRoute {
     /// Dockerfile HEALTHCHECK rather than fall through to it. Only when the
     /// request carries none does the image's HEALTHCHECK apply. `nil` means
     /// "no healthcheck anywhere" (the label is then not set at all).
+    /// Field-level healthcheck resolution with Docker-compatible semantics:
+    ///
+    /// - An explicit `{"Test":["NONE"]}` in the request disables probing outright
+    ///   (the sentinel wins over any image healthcheck).
+    /// - Otherwise the request's set fields override the image's, field by field:
+    ///   a request carrying only `Interval` keeps the image's `Test` (and every
+    ///   other field), and a request carrying only `Test` keeps the image's
+    ///   timing/retry settings — a bare `requested ?? image` discarded them.
+    /// - Zero or negative `Interval`/`Timeout`/`Retries`/`StartPeriod` count as
+    ///   unset: HealthCheckManager defaults only nil, so an image (or request)
+    ///   encoding an explicit 0 would otherwise produce a 1s interval floor or
+    ///   an immediate-unhealthy retry budget instead of Docker's defaults.
+    /// - No runnable `Test` after the merge → no healthcheck at all.
     static func resolveHealthcheck(requested: HealthcheckConfig?, image: HealthcheckConfig?) -> HealthcheckConfig? {
-        requested ?? image
+        // The disable sentinel is absolute, wherever it comes from.
+        if requested?.Test == ["NONE"] || image?.Test == ["NONE"] {
+            return HealthcheckConfig(Test: ["NONE"], Interval: nil, Timeout: nil, Retries: nil, StartPeriod: nil)
+        }
+        guard requested != nil || image != nil else { return nil }
+
+        func normalized(_ value: Int?) -> Int? {
+            guard let value, value > 0 else { return nil }
+            return value
+        }
+
+        let merged = HealthcheckConfig(
+            Test: requested?.Test ?? image?.Test,
+            Interval: normalized(requested?.Interval ?? image?.Interval),
+            Timeout: normalized(requested?.Timeout ?? image?.Timeout),
+            Retries: normalized(requested?.Retries ?? image?.Retries),
+            StartPeriod: normalized(requested?.StartPeriod ?? image?.StartPeriod)
+        )
+        // No runnable test after the merge (neither side carried one, or the
+        // value is empty) → no probe: persist nothing.
+        guard HealthCheckManager.parseTest(merged.Test) != nil else { return nil }
+        return merged
     }
 
     /// Mirrors moby's ShmSize handling: a positive request is used verbatim; 0 or omitted

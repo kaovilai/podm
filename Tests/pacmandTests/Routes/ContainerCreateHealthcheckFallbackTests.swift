@@ -92,3 +92,65 @@ struct ContainerCreateHealthcheckFallbackTests {
         #expect(HealthCheckManager.parseTest(resolved?.Test) == nil)
     }
 }
+
+extension ContainerCreateHealthcheckFallbackTests {
+    @Test("a partial request merges field-by-field over the image — Interval-only keeps the image's Test")
+    func partialRequestMergesOverImage() {
+        let requested = HealthcheckConfig(
+            Test: nil, Interval: 5_000_000_000, Timeout: nil, Retries: nil, StartPeriod: nil)
+        let resolved = ContainerCreateRoute.resolveHealthcheck(requested: requested, image: imageHealthcheck)
+        #expect(resolved?.Test == imageHealthcheck.Test, "image's Test survives an Interval-only request")
+        #expect(resolved?.Interval == 5_000_000_000)
+        #expect(resolved?.Retries == imageHealthcheck.Retries)
+        #expect(resolved?.Timeout == imageHealthcheck.Timeout)
+    }
+
+    @Test("a Test-only request keeps the image's timing and retry settings")
+    func testOnlyRequestKeepsImageTimings() {
+        let requested = HealthcheckConfig(
+            Test: ["CMD", "/bin/custom"], Interval: nil, Timeout: nil, Retries: nil, StartPeriod: nil)
+        let resolved = ContainerCreateRoute.resolveHealthcheck(requested: requested, image: imageHealthcheck)
+        #expect(resolved?.Test == ["CMD", "/bin/custom"])
+        #expect(resolved?.Interval == imageHealthcheck.Interval)
+        #expect(resolved?.Timeout == imageHealthcheck.Timeout)
+        #expect(resolved?.Retries == imageHealthcheck.Retries)
+    }
+
+    @Test("explicit zeros count as unset — Docker defaults apply instead of 1s floors or 0 retries")
+    func explicitZerosNormalizeToUnset() {
+        let zeroed = HealthcheckConfig(
+            Test: ["CMD", "true"], Interval: 0, Timeout: 0, Retries: 0, StartPeriod: 0)
+        let resolved = ContainerCreateRoute.resolveHealthcheck(requested: zeroed, image: nil)
+        #expect(resolved?.Test == ["CMD", "true"])
+        #expect(resolved?.Interval == nil, "0 interval must not become the 1s loop floor")
+        #expect(resolved?.Timeout == nil)
+        #expect(resolved?.Retries == nil, "0 retries must not mean immediately-unhealthy")
+        #expect(resolved?.StartPeriod == nil)
+
+        // An image-encoded zero also normalizes, and a request 0 suppresses
+        // the image's value so the default applies.
+        let imageZero = HealthcheckConfig(
+            Test: ["CMD", "true"], Interval: 2_000_000_000, Timeout: 0, Retries: 5, StartPeriod: nil)
+        let suppressed = ContainerCreateRoute.resolveHealthcheck(
+            requested: HealthcheckConfig(
+                Test: nil, Interval: 0, Timeout: nil, Retries: nil, StartPeriod: nil),
+            image: imageZero)
+        #expect(suppressed?.Interval == nil, "request 0 overrides the image's interval back to default")
+        #expect(suppressed?.Retries == 5)
+    }
+
+    @Test("a merged healthcheck with no runnable Test persists nothing")
+    func mergedWithoutTestPersistsNothing() {
+        let resolved = ContainerCreateRoute.resolveHealthcheck(
+            requested: HealthcheckConfig(
+                Test: nil, Interval: 5_000_000_000, Timeout: nil, Retries: nil, StartPeriod: nil),
+            image: nil)
+        #expect(resolved == nil)
+
+        let emptyTest = ContainerCreateRoute.resolveHealthcheck(
+            requested: HealthcheckConfig(
+                Test: [], Interval: nil, Timeout: nil, Retries: nil, StartPeriod: nil),
+            image: nil)
+        #expect(emptyTest == nil)
+    }
+}
