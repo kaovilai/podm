@@ -15,8 +15,7 @@ struct LibpodContainerChangesRoute: RouteCollection {
     /// arguments; the defaults point at the real daemon services.
     init(
         client: ClientContainerProtocol = ClientContainerService(),
-        appSupportURL: URL = URL(
-            fileURLWithPath: "\(NSHomeDirectory())/Library/Application Support/com.apple.container")
+        appSupportURL: URL = RouteRegistry.defaultAppSupportURL
     ) {
         self.client = client
         self.appSupportURL = appSupportURL

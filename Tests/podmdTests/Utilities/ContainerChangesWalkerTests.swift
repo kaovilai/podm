@@ -33,6 +33,7 @@ struct Ext4TreeFixture {
         files: [String: String] = [:],
         directories: [String] = [],
         symlinks: [String: String] = [:],
+        fileModes: [String: UInt16] = [:],
         mtime: Date = Date(timeIntervalSince1970: 1_000_000_000)
     ) throws -> URL {
         let device = url.appendingPathComponent("rootfs.ext4")
@@ -52,7 +53,7 @@ struct Ext4TreeFixture {
             stream.open()
             try formatter.create(
                 path: FilePath(path),
-                mode: EXT4.Inode.Mode(.S_IFREG, 0o644),
+                mode: EXT4.Inode.Mode(.S_IFREG, fileModes[path] ?? 0o644),
                 ts: ts,
                 buf: stream,
                 recursion: true
@@ -291,5 +292,140 @@ struct ContainerChangesWalkerTests {
         let resolved = ContainerChangesWalker.baselineSnapshotPath(
             appSupportURL: fixture.url, imageDescriptorDigest: "sha256:deadbeef")
         #expect(resolved == nil)
+    }
+
+    @Test("a file replaced by a directory reports Modified, with new children Added")
+    func fileToDirectorySwap() async throws {
+        let baseline = Ext4TreeFixture(name: "baseline")
+        let current = Ext4TreeFixture(name: "current")
+        defer {
+            baseline.cleanUp()
+            current.cleanUp()
+        }
+        try baseline.write(files: ["/swap": "was-a-file", "/keep": "data"])
+        try current.write(files: ["/swap/child": "inside", "/keep": "data"])
+        let changes = try await ContainerChangesWalker.changes(
+            baselineBlockDevice: baseline.url.appendingPathComponent("rootfs.ext4"),
+            currentBlockDevice: current.url.appendingPathComponent("rootfs.ext4"))
+        #expect(
+            changes == [
+                ContainerFileChange(path: "/swap", kind: .modified),
+                ContainerFileChange(path: "/swap/child", kind: .added),
+            ])
+    }
+
+    @Test("a chmod-only change on a regular file reports Modified")
+    func chmodOnlyChange() async throws {
+        let baseline = Ext4TreeFixture(name: "baseline")
+        let current = Ext4TreeFixture(name: "current")
+        defer {
+            baseline.cleanUp()
+            current.cleanUp()
+        }
+        // Identical bytes, identical timestamps — only the permission bits
+        // differ. Content heuristics must not suppress a mode change.
+        try baseline.write(files: ["/app": "payload"])
+        try current.write(files: ["/app": "payload"], fileModes: ["/app": 0o755])
+        let changes = try await ContainerChangesWalker.changes(
+            baselineBlockDevice: baseline.url.appendingPathComponent("rootfs.ext4"),
+            currentBlockDevice: current.url.appendingPathComponent("rootfs.ext4"))
+        #expect(changes == [ContainerFileChange(path: "/app", kind: .modified)])
+    }
+
+    @Test("baseline resolution with a known platform never falls back to another platform's snapshot")
+    func baselineMatchesContainerPlatform() throws {
+        let fixture = Ext4TreeFixture(name: "store")
+        defer { fixture.cleanUp() }
+        // BOTH platform snapshots exist on disk.
+        for digest in ["bbbb", "cccc"] {
+            try fixture.write(files: ["/bin/true": "elf"])
+            let snapshot =
+                fixture.url
+                .appendingPathComponent("snapshots")
+                .appendingPathComponent(digest)
+                .appendingPathComponent("snapshot")
+            try FileManager.default.createDirectory(
+                at: snapshot.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.moveItem(
+                at: fixture.url.appendingPathComponent("rootfs.ext4"), to: snapshot)
+        }
+        let index =
+            """
+            {"schemaVersion": 2, "manifests": [
+              {"digest": "sha256:cccc", "mediaType": "application/vnd.oci.image.manifest.v1+json",
+               "platform": {"architecture": "amd64", "os": "linux"}},
+              {"digest": "sha256:bbbb", "mediaType": "application/vnd.oci.image.manifest.v1+json",
+               "platform": {"architecture": "arm64", "os": "linux"}}
+            ]}
+            """
+        let blob =
+            fixture.url
+            .appendingPathComponent("content")
+            .appendingPathComponent("blobs")
+            .appendingPathComponent("sha256")
+        try FileManager.default.createDirectory(at: blob, withIntermediateDirectories: true)
+        try Data(index.utf8).write(to: blob.appendingPathComponent("eeee"))
+
+        let arm64 = try Platform(from: "linux/arm64")
+        let amd64 = try Platform(from: "linux/amd64")
+
+        // arm64 container → the arm64 snapshot, never amd64.
+        let armResolved = ContainerChangesWalker.baselineSnapshotPath(
+            appSupportURL: fixture.url, imageDescriptorDigest: "sha256:eeee", platform: arm64)
+        #expect(armResolved?.lastPathComponent == "snapshot")
+        #expect(armResolved?.deletingLastPathComponent().lastPathComponent == "bbbb")
+
+        // amd64 (Rosetta) container → the amd64 snapshot, never arm64.
+        let amdResolved = ContainerChangesWalker.baselineSnapshotPath(
+            appSupportURL: fixture.url, imageDescriptorDigest: "sha256:eeee", platform: amd64)
+        #expect(amdResolved?.deletingLastPathComponent().lastPathComponent == "cccc")
+
+        // A platform with no matching child gets NO baseline (missing, not
+        // wrong-tree fallback) — the route answers 500 with a diagnostic.
+        let riscv = try Platform(from: "linux/riscv64")
+        let noneResolved = ContainerChangesWalker.baselineSnapshotPath(
+            appSupportURL: fixture.url, imageDescriptorDigest: "sha256:eeee", platform: riscv)
+        #expect(noneResolved == nil)
+    }
+
+    @Test("baseline resolution with an unknown platform still prefers the host architecture")
+    func baselineUnknownPlatformPrefersHost() throws {
+        let fixture = Ext4TreeFixture(name: "store")
+        defer { fixture.cleanUp() }
+        for digest in ["bbbb", "cccc"] {
+            try fixture.write(files: ["/bin/true": "elf"])
+            let snapshot =
+                fixture.url
+                .appendingPathComponent("snapshots")
+                .appendingPathComponent(digest)
+                .appendingPathComponent("snapshot")
+            try FileManager.default.createDirectory(
+                at: snapshot.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.moveItem(
+                at: fixture.url.appendingPathComponent("rootfs.ext4"), to: snapshot)
+        }
+        let index =
+            """
+            {"schemaVersion": 2, "manifests": [
+              {"digest": "sha256:cccc", "mediaType": "application/vnd.oci.image.manifest.v1+json",
+               "platform": {"architecture": "amd64", "os": "linux"}},
+              {"digest": "sha256:bbbb", "mediaType": "application/vnd.oci.image.manifest.v1+json",
+               "platform": {"architecture": "arm64", "os": "linux"}}
+            ]}
+            """
+        let blob =
+            fixture.url
+            .appendingPathComponent("content")
+            .appendingPathComponent("blobs")
+            .appendingPathComponent("sha256")
+        try FileManager.default.createDirectory(at: blob, withIntermediateDirectories: true)
+        try Data(index.utf8).write(to: blob.appendingPathComponent("eeee"))
+
+        // Platform unknown: arm64 (the host) wins even though both exist —
+        // this is the pre-existing behavior, now proven by both snapshots
+        // being present.
+        let resolved = ContainerChangesWalker.baselineSnapshotPath(
+            appSupportURL: fixture.url, imageDescriptorDigest: "sha256:eeee", platform: nil)
+        #expect(resolved?.deletingLastPathComponent().lastPathComponent == "bbbb")
     }
 }

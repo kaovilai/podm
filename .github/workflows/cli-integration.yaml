@@ -230,21 +230,31 @@ jobs:
           # ~/Library/Application Support/com.apple.container/snapshots/<digest>/snapshot.
           # Like docker run/exec above, this boots a microVM, so it needs the
           # Virtualization framework (vm-steps gate).
+          # Clean up any stale container from a failed previous run (the name must
+          # be free), and always remove this run's container — even when an
+          # assertion exits early (trap), so a persistent self-hosted runner
+          # never inherits a running sleep container.
+          sudo docker rm -f diff-verify >/dev/null 2>&1 || true
+          trap 'sudo docker rm -f diff-verify >/dev/null 2>&1 || true' EXIT
           sudo docker run -d --name diff-verify alpine:latest sleep 300
-
           # Baseline: a freshly started container must diff empty, or only
-          # list boot-time /etc injections (hosts/hostname/resolv.conf).
+          # list boot-time /etc injections (hosts/hostname/resolv.conf — and
+          # the /etc directory entry itself when the runtime adds one).
           BASE="$(sudo docker diff diff-verify)"
           echo "baseline diff:"
           echo "$BASE"
-          UNEXPECTED="$(echo "$BASE" | grep -vE '^[ACD] /etc/(hosts|hostname|resolv.conf)$' || true)"
+          UNEXPECTED="$(echo "$BASE" | grep -vE '^[ACD] /etc(/(hosts|hostname|resolv.conf))?$' || true)"
           [ -z "$UNEXPECTED" ] || { echo "ERROR: unexpected entries in baseline diff"; exit 1; }
-
           # Touch a new file and modify an existing image file, then assert
           # the docker CLI output ("<Kind> <path>" lines: A=added, C=changed,
-          # D=deleted) reports exactly those changes.
+          # D=deleted) reports exactly those changes. The sync flushes the
+          # guest's dirty pages to the block device first: the walker reads
+          # the HOST-side rootfs.ext4, and page-cache-lagged writes would
+          # otherwise make this step flaky (the same lag applies to any
+          # client diffing a RUNNING container — documented on the route).
           sudo docker exec diff-verify touch /tmp/commit-verify
           sudo docker exec diff-verify sh -c 'echo podm-diff-test > /etc/alpine-release'
+          sudo docker exec diff-verify sync
           DIFF="$(sudo docker diff diff-verify)"
           echo "diff after changes:"
           echo "$DIFF"

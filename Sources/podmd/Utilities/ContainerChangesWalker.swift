@@ -1,4 +1,5 @@
 import ContainerizationEXT4
+import ContainerizationOCI
 import CryptoKit
 import Foundation
 import SystemPackage
@@ -27,7 +28,7 @@ struct ContainerFileChange: Sendable, Equatable {
 /// snapshot. The image snapshot therefore IS the pristine baseline — no
 /// create-time capture is needed.
 ///
-/// The walk compares (type, mode, size, mtime) metadata per path and only
+/// The walk compares (type, mode, uid/gid, size, mtime, ctime) metadata per path and only
 /// hashes the contents of regular files whose metadata diverges, confirming
 /// Modified entries (and suppressing false positives when a copy rewrites
 /// timestamps). Directories are reported Modified only when their immediate
@@ -48,8 +49,21 @@ enum ContainerChangesWalker {
     ///      attestation manifests skipped.
     /// Each candidate resolves via `snapshots/<digest>/snapshot`, falling back
     /// to the path recorded in `snapshot-info` (Apple's `Filesystem.source`).
-    static func baselineSnapshotPath(appSupportURL: URL, imageDescriptorDigest: String) -> URL? {
-        for digest in candidateBaselineDigests(appSupportURL: appSupportURL, imageDescriptorDigest: imageDescriptorDigest) {
+    /// - Parameter platform: the platform the CONTAINER was created for
+    ///   (persisted at create time). When present, only index children whose
+    ///   os/architecture match may serve as the baseline — an amd64/Rosetta
+    ///   container must never be diffed against the arm64 snapshot (every
+    ///   untouched file would report as changed). No cross-platform fallback:
+    ///   a matching child without a snapshot is a missing baseline, not a
+    ///   reason to compare against the wrong tree.
+    static func baselineSnapshotPath(
+        appSupportURL: URL,
+        imageDescriptorDigest: String,
+        platform: ContainerizationOCI.Platform? = nil
+    ) -> URL? {
+        for digest in candidateBaselineDigests(
+            appSupportURL: appSupportURL, imageDescriptorDigest: imageDescriptorDigest, platform: platform)
+        {
             if let path = snapshotPath(forDigest: digest, appSupportURL: appSupportURL) {
                 return path
             }
@@ -73,7 +87,9 @@ enum ContainerChangesWalker {
 
     // MARK: - Baseline resolution
 
-    private static func candidateBaselineDigests(appSupportURL: URL, imageDescriptorDigest: String) -> [String] {
+    private static func candidateBaselineDigests(
+        appSupportURL: URL, imageDescriptorDigest: String, platform: ContainerizationOCI.Platform?
+    ) -> [String] {
         var candidates = [imageDescriptorDigest]
 
         // The descriptor digest may be an image index; its platform-manifest
@@ -101,12 +117,26 @@ enum ContainerChangesWalker {
                 return nil
             }
             guard let digest = manifest["digest"] as? String else { return nil }
-            let platform = manifest["platform"] as? [String: Any]
-            let isArm64 = (platform?["architecture"] as? String) == "arm64"
+            let childPlatform = manifest["platform"] as? [String: Any]
+            let isArm64 = (childPlatform?["architecture"] as? String) == "arm64"
             return (digest: digest, arm64: isArm64)
         }
-        // Prefer the host platform's snapshot.
-        candidates.append(contentsOf: childDigests.sorted { $0.arm64 && !$1.arm64 }.map(\.digest))
+
+        if let platform {
+            // The container's own platform decides — only matching children
+            // are candidates, and a mismatched snapshot is never a fallback.
+            let matching = childDigests.filter { child in
+                let childPlatform =
+                    manifests
+                    .first { ($0["digest"] as? String) == child.digest }?["platform"] as? [String: Any]
+                return (childPlatform?["os"] as? String) == platform.os
+                    && (childPlatform?["architecture"] as? String) == platform.architecture
+            }
+            candidates.append(contentsOf: matching.map(\.digest))
+        } else {
+            // Platform unknown: prefer the host platform's snapshot.
+            candidates.append(contentsOf: childDigests.sorted { $0.arm64 && !$1.arm64 }.map(\.digest))
+        }
         return candidates
     }
 
@@ -142,7 +172,14 @@ enum ContainerChangesWalker {
         let isSymlink: Bool
         let size: Int64
         let mtime: UInt32
+        /// Inode change time: bumped by any metadata/data write and NOT
+        /// settable through utimes() — the archive API can preserve mtime,
+        /// but a rewritten file still bumps ctime, so same-size/same-mtime
+        /// content rewrites stay detectable without hashing every file.
+        let ctime: UInt32
         let mode: UInt16
+        let uid: UInt16
+        let gid: UInt16
 
         init(inode: EXT4.Inode) {
             typeTag = inode.mode & 0xF000
@@ -150,7 +187,17 @@ enum ContainerChangesWalker {
             isSymlink = inode.isSymlink
             size = inode.size
             mtime = inode.mtime
+            ctime = inode.ctime
             mode = inode.mode
+            uid = inode.uid
+            gid = inode.gid
+        }
+
+        /// Metadata equality for content-bearing entries: everything a
+        /// `docker diff` treats as a change EXCEPT the timestamp pair,
+        /// which callers handle through hash/ctime confirmation.
+        func metadataMatches(_ other: TreeEntry) -> Bool {
+            mode == other.mode && uid == other.uid && gid == other.gid
         }
     }
 
@@ -206,12 +253,16 @@ enum ContainerChangesWalker {
                     // the old/new children as deleted/added.
                     changes.append(ContainerFileChange(path: childPath, kind: .modified))
                 } else if c.isDirectory {
-                    // Directories are Modified only when their child set or
-                    // mode changed — timestamp-only churn is not a content
-                    // change (docker diff shows the same behavior).
-                    let childBase = (try? list(baseline, at: childPath)) ?? [:]
-                    let childCurrent = (try? list(current, at: childPath)) ?? [:]
-                    if Set(childBase.keys) != Set(childCurrent.keys) || b.mode != c.mode {
+                    // Directories are Modified only when their child set,
+                    // mode, or ownership changed — timestamp-only churn is
+                    // not a content change (docker diff shows the same
+                    // behavior). Both sides hold a directory here, so a
+                    // listing failure is an ERROR, not an empty listing —
+                    // silently treating it as empty would fabricate
+                    // additions/deletions or mask the whole subtree.
+                    let childBase = try list(baseline, at: childPath)
+                    let childCurrent = try list(current, at: childPath)
+                    if Set(childBase.keys) != Set(childCurrent.keys) || !b.metadataMatches(c) {
                         changes.append(ContainerFileChange(path: childPath, kind: .modified))
                     }
                     try walk(
@@ -219,14 +270,33 @@ enum ContainerChangesWalker {
                         baseEntries: childBase, currentEntries: childCurrent, into: &changes)
                     continue
                 } else if c.isSymlink {
-                    if b.size != c.size || symlinkTarget(baseline, at: childPath) != symlinkTarget(current, at: childPath) {
+                    // Symlinks: target or ownership change (mode/uid/gid of
+                    // the link inode itself).
+                    if b.size != c.size
+                        || !b.metadataMatches(c)
+                        || symlinkTarget(baseline, at: childPath) != symlinkTarget(current, at: childPath)
+                    {
                         changes.append(ContainerFileChange(path: childPath, kind: .modified))
                     }
                 } else {
-                    // Regular file (and any other inode type): metadata-divergent
-                    // entries are content-hashed to confirm the modification,
-                    // suppressing false positives from rewritten timestamps.
-                    if b.size != c.size || b.mtime != c.mtime {
+                    // Regular file (and any other non-directory, non-symlink
+                    // inode type — the branches above took dirs and symlinks).
+                    // A chmod/chown alone is a modification: moby reports mode
+                    // and ownership changes even when the bytes are identical,
+                    // so they are checked BEFORE any content heuristic can
+                    // suppress them.
+                    if !b.metadataMatches(c) {
+                        changes.append(ContainerFileChange(path: childPath, kind: .modified))
+                    } else if b.size != c.size {
+                        // Different sizes mean different contents — no hash
+                        // needed (also avoids reading both files in vain).
+                        changes.append(ContainerFileChange(path: childPath, kind: .modified))
+                    } else if b.mtime != c.mtime || b.ctime != c.ctime {
+                        // Same size, but a timestamp moved. mtime alone can be
+                        // rewritten without touching the bytes (rootfs-creation
+                        // timestamp churn) — hash to confirm. ctime cannot be
+                        // forged via utimes(), so an archive-API replace that
+                        // preserves mtime still lands here.
                         if isModifiedFile(baseline: baseline, at: childPath, current: current) {
                             changes.append(ContainerFileChange(path: childPath, kind: .modified))
                         }
@@ -235,10 +305,14 @@ enum ContainerChangesWalker {
             }
 
             // Recurse wherever either side has a directory, so deleted and
-            // added subtrees enumerate every descendant.
+            // added subtrees enumerate every descendant. A side that IS a
+            // directory must list or throw — an error is never an empty
+            // listing; only the absent side contributes nothing.
             if base?.isDirectory == true || currentEntry?.isDirectory == true {
-                let childBase = base?.isDirectory == true ? (try? list(baseline, at: childPath)) ?? [:] : [:]
-                let childCurrent = currentEntry?.isDirectory == true ? (try? list(current, at: childPath)) ?? [:] : [:]
+                let childBase =
+                    base?.isDirectory == true ? try list(baseline, at: childPath) : [:]
+                let childCurrent =
+                    currentEntry?.isDirectory == true ? try list(current, at: childPath) : [:]
                 try walk(
                     baseline: baseline, current: current, path: childPath,
                     baseEntries: childBase, currentEntries: childCurrent, into: &changes)
@@ -254,7 +328,7 @@ enum ContainerChangesWalker {
         for name in try reader.listDirectory(FilePath(path)) {
             guard name != ".", name != ".." else { continue }
             let childPath = path == "/" ? "/\(name)" : "\(path)/\(name)"
-            guard let (_, inode) = try? reader.stat(FilePath(childPath), followSymlinks: false) else { continue }
+            let (_, inode) = try reader.stat(FilePath(childPath), followSymlinks: false)
             entries[name] = TreeEntry(inode: inode)
         }
         return entries

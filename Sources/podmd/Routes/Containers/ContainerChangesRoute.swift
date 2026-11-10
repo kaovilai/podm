@@ -25,8 +25,7 @@ struct ContainerChangesRoute: RouteCollection {
     /// arguments; the defaults point at the real daemon services.
     init(
         client: ClientContainerProtocol = ClientContainerService(),
-        appSupportURL: URL = URL(
-            fileURLWithPath: "\(NSHomeDirectory())/Library/Application Support/com.apple.container")
+        appSupportURL: URL = RouteRegistry.defaultAppSupportURL
     ) {
         self.client = client
         self.appSupportURL = appSupportURL
@@ -41,8 +40,7 @@ struct ContainerChangesRoute: RouteCollection {
 
     static func handler(
         client: ClientContainerProtocol,
-        appSupportURL: URL = URL(
-            fileURLWithPath: "\(NSHomeDirectory())/Library/Application Support/com.apple.container")
+        appSupportURL: URL = RouteRegistry.defaultAppSupportURL
     ) -> @Sendable (Request) async throws -> [RESTContainerChange] {
         { req in
             guard let reference = req.parameters.get("id") else {
@@ -61,6 +59,12 @@ struct ContainerChangesRoute: RouteCollection {
                 throw Abort(.notFound, reason: "No such container: \(reference)")
             }
 
+            // Volatile read of a possibly-running container's rootfs (the
+            // same guarantee as docker export): the guest's most recent
+            // writes may still live in its page cache, so a diff of a
+            // RUNNING container can briefly lag behind the guest's view
+            // until writeback — the CLI integration test runs `sync` for
+            // this reason. A stopped container is always consistent.
             let rootfs =
                 appSupportURL
                 .appendingPathComponent("containers", isDirectory: true)
@@ -75,7 +79,8 @@ struct ContainerChangesRoute: RouteCollection {
             guard
                 let baseline = ContainerChangesWalker.baselineSnapshotPath(
                     appSupportURL: appSupportURL,
-                    imageDescriptorDigest: container.configuration.image.descriptor.digest)
+                    imageDescriptorDigest: container.configuration.image.descriptor.digest,
+                    platform: container.configuration.platform)
             else {
                 throw Abort(
                     .internalServerError,
