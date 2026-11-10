@@ -111,6 +111,7 @@ actor SecretStore {
         var payloads: [String: Data] = [:]
         let fm = FileManager.default
 
+        var secretsWasQuarantined = false
         if let data = try? Data(contentsOf: metadataURL),
             let decoded = try? JSONDecoder().decode([StoredSecret].self, from: data)
         {
@@ -120,6 +121,7 @@ actor SecretStore {
             // persist would otherwise overwrite it, destroying the only copy
             // of the data the log message says to fix.
             Self.quarantineCorruptFile(at: metadataURL, fm: fm, log: log)
+            secretsWasQuarantined = true
         }
 
         if let data = try? Data(contentsOf: payloadURL),
@@ -128,6 +130,18 @@ actor SecretStore {
             payloads = decoded
         } else if fm.fileExists(atPath: payloadURL.path) {
             Self.quarantineCorruptFile(at: payloadURL, fm: fm, log: log)
+        }
+
+        // When the METADATA failed to decode (quarantined above), the
+        // payloads on disk may still be perfectly healthy — they are simply
+        // unattributable. The orphan prune below and the next persist's
+        // payload write would DESTROY them, leaving the quarantined metadata
+        // pointing at nothing recoverable. Quarantine the payload file aside
+        // as well: the pair stays together for manual recovery, and the
+        // store starts clean rather than half-loaded.
+        if secretsWasQuarantined, fm.fileExists(atPath: payloadURL.path) {
+            Self.quarantineCorruptFile(at: payloadURL, fm: fm, log: log)
+            payloads = [:]
         }
 
         // Load-time repair, the read side of persist()'s ordering invariant
@@ -240,7 +254,21 @@ actor SecretStore {
         )
         secrets.append(secret)
         payloads[secret.id] = data
-        try persist([.payload(payloads), .metadata(secrets)])
+        // Snapshot-and-restore: with a two-file store, leaving a failed
+        // mutation in memory breaks the payload-superset invariant across
+        // the NEXT mutation (a delete that failed to persist would vanish
+        // from the next create's payload write). Memory always mirrors the
+        // last-persisted disk state — podman can cache-before-write because
+        // its db is one file; we cannot.
+        let savedSecrets = secrets
+        let savedPayloads = payloads
+        do {
+            try persist([.payload(payloads), .metadata(secrets)])
+        } catch {
+            secrets = savedSecrets
+            payloads = savedPayloads
+            throw error
+        }
         return secret
     }
 
@@ -256,7 +284,15 @@ actor SecretStore {
         else { return nil }
         let removed = secrets.remove(at: index)
         payloads.removeValue(forKey: removed.id)
-        try persist([.metadata(secrets), .payload(payloads)])
+        let savedSecrets = secrets
+        let savedPayloads = payloads
+        do {
+            try persist([.metadata(secrets), .payload(payloads)])
+        } catch {
+            secrets = savedSecrets
+            payloads = savedPayloads
+            throw error
+        }
         return removed
     }
 
@@ -333,25 +369,6 @@ actor SecretStore {
     /// Ordering invariant — why the payload file always lands first as a
     /// SUPERSET of the IDs the incoming metadata references, and is only
     /// trimmed after that metadata has landed: a crash between renames must
-    /// Renames an undecodable store file aside (`.corrupt-<timestamp>`)
-    /// instead of leaving it in place: the next persist overwrites the
-    /// original name, and without the quarantine that would destroy the
-    /// only copy of whatever the user was told to fix.
-    private static func quarantineCorruptFile(at url: URL, fm: FileManager, log: Logger) {
-        let stamp = Int(Date().timeIntervalSince1970)
-        let backup = url.appendingPathExtension("corrupt-\(stamp)")
-        do {
-            try fm.moveItem(at: url, to: backup)
-            log.error(
-                "could not load store file \(url.path) — moved aside as \(backup.lastPathComponent); starting empty. The file remains available for manual recovery."
-            )
-        } catch {
-            log.error(
-                "could not load store file \(url.path) and could not move it aside (\(error.localizedDescription)) — it will be overwritten by the next persist"
-            )
-        }
-    }
-
     /// only ever leave ORPHAN payload entries (unreferenced garbage, pruned
     /// by `load`), never metadata referencing a payload that is not on disk
     /// (a secret that inspects fine but whose --showsecret data is gone —
@@ -406,6 +423,25 @@ actor SecretStore {
             if !existing.contains(id) {
                 return id
             }
+        }
+    }
+
+    /// Renames an undecodable store file aside (`.corrupt-<timestamp>`)
+    /// instead of leaving it in place: the next persist overwrites the
+    /// original name, and without the quarantine that would destroy the
+    /// only copy of whatever the user was told to fix.
+    private static func quarantineCorruptFile(at url: URL, fm: FileManager, log: Logger) {
+        let stamp = Int(Date().timeIntervalSince1970)
+        let backup = url.appendingPathExtension("corrupt-\(stamp)")
+        do {
+            try fm.moveItem(at: url, to: backup)
+            log.error(
+                "could not load store file \(url.path) — moved aside as \(backup.lastPathComponent); starting empty. The file remains available for manual recovery."
+            )
+        } catch {
+            log.error(
+                "could not load store file \(url.path) and could not move it aside (\(error.localizedDescription)) — it will be overwritten by the next persist"
+            )
         }
     }
 }

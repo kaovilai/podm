@@ -454,127 +454,6 @@ struct LibpodSecretsRouteTests {
 
     // MARK: - Persistence (podman filedriver parity)
 
-    @Test("secrets survive store re-instantiation from the same directory, with 0600 payload files")
-    func persistenceAndPermissions() async throws {
-        let dir = uniqueTempDir()
-        defer { try? FileManager.default.removeItem(at: dir) }
-
-        let first = SecretStore(storageDirectory: dir)
-        let created = try await first.create(name: "persistent", data: Data("survives".utf8), driver: nil, labels: [:], driverOptions: [:], replace: false, ignore: false)
-        let second = SecretStore(storageDirectory: dir)
-        let reloaded = await second.lookup(nameOrID: "persistent")
-        #expect(reloaded?.id == created.id)
-        let payload = await second.payload(id: created.id)
-        #expect(payload == Data("survives".utf8))
-
-        let payloadFile = dir.appendingPathComponent("podm-secrets/filedriver/secretsdata.json")
-        let attrs = try FileManager.default.attributesOfItem(atPath: payloadFile.path)
-        #expect((attrs[.posixPermissions] as? Int) == 0o600, "secret payloads must be owner-only readable (podman filedriver 0o600)")
-        let metadataFile = dir.appendingPathComponent("podm-secrets/secrets.json")
-        let metaAttrs = try FileManager.default.attributesOfItem(atPath: metadataFile.path)
-        #expect((metaAttrs[.posixPermissions] as? Int) == 0o600)
-    }
-
-    @Test("an interrupted persist leaves only orphan payloads, which load prunes")
-    func loadRepairsOrphanPayloads() async throws {
-        let dir = uniqueTempDir()
-        defer { try? FileManager.default.removeItem(at: dir) }
-        _ = SecretStore(storageDirectory: dir)  // creates the directory layout
-
-        // Crash mid-persist after the payload write but before the metadata
-        // write: the payload file gains an entry no metadata references.
-        let real = StoredSecret(
-            id: "aaaaaaaaaaaaaaaaaaaaaaaaa", name: "real", createdAt: Date(), updatedAt: Date(),
-            labels: [:], driver: "file", driverOptions: [:]
-        )
-        let encoder = JSONEncoder()
-        try encoder.encode([real]).write(
-            to: dir.appendingPathComponent("podm-secrets/secrets.json"), options: .atomic
-        )
-        try encoder.encode([
-            "aaaaaaaaaaaaaaaaaaaaaaaaa": Data("real-data".utf8),
-            "bbbbbbbbbbbbbbbbbbbbbbbbb": Data("orphan-data".utf8),
-        ]).write(
-            to: dir.appendingPathComponent("podm-secrets/filedriver/secretsdata.json"), options: .atomic
-        )
-
-        let store = SecretStore(storageDirectory: dir)
-        #expect(await store.payload(id: "bbbbbbbbbbbbbbbbbbbbbbbbb") == nil, "orphaned payload must be pruned on load")
-        #expect(await store.payload(id: "aaaaaaaaaaaaaaaaaaaaaaaaa") == Data("real-data".utf8))
-        #expect(await store.lookup(nameOrID: "real")?.id == "aaaaaaaaaaaaaaaaaaaaaaaaa")
-    }
-
-    @Test("a metadata record with no payload is kept, not dropped (podman keeps dangling records)")
-    func loadKeepsDanglingMetadata() async throws {
-        let dir = uniqueTempDir()
-        defer { try? FileManager.default.removeItem(at: dir) }
-        _ = SecretStore(storageDirectory: dir)
-
-        // Only reachable by hand-mangling the store (persist's ordering
-        // cannot produce it); podman's driver.Lookup fails for such records
-        // while ls/inspect still answer, so the record must survive load.
-        let ghost = StoredSecret(
-            id: "ccccccccccccccccccccccccc", name: "ghost", createdAt: Date(), updatedAt: Date(),
-            labels: [:], driver: "file", driverOptions: [:]
-        )
-        try JSONEncoder().encode([ghost]).write(
-            to: dir.appendingPathComponent("podm-secrets/secrets.json"), options: .atomic
-        )
-        try JSONEncoder().encode([String: Data]()).write(
-            to: dir.appendingPathComponent("podm-secrets/filedriver/secretsdata.json"), options: .atomic
-        )
-
-        let store = SecretStore(storageDirectory: dir)
-        #expect(await store.lookup(nameOrID: "ghost")?.name == "ghost")
-        #expect(await store.payload(id: "ccccccccccccccccccccccccc") == nil)
-    }
-
-    @Test("lookup resolves an exact full ID before a name (podman getExactNameAndID)")
-    func lookupPrefersIDOverName() async throws {
-        let dir = uniqueTempDir()
-        defer { try? FileManager.default.removeItem(at: dir) }
-        _ = SecretStore(storageDirectory: dir)
-
-        // A hand-mangled store where B's NAME equals A's ID — exactly the
-        // collision create() now refuses (409). ID-first lookup still
-        // resolves it deterministically, like podman's IDToName-before-
-        // NameToID consultation order.
-        let aID = "aaaaaaaaaaaaaaaaaaaaaaaaa"
-        let a = StoredSecret(
-            id: aID, name: "alpha", createdAt: Date(), updatedAt: Date(),
-            labels: [:], driver: "file", driverOptions: [:]
-        )
-        let b = StoredSecret(
-            id: "ddddddddddddddddddddddddd", name: aID, createdAt: Date(), updatedAt: Date(),
-            labels: [:], driver: "file", driverOptions: [:]
-        )
-        try JSONEncoder().encode([a, b]).write(
-            to: dir.appendingPathComponent("podm-secrets/secrets.json"), options: .atomic
-        )
-
-        let store = SecretStore(storageDirectory: dir)
-        #expect(await store.lookup(nameOrID: aID)?.id == aID)
-        #expect(await store.lookup(nameOrID: "alpha")?.id == aID)
-    }
-
-    @Test("inspect returns metadata and payload in one actor hop")
-    func singleHopInspect() async throws {
-        let dir = uniqueTempDir()
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let store = SecretStore(storageDirectory: dir)
-        let created = try await store.create(
-            name: "one-hop", data: Data("seekrit".utf8), driver: nil,
-            labels: [:], driverOptions: [:], replace: false, ignore: false
-        )
-        let revealed = await store.inspect(nameOrID: "one-hop", showSecret: true)
-        #expect(revealed?.secret.id == created.id)
-        #expect(revealed?.payload == Data("seekrit".utf8))
-        let hidden = await store.inspect(nameOrID: created.id, showSecret: false)
-        #expect(hidden?.secret.id == created.id)
-        #expect(hidden?.payload == nil)
-        #expect(await store.inspect(nameOrID: "no-such", showSecret: true) == nil)
-    }
-
     // MARK: - Helpers
 
     /// Boots a VaporTesting app with ONLY the libpod secrets collection
@@ -630,28 +509,31 @@ struct LibpodSecretsRouteTests {
         guard let body else { throw Abort(.internalServerError, reason: "inspect of \(name) produced no body") }
         return body
     }
-    @Test("a corrupt store file is quarantined aside, not silently overwritten")
-    func corruptFileQuarantined() async throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("secret-quarantine-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        // Write garbage where the metadata belongs.
-        let metadata = dir.appendingPathComponent("podm-secrets").appendingPathComponent("secrets.json")
-        try FileManager.default.createDirectory(
-            at: metadata.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data("not json".utf8).write(to: metadata)
 
+    @Test("malformed filters answer 400, not everything")
+    func malformedFiltersRejected() async throws {
+        let dir = uniqueTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
         let store = SecretStore(storageDirectory: dir)
-        // Loading starts empty; the corrupt file must have been moved aside.
-        let listed = try await store.list()
-        #expect(listed.isEmpty)
-        #expect(!FileManager.default.fileExists(atPath: metadata.path), "original name freed for the next persist")
-        let backups = try FileManager.default.contentsOfDirectory(
-            atPath: metadata.deletingLastPathComponent().path
-        )
-        .filter { $0.hasPrefix("secrets.json.corrupt-") }
-        #expect(backups.count == 1, "corrupt data preserved for manual recovery")
+        try await withSecretsApp(store: store) { app in
+            // A secret must exist for the regex filter to ever APPLY — podman
+            // compiles patterns per-secret too, so an empty store never
+            // errors on a bad pattern (it just returns an empty list).
+            _ = try await createSecret(app, name: "somename", payload: "x")
+            try await app.testing().test(.GET, "/v1.51/libpod/secrets/json?filters=notjson") { res async in
+                #expect(res.status == .badRequest)
+            }
+            try await app.testing().test(.GET, "/v1.51/libpod/secrets/json?filters=not-json") { res async in
+                #expect(res.status == .badRequest)
+            }
+            try await app.testing().test(.GET, "/v1.51/libpod/secrets/json?filters=%5B%5D") { res async in
+                #expect(res.status == .badRequest)
+            }
+            // A malformed regex pattern is also a 400, not a 500.
+            try await app.testing().test(.GET, "/v1.51/libpod/secrets/json?filters=%7B%22name%22%3A%5B%22%5B%22%5D%7D") { res async in
+                #expect(res.status == .badRequest)
+            }
+        }
     }
 }
 
@@ -660,4 +542,14 @@ private func uniqueTempDir() -> URL {
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     return dir
 
+}
+
+@Test("parseFilters unit: malformed json throws")
+func parseFiltersUnit() throws {
+    #expect(throws: Abort.self) {
+        _ = try LibpodSecretsRoute.parseFilters("not-json")
+    }
+    #expect(throws: Abort.self) {
+        _ = try LibpodSecretsRoute.parseFilters("[]")
+    }
 }

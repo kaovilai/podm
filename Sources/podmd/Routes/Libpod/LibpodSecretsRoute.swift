@@ -219,10 +219,15 @@ extension LibpodSecretsRoute {
     /// Docker-style `filters` JSON (`{"name": ["..."], "id": ["..."]}`).
     /// Podman accepts only the `name` and `id` keys (`IfPassesSecretsFilter`).
     static func parseFilters(_ filtersParam: String?) throws -> [String: [String]] {
-        guard let filtersParam, !filtersParam.isEmpty,
-            let data = filtersParam.data(using: .utf8),
+        guard let filtersParam, !filtersParam.isEmpty else { return [:] }
+        guard let data = filtersParam.data(using: .utf8),
             let decoded = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
-        else { return [:] }
+        else {
+            // Malformed or non-object filters (not-json, `[]`) are CLIENT
+            // errors — silently treating them as "no filter" returns every
+            // secret where the caller asked for a subset.
+            throw Abort(.badRequest, reason: "invalid filters: expected a JSON object")
+        }
 
         let allowedKeys: Set<String> = ["name", "id"]
         let filterKeys = Set(decoded.keys)
@@ -250,7 +255,15 @@ extension LibpodSecretsRoute {
             let target = key == "name" ? secret.name : secret.id
             var matched = false
             for value in values {
-                let regex = try NSRegularExpression(pattern: value)
+                // A malformed pattern is a CLIENT error (400 with the
+                // diagnostic), not a Foundation error the error middleware
+                // would render as a 500.
+                let regex: NSRegularExpression
+                do {
+                    regex = try NSRegularExpression(pattern: value)
+                } catch {
+                    throw Abort(.badRequest, reason: "invalid filter pattern \(key)=\(value): \(error.localizedDescription)")
+                }
                 if regex.firstMatch(in: target, range: NSRange(location: 0, length: target.utf16.count)) != nil {
                     matched = true
                     break
