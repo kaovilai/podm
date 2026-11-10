@@ -486,6 +486,29 @@ struct LibpodSecretsRouteTests {
         }
     }
 
+    @Test("a remove whose payload trim fails answers 204 — the deletion committed")
+    func removeTrimFailureAnswers204() async throws {
+        let dir = uniqueTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = SecretStore(storageDirectory: dir)
+        try await withSecretsApp(store: store) { app in
+            _ = try await createSecret(app, name: "committed-gone", payload: "x")
+            // Read-only PAYLOAD dir, writable metadata dir: the deletion
+            // commits, only the trim fails — the client must see success
+            // (with the remove event), not a 500 that invites a retry
+            // into a 404.
+            let filedriverDir = dir.appendingPathComponent("podm-secrets/filedriver", isDirectory: true)
+            try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: filedriverDir.path)
+            try await app.testing().test(.DELETE, "/v1.51/libpod/secrets/committed-gone") { res async in
+                #expect(res.status == .noContent)
+            }
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: filedriverDir.path)
+            try await app.testing().test(.GET, "/v1.51/libpod/secrets/committed-gone/json") { res async in
+                #expect(res.status == .notFound)
+            }
+        }
+    }
+
     @Test("consecutive persist failures never lose a committed secret (payload-superset invariant)")
     func consecutivePersistFailuresKeepCommittedPayloads() async throws {
         let dir = uniqueTempDir()

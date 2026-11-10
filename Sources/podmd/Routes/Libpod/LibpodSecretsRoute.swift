@@ -110,6 +110,8 @@ extension LibpodSecretsRoute {
                 // create handlers) — a create that cannot be durably written
                 // must not answer 200 and vanish on restart.
                 throw Abort(.internalServerError, reason: "could not persist the secret store: \(reason)")
+            } catch SecretStore.StoreError.quarantineBlocked(let reason) {
+                throw Abort(.internalServerError, reason: "secret store needs operator attention: \(reason)")
             }
         }
     }
@@ -180,6 +182,8 @@ extension LibpodSecretsRoute {
                 removed = found
             } catch SecretStore.StoreError.persistFailed(let reason, _) {
                 throw Abort(.internalServerError, reason: "could not persist the secret store: \(reason)")
+            } catch SecretStore.StoreError.quarantineBlocked(let reason) {
+                throw Abort(.internalServerError, reason: "secret store needs operator attention: \(reason)")
             }
             Self.broadcast(event: "remove", secret: removed, req: req)
             return Response(status: .noContent)

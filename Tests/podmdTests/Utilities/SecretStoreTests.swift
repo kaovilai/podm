@@ -215,12 +215,51 @@ struct SecretStoreTests {
         let store = SecretStore(storageDirectory: dir)
         #expect(await store.list().isEmpty, "load still starts empty")
         // Neither file could be moved aside — both remain under their
-        // original names, so the next persist will overwrite them (logged).
+        // original names.
         #expect(FileManager.default.fileExists(atPath: podmDir.appendingPathComponent("secrets.json").path))
         #expect(
             FileManager.default.fileExists(atPath: filedriverDir.appendingPathComponent("secretsdata.json").path))
         let metaFiles = try FileManager.default.contentsOfDirectory(atPath: podmDir.path)
         #expect(!metaFiles.contains { $0.hasPrefix("secrets.json.corrupt-") })
+
+        // Mutations are REFUSED while the unreadable files sit under their
+        // original names — persisting would overwrite the only copy.
+        do {
+            _ = try await store.create(
+                name: "blocked", data: Data("x".utf8), driver: nil,
+                labels: [:], driverOptions: [:], replace: false, ignore: false
+            )
+            Issue.record("create must be refused on a store whose quarantine failed")
+        } catch SecretStore.StoreError.quarantineBlocked {
+            // expected
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        // Even with the permissions fixed, THIS instance stays blocked —
+        // the flag is load-time; only a restart (after the operator
+        // resolves the files) clears it.
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: podmDir.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: filedriverDir.path)
+        do {
+            _ = try await store.create(
+                name: "still-blocked", data: Data("x".utf8), driver: nil,
+                labels: [:], driverOptions: [:], replace: false, ignore: false
+            )
+            Issue.record("create must stay refused until the daemon restarts")
+        } catch SecretStore.StoreError.quarantineBlocked {
+            // expected
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        // The operator resolves the files; a fresh instance works again.
+        try FileManager.default.removeItem(at: podmDir.appendingPathComponent("secrets.json"))
+        try FileManager.default.removeItem(at: filedriverDir.appendingPathComponent("secretsdata.json"))
+        let recovered = SecretStore(storageDirectory: dir)
+        _ = try await recovered.create(
+            name: "fresh", data: Data("x".utf8), driver: nil,
+            labels: [:], driverOptions: [:], replace: false, ignore: false
+        )
+        #expect(await recovered.lookup(nameOrID: "fresh") != nil)
     }
 
     @Test("a replace whose metadata write fails rolls back to the old secret (superset invariant)")
@@ -264,7 +303,7 @@ struct SecretStoreTests {
         #expect(listed.count == 1)
     }
 
-    @Test("a remove whose payload trim fails keeps the committed deletion")
+    @Test("a remove whose payload trim fails keeps the committed deletion and answers success")
     func failedRemoveTrimKeepsDeletion() async throws {
         let dir = uniqueTempDir()
         let filedriverDir = dir.appendingPathComponent("podm-secrets/filedriver")
@@ -280,10 +319,11 @@ struct SecretStoreTests {
         // Read-only PAYLOAD dir, writable metadata dir: remove's metadata
         // write commits the deletion, the payload trim fails.
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: filedriverDir.path)
-        await #expect(throws: SecretStore.StoreError.self) {
-            _ = try await store.remove(nameOrID: "half-removed")
-        }
-        // The deletion stands in memory — it already committed to disk.
+        // The deletion committed — it is reported as the success it is;
+        // answering an error would make the client retry a delete that
+        // already happened (404).
+        let removed = try await store.remove(nameOrID: "half-removed")
+        #expect(removed?.name == "half-removed")
         #expect(await store.lookup(nameOrID: "half-removed") == nil)
         // "Crash" + reload: the metadata no longer references the secret;
         // the un-trimmed payload entry is an orphan that load prunes —

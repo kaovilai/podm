@@ -64,6 +64,12 @@ actor SecretStore {
         /// same way (`SecretsManager.Store` wraps both as "creating secret
         /// %s: %w"); the route answers 500.
         case persistFailed(reason: String, writeIndex: Int)
+        /// A corrupt store file could not be quarantined aside at load time
+        /// (its directory was not writable), so the unreadable data still
+        /// sits under its original name. Mutations are REFUSED rather than
+        /// persisting over the only copy of data the store could not read;
+        /// the operator resolves the files and restarts the daemon.
+        case quarantineBlocked(String)
     }
 
     /// `common/pkg/secrets` `maxSecretSize` — 512kB.
@@ -79,6 +85,10 @@ actor SecretStore {
     private let metadataURL: URL
     private let payloadURL: URL
     private let log: Logger
+    /// True when a corrupt store file could not be moved aside at load time
+    /// — the next persist would overwrite the only copy of unreadable data.
+    /// Set once at init; cleared by fixing the files and restarting.
+    private let quarantineBlocked: Bool
 
     /// Loads (or initializes) the store under `storageDirectory`. Missing
     /// files are not an error — the store simply starts empty and writes both
@@ -103,15 +113,19 @@ actor SecretStore {
         let loaded = Self.load(metadataURL: metadataURL, payloadURL: payloadURL, log: log)
         secrets = loaded.secrets
         payloads = loaded.payloads
+        quarantineBlocked = loaded.quarantineBlocked
     }
 
     /// Static so the actor's nonisolated initializer stays in its
     /// initialization phase (property writes only); a load failure is logged
     /// and treated as empty (same posture as `RestartPolicyOverrideStore`): a
     /// hand-mangled store loses its secrets rather than taking the daemon down.
-    private static func load(metadataURL: URL, payloadURL: URL, log: Logger) -> (secrets: [StoredSecret], payloads: [String: Data]) {
+    private static func load(
+        metadataURL: URL, payloadURL: URL, log: Logger
+    ) -> (secrets: [StoredSecret], payloads: [String: Data], quarantineBlocked: Bool) {
         var secrets: [StoredSecret] = []
         var payloads: [String: Data] = [:]
+        var quarantineBlocked = false
         let fm = FileManager.default
 
         var secretsWasQuarantined = false
@@ -123,7 +137,9 @@ actor SecretStore {
             // Back the corrupt file aside before starting empty: the next
             // persist would otherwise overwrite it, destroying the only copy
             // of the data the log message says to fix.
-            Self.quarantineCorruptFile(at: metadataURL, fm: fm, log: log)
+            if !Self.quarantineCorruptFile(at: metadataURL, fm: fm, log: log) {
+                quarantineBlocked = true
+            }
             secretsWasQuarantined = true
         }
 
@@ -132,7 +148,9 @@ actor SecretStore {
         {
             payloads = decoded
         } else if fm.fileExists(atPath: payloadURL.path) {
-            Self.quarantineCorruptFile(at: payloadURL, fm: fm, log: log)
+            if !Self.quarantineCorruptFile(at: payloadURL, fm: fm, log: log) {
+                quarantineBlocked = true
+            }
         }
 
         // When the METADATA failed to decode (quarantined above), the
@@ -143,7 +161,9 @@ actor SecretStore {
         // as well: the pair stays together for manual recovery, and the
         // store starts clean rather than half-loaded.
         if secretsWasQuarantined, fm.fileExists(atPath: payloadURL.path) {
-            Self.quarantineCorruptFile(at: payloadURL, fm: fm, log: log)
+            if !Self.quarantineCorruptFile(at: payloadURL, fm: fm, log: log) {
+                quarantineBlocked = true
+            }
             payloads = [:]
         }
 
@@ -166,10 +186,23 @@ actor SecretStore {
         for secret in secrets where payloads[secret.id] == nil {
             log.error("secret \(secret.name) (\(secret.id)) has no payload on disk — --showsecret will return no data")
         }
-        return (secrets, payloads)
+        return (secrets, payloads, quarantineBlocked)
     }
 
     // MARK: - Mutations
+
+    /// Mutations refuse to run while a corrupt store file still sits under
+    /// its original name (its quarantine move failed at load time):
+    /// persisting would overwrite the only copy of data the store could
+    /// not read. Reads keep working; the operator resolves the files and
+    /// restarts the daemon.
+    private func ensureNotBlocked() throws {
+        if quarantineBlocked {
+            throw StoreError.quarantineBlocked(
+                "a corrupt store file could not be moved aside at load time (directory not writable?) — resolve the files under "
+                    + metadataURL.deletingLastPathComponent().path + " and restart podmd")
+        }
+    }
 
     /// Creates (or replaces) a secret, returning the stored record. Mirrors
     /// `SecretsManager.Store` including its validation order, so error
@@ -207,6 +240,9 @@ actor SecretStore {
         guard resolvedDriver == "file" else {
             throw StoreError.unsupportedDriver(resolvedDriver)
         }
+        // A blocked store (unquarantinable corrupt file) refuses mutations:
+        // persisting would overwrite the only copy of unreadable data.
+        try ensureNotBlocked()
 
         // Podman's exactSecretExists → getExactNameAndID resolves an exact
         // FULL-ID match before a name match (IDToName is consulted before
@@ -252,9 +288,14 @@ actor SecretStore {
                     // Only the final payload TRIM failed — the replacement
                     // metadata has already committed, so the pre-replacement
                     // state is no longer recoverable (its metadata is gone
-                    // from disk). The replacement stands; the old-ID payload
-                    // the trim never removed is an orphan that load prunes.
-                    throw error
+                    // from disk). The replacement stands and is REPORTED as
+                    // the success it is: the un-trimmed old-ID payload is an
+                    // orphan that load prunes, and answering 500 would make
+                    // the client retry a create that already happened.
+                    log.warning(
+                        "replace of \(name) committed but the old payload could not be trimmed (\(storeError)) — the stale entry is pruned on the next load"
+                    )
+                    return replacement
                 }
                 // An early write failed — disk still describes the OLD
                 // secret, so memory must too: keeping the replacement in
@@ -310,6 +351,10 @@ actor SecretStore {
         guard let secret = lookup(nameOrID: nameOrID),
             let index = secrets.firstIndex(where: { $0.id == secret.id })
         else { return nil }
+        // Reads (the 404 above) still work on a blocked store; the
+        // mutation does not — persisting would overwrite the only copy of
+        // the unreadable file.
+        try ensureNotBlocked()
         // Snapshot BEFORE mutating, same rationale as create(): a failed
         // remove left applied in memory would let the next mutation's
         // payload write drop data the on-disk metadata still references.
@@ -327,9 +372,14 @@ actor SecretStore {
                 // committed to the metadata on disk, so restoring the
                 // secret in memory would disagree with disk: a restart
                 // loses it while the next successful mutation writes it
-                // back (resurrection). The deletion stands; the un-trimmed
-                // payload entry is an orphan that load prunes.
-                throw error
+                // back (resurrection). The deletion stands and is REPORTED
+                // as the success it is: the un-trimmed payload entry is an
+                // orphan that load prunes, and answering 500 would make the
+                // client retry a delete that already happened (404).
+                log.warning(
+                    "remove of \(nameOrID) committed but the payload could not be trimmed (\(storeError)) — the stale entry is pruned on the next load"
+                )
+                return removed
             }
             // The metadata write failed — nothing committed, so memory
             // keeps mirroring disk: the secret stays, fully retryable.
@@ -474,8 +524,11 @@ actor SecretStore {
     /// Renames an undecodable store file aside (`.corrupt-<timestamp>`)
     /// instead of leaving it in place: the next persist overwrites the
     /// original name, and without the quarantine that would destroy the
-    /// only copy of whatever the user was told to fix.
-    private static func quarantineCorruptFile(at url: URL, fm: FileManager, log: Logger) {
+    /// only copy of whatever the user was told to fix. Returns false when
+    /// the move itself failed — the caller records a blocked state and
+    /// refuses to persist over the unreadable file.
+    @discardableResult
+    private static func quarantineCorruptFile(at url: URL, fm: FileManager, log: Logger) -> Bool {
         let stamp = Int(Date().timeIntervalSince1970)
         let backup = url.appendingPathExtension("corrupt-\(stamp)")
         do {
@@ -483,10 +536,12 @@ actor SecretStore {
             log.error(
                 "could not load store file \(url.path) — moved aside as \(backup.lastPathComponent); starting empty. The file remains available for manual recovery."
             )
+            return true
         } catch {
             log.error(
-                "could not load store file \(url.path) and could not move it aside (\(error.localizedDescription)) — it will be overwritten by the next persist"
+                "could not load store file \(url.path) and could not move it aside (\(error.localizedDescription)) — it will NOT be overwritten: mutations are refused until it is resolved and the daemon restarted"
             )
+            return false
         }
     }
 }
