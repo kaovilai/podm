@@ -514,9 +514,9 @@ actor SecretStore {
             do {
                 switch write {
                 case .payload(let payloads):
-                    try Self.writeJSON(payloads, to: payloadURL)
+                    try Self.writeJSON(payloads, to: payloadURL, log: log)
                 case .metadata(let secrets):
-                    try Self.writeJSON(secrets, to: metadataURL)
+                    try Self.writeJSON(secrets, to: metadataURL, log: log)
                 }
             } catch {
                 throw StoreError.persistFailed(reason: "\(error)", writeIndex: index)
@@ -529,10 +529,19 @@ actor SecretStore {
     /// suit — labels aren't secret, but there's no reason for them to be
     /// readable either. The temp file is created 0600 FROM THE START:
     /// `data.write(options: .atomic)` would create it with the process
-    /// umask (typically 0644), leaving a world-readable window before any
-    /// post-rename chmod — and replaceItemAt can keep the destination's
-    /// existing attributes, so the mode is re-asserted after the swap.
-    private static func writeJSON<T: Encodable>(_ value: T, to url: URL) throws {
+    /// umask (typically 0644), leaving a world-readable window.
+    ///
+    /// Failure ordering contract: this function only THROWS before the data
+    /// swap commits (temp creation, replace/move). Once the swap has landed
+    /// the file's new contents are durable, and a post-commit failure must
+    /// not surface as an error — the callers' rollback logic cannot tell a
+    /// failed write from a committed one, and rolling back after a
+    /// committed metadata write would let a later mutation discard payloads
+    /// the on-disk metadata still references. `replaceItemAt` (verified
+    /// empirically) preserves the DESTINATION's mode, not the temp's — the
+    /// destination is guaranteed owner-only by init's tightening — so the
+    /// post-swap mode re-assertion is belt-and-braces and only logs.
+    private static func writeJSON<T: Encodable>(_ value: T, to url: URL, log: Logger) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(value)
@@ -558,7 +567,16 @@ actor SecretStore {
         // A same-directory swap may leave the temp behind holding the old
         // data; either way it must not linger.
         try? FileManager.default.removeItem(at: temp)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        do {
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        } catch {
+            // The data swap already committed — never throw from here (see
+            // the failure ordering contract above). The mode was secured
+            // before the swap; this is a logged anomaly.
+            log.warning(
+                "store file \(url.path) committed but its mode could not be re-asserted (\(error.localizedDescription))"
+            )
+        }
     }
 
     /// Strips group/other access bits from an existing file or directory,

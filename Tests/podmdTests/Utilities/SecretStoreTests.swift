@@ -411,6 +411,35 @@ struct SecretStoreTests {
         #expect(perms & 0o077 == 0, "the recovered instance tightened the directory")
     }
 
+    @Test("a mode-locked store file fails the swap pre-commit — rollback stays correct")
+    func lockedMetadataFileFailsPreCommit() async throws {
+        let dir = uniqueTempDir()
+        let metadata = dir.appendingPathComponent("podm-secrets/secrets.json")
+        defer {
+            try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: metadata.path)
+            try? FileManager.default.removeItem(at: dir)
+        }
+        let store = SecretStore(storageDirectory: dir)
+        _ = try await store.create(
+            name: "locked", data: Data("x".utf8), driver: nil,
+            labels: [:], driverOptions: [:], replace: false, ignore: false
+        )
+        // Lock the METADATA file's mode (user-immutable): the atomic
+        // replace itself now fails — strictly BEFORE any data swap — so
+        // the mutation is a safe pre-commit failure and the rollback must
+        // keep the secret fully retryable. (This pins writeJSON's failure
+        // ordering contract: nothing may throw after the swap commits.)
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: metadata.path)
+        await #expect(throws: SecretStore.StoreError.self) {
+            _ = try await store.remove(nameOrID: "locked")
+        }
+        #expect(await store.lookup(nameOrID: "locked") != nil, "pre-commit failure must roll back")
+        // Released, the retry goes through.
+        try FileManager.default.setAttributes([.immutable: false], ofItemAtPath: metadata.path)
+        _ = try await store.remove(nameOrID: "locked")
+        #expect(await store.lookup(nameOrID: "locked") == nil)
+    }
+
     private func uniqueTempDir() -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
