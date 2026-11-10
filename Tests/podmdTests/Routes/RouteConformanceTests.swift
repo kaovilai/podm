@@ -17,10 +17,10 @@ import VaporTesting
 /// Requests carry dummy path parameters, so handlers only ever reach their
 /// lookup/validation paths — a bogus container/image reference is a 404 (or a
 /// runtime connection error on machines without Apple container) long before
-/// any VM or store mutation. Streaming routes (events, attach) that never
-/// terminate with dummy input are treated as engaged: the probe races a
-/// deadline, and a timeout means the route answered with a stream — not a
-/// stub.
+/// any VM or store mutation. Streaming routes (events-style) that never
+/// terminate with dummy input hit the probe deadline — that is only accepted
+/// for the pinned `streamingRoutes` list; a deadline on any other route is a
+/// hang and fails the suite.
 @Suite("Route conformance — the registered surface answers, stubs only per manifest")
 struct RouteConformanceTests {
     // The deliberate-stub manifest (routes + reasons) lives in
@@ -71,6 +71,22 @@ struct RouteConformanceTests {
             of: #"\{[^}]*\}"#, with: "conformance-dummy", options: .regularExpression)
     }
 
+    /// Routes whose probes are EXPECTED to hit the probe deadline: they answer
+    /// with a stream that never terminates under dummy input (an events feed
+    /// with no filters follows forever). A deadline hit on any OTHER route is a
+    /// hang masquerading as engagement — a stuck non-streaming handler must
+    /// fail conformance, not ride the skip budget. Kept in sync with reality in
+    /// both directions: an unexpected timeout fails, and a stale entry whose
+    /// route disappeared fails.
+    private static let streamingRoutes: Set<String> = [
+        "GET /events",
+        "GET /libpod/events",
+        // libpod stats streams by default (docker's stats needs a real
+        // container id to stream; the probe's dummy id 404s first, so only
+        // the libpod form — which stats every container, i.e. none — hangs).
+        "GET /libpod/containers/stats",
+    ]
+
     /// Routes that must NEVER be dispatched by this test: they take no path
     /// parameters and mutate the WHOLE store, so a probe on a developer's Mac
     /// with images/containers present would prune real data through the real
@@ -108,7 +124,7 @@ struct RouteConformanceTests {
 
             var failures: [String] = []
             var stubsSeen = Set<String>()
-            var streamingSkips = 0
+            var timedOutRoutes = Set<String>()
 
             // Phase 1 — ROUTING, zero side effects: every registered route's
             // dispatch path must resolve back to that SAME route. This is what
@@ -134,7 +150,9 @@ struct RouteConformanceTests {
                 let probe = StubProbe()
                 // The probe task races a deadline: a streaming route that
                 // never terminates with dummy input is "engaged" (it answered
-                // with a stream), which is all this test asserts.
+                // with a stream) — but ONLY routes in `streamingRoutes` may
+                // take that branch; any other deadline hit is treated as a
+                // hang (see the assertion after the loop).
                 let probeTask = Task<ProbeOutcome?, Never> {
                     _ = try? await app.testing().test(route.method, path) { res in
                         await probe.record(status: res.status, body: res.body.string ?? "")
@@ -145,10 +163,10 @@ struct RouteConformanceTests {
 
                 switch outcome {
                 case nil:
-                    // Deadline hit — the route engaged and streams. Not a
-                    // stub by construction; the leaked task dies with the
-                    // test process.
-                    streamingSkips += 1
+                    // Deadline hit — acceptable only for a route known to
+                    // answer with a never-terminating stream; the leaked task
+                    // dies with the test process.
+                    timedOutRoutes.insert(key)
                 case .some(nil):
                     // The request failed before any response was recorded —
                     // must not masquerade as a healthy route.
@@ -181,10 +199,24 @@ struct RouteConformanceTests {
                 "destructive-route skip list entries no longer registered (rename without updating the guard?): \(missingMutationRoutes.sorted().joined(separator: ", "))")
 
             #expect(failures.isEmpty, "\(failures.count) conformance failure(s): \(failures.joined(separator: "; "))")
-            // The skip count stays tiny (events/attach-style streaming routes
-            // with dummy parameters error out quickly); a jump means probes
-            // are timing out for the wrong reason.
-            #expect(streamingSkips <= 8, "unexpectedly many streaming probe timeouts: \(streamingSkips)")
+
+            // A probe deadline is only acceptable for a route that answers
+            // with a never-terminating stream (events-style). Any OTHER route
+            // hitting the deadline is a hung handler masquerading as a
+            // healthy streaming route — it must fail, not ride a skip budget.
+            let unexpectedTimeouts = timedOutRoutes.subtracting(Self.streamingRoutes)
+            #expect(
+                unexpectedTimeouts.isEmpty,
+                "routes whose probes timed out but are not expected streaming routes (hung handlers, or streamingRoutes needs updating?): \(unexpectedTimeouts.sorted().joined(separator: ", "))"
+            )
+
+            // Reverse direction for the streaming list too: a stale entry
+            // whose route disappeared (or was renamed) must fail loudly so
+            // the list can not rot.
+            let missingStreamingRoutes = Self.streamingRoutes.subtracting(registeredKeys)
+            #expect(
+                missingStreamingRoutes.isEmpty,
+                "expected-streaming entries no longer registered (rename without updating the list?): \(missingStreamingRoutes.sorted().joined(separator: ", "))")
         }
     }
 }
