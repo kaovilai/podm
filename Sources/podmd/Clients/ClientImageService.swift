@@ -50,6 +50,42 @@ protocol ClientImageProtocol: Sendable {
     ) async throws -> (reference: String?, digest: String)
 }
 
+/// Commit-specific image operations (`docker commit` / `podman commit`).
+/// Split from `ClientImageProtocol` so the commit route's tests can stub just
+/// the commit surface without re-implementing the full image client; the
+/// production conformer is `ClientImageService` (same file, so it can reach
+/// the private `containerSystemConfig`).
+protocol ClientImageCommitProtocol: Sendable {
+    /// Best-effort parent-image run config used to seed the committed image's
+    /// config, resolved by DIGEST (the one the container was created from)
+    /// rather than reference — the tag may have been re-pulled or retagged
+    /// since. Returns nil when the digest no longer resolves (image pruned,
+    /// blob unreadable, no manifest for the platform) — commit then proceeds
+    /// with container-only data, the same fallback inspect uses.
+    func commitParentConfig(
+        digest: String,
+        platform: Platform,
+        appleContainerAppSupportUrl: URL,
+        logger: Logger
+    ) async -> CommitParentConfig?
+
+    /// `docker commit`: the same single-layer OCI synthesis pipeline
+    /// `importImage` uses, with the layer sourced from the container's
+    /// exported rootfs tarball and the config seeded from the container +
+    /// parent image (already merged by the caller) rather than blank.
+    func commitImage(
+        tarPath: URL,
+        repo: String?,
+        tag: String?,
+        comment: String?,
+        author: String?,
+        config: SynthesizedImageConfig,
+        platform: Platform,
+        appleContainerAppSupportUrl: URL,
+        logger: Logger
+    ) async throws -> (reference: String?, digest: String)
+}
+
 extension ClientImageProtocol {
     func list() async throws -> [ClientImage] {
         try await list(includeSystemImages: false)
@@ -813,10 +849,44 @@ struct ClientImageService: ClientImageProtocol {
         appleContainerAppSupportUrl: URL,
         logger: Logger
     ) async throws -> (reference: String?, digest: String) {
-        let reference = try resolveImportReference(repo: repo, tag: tag)
-
         var config = SynthesizedImageConfig()
         try DockerfileChangeApplier.apply(changes, to: &config)
+
+        return try await synthesizeSingleLayerImage(
+            tarPath: tarPath,
+            repo: repo,
+            tag: tag,
+            config: config,
+            message: message,
+            author: nil,
+            platform: platform,
+            appleContainerAppSupportUrl: appleContainerAppSupportUrl,
+            logger: logger,
+            logVerb: "Imported"
+        )
+    }
+
+    /// Shared tail of `importImage` and `commitImage` — the two differ only in
+    /// how the config is seeded (import: blank + `--change`; commit: the
+    /// container/parent merge, done by the caller) and in the OCI top-level
+    /// `author`. Everything else is identical: repo/tag grammar, temp dir +
+    /// OCI layout, single-layer synthesis, store load, and the notFound guard
+    /// on the load result.
+    private func synthesizeSingleLayerImage(
+        tarPath: URL,
+        repo: String?,
+        tag: String?,
+        config: SynthesizedImageConfig,
+        message: String?,
+        author: String?,
+        platform: Platform,
+        appleContainerAppSupportUrl: URL,
+        logger: Logger,
+        logVerb: String
+    ) async throws -> (reference: String?, digest: String) {
+        // Same repo/tag grammar for both (moby's httputils.RepoTagReference):
+        // no repo → untagged, empty tag → latest, digest references rejected.
+        let reference = try resolveImportReference(repo: repo, tag: tag)
 
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -831,6 +901,7 @@ struct ClientImageService: ClientImageProtocol {
             platform: platform,
             config: config,
             message: message,
+            author: author,
             reference: reference,
             logger: logger
         )
@@ -838,10 +909,10 @@ struct ClientImageService: ClientImageProtocol {
         let imageStore = try ImageStore(path: appleContainerAppSupportUrl)
         let images = try await imageStore.load(from: ociLayoutPath, progress: nil)
         guard let image = images.first else {
-            throw ClientImageError.notFound(id: reference ?? "imported image")
+            throw ClientImageError.notFound(id: reference ?? "\(logVerb.lowercased()) image")
         }
 
-        logger.info("Imported image \(image.reference) (\(image.digest))")
+        logger.info("\(logVerb) image \(image.reference) (\(image.digest))")
         return (reference, image.digest)
     }
 
@@ -890,5 +961,46 @@ struct ClientImageService: ClientImageProtocol {
     /// already-cached image, so this is used unconditionally — docker-java accepts it either way.
     static func pulledStatusMessage(for reference: String) -> String {
         "Status: Downloaded newer image for \(reference)"
+    }
+}
+
+extension ClientImageService: ClientImageCommitProtocol {
+    func commitParentConfig(
+        digest: String,
+        platform: Platform,
+        appleContainerAppSupportUrl: URL,
+        logger: Logger
+    ) async -> CommitParentConfig? {
+        CommitParentConfigResolver.read(
+            digest: digest,
+            platform: platform,
+            appSupportURL: appleContainerAppSupportUrl,
+            logger: logger
+        )
+    }
+
+    func commitImage(
+        tarPath: URL,
+        repo: String?,
+        tag: String?,
+        comment: String?,
+        author: String?,
+        config: SynthesizedImageConfig,
+        platform: Platform,
+        appleContainerAppSupportUrl: URL,
+        logger: Logger
+    ) async throws -> (reference: String?, digest: String) {
+        try await synthesizeSingleLayerImage(
+            tarPath: tarPath,
+            repo: repo,
+            tag: tag,
+            config: config,
+            message: comment,
+            author: author,
+            platform: platform,
+            appleContainerAppSupportUrl: appleContainerAppSupportUrl,
+            logger: logger,
+            logVerb: "Committed"
+        )
     }
 }

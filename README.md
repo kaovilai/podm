@@ -317,7 +317,7 @@ gives you; the point is nothing above it stays resident.
      overwritten on the next run. Regenerate locally with:
      swift build && .build/debug/podmd --docgen /tmp/podm-docs -->
 
-178 routes registered (134 supported, 44 deliberately not
+178 routes registered (136 supported, 42 deliberately not
 implemented — every gap carries its reason and its tracking context in
 [RouteSupportManifest.swift](Sources/podmd/Utilities/RouteSupportManifest.swift)).
 Full, searchable version: **[podm route coverage site](https://github.tig.pw/podm/)**.
@@ -329,7 +329,7 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `POST` | `/auth` | docker |  |
 | ✅ | `POST` | `/build` | docker |  |
 | ✅ | `POST` | `/build/prune` | docker |  |
-| 🚫 | `POST` | `/commit` | docker | No image-from-container path yet — flattening the container rootfs into an image (export + single-layer import) is tracked parity work. |
+| ✅ | `POST` | `/commit` | docker |  |
 | 🚫 | `GET` | `/configs` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
 | 🚫 | `POST` | `/configs/create` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
 | 🚫 | `GET` | `/configs/{id}` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
@@ -430,7 +430,7 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `HEAD` | `/libpod/_ping` | libpod |  |
 | ✅ | `POST` | `/libpod/auth` | libpod |  |
 | ✅ | `POST` | `/libpod/build` | libpod |  |
-| 🚫 | `POST` | `/libpod/commit` | libpod | No image-from-container path yet — flattening the container rootfs into an image (export + single-layer import) is tracked parity work. |
+| ✅ | `POST` | `/libpod/commit` | libpod |  |
 | ✅ | `POST` | `/libpod/containers/create` | libpod |  |
 | ✅ | `GET` | `/libpod/containers/json` | libpod |  |
 | ✅ | `POST` | `/libpod/containers/prune` | libpod |  |

@@ -41,7 +41,7 @@ Currently registered in this repo: `Sources/podm/configure.swift`
 | `podman unpause` | POST `/libpod/containers/{name}/unpause` | ✅ (same caveat as pause) |
 | `podman container prune` | POST `/libpod/containers/prune` | ✅ |
 | `podman update` | POST `/libpod/containers/{name}/update` | ✅ |
-| `podman commit` | POST `/libpod/commit` | ✅ (wraps `CommitRoute`, which itself returns "not implemented") |
+| `podman commit` | POST `/libpod/commit` | ✅ (wraps `CommitRoute`, which commits the container's exported rootfs as a single-layer image) |
 | `podman export` | GET `/libpod/containers/{name}/export` | ✅ |
 | `podman diff` | GET `/libpod/containers/{name}/changes` | ✅ (wraps `ContainerChangesRoute`, which itself returns "not implemented") |
 | `podman healthcheck run` | GET `/libpod/containers/{name}/healthcheck` (libpod-only, no Docker-compat equivalent) | ❌ still missing (no Docker-side route to wrap) |

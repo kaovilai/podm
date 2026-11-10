@@ -6,7 +6,7 @@ struct EmptyObject: Content {
     // Empty struct to represent {} in JSON
 }
 
-struct HealthcheckConfig: Content {
+struct HealthcheckConfig: Content, Equatable {
     let Test: [String]?
     let Interval: Int?
     let Timeout: Int?

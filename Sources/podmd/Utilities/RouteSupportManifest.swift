@@ -21,12 +21,6 @@ enum RouteSupportManifest {
     static let stubs: [DeliberateStub] = [
         // ── Container-scoped gaps (docker dialect + libpod twins) ────────────
         DeliberateStub(
-            method: "POST", pattern: "/commit",
-            reason: "No image-from-container path yet — flattening the container rootfs into an image (export + single-layer import) is tracked parity work."),
-        DeliberateStub(
-            method: "POST", pattern: "/libpod/commit",
-            reason: "No image-from-container path yet — flattening the container rootfs into an image (export + single-layer import) is tracked parity work."),
-        DeliberateStub(
             method: "POST", pattern: "/containers/{id}/pause",
             reason: "Apple container has no pause primitive for a microVM."),
         DeliberateStub(
