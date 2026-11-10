@@ -51,7 +51,17 @@ if let docgenDir = options.docgen {
     var docgenEnv = try Environment(name: "docgen", arguments: ["podm"])
     try LoggingSystem.bootstrap(from: &docgenEnv)
     let docgenApp = try await Application.make(docgenEnv)
-    _ = try await RouteRegistry.bootstrap(docgenApp)
+    // Boot against a THROWAWAY app-support directory: docgen takes no
+    // instance lock, and SecretStore's load sweeps crash-leftover temp
+    // files and quarantines corrupt ones — pointed at the real store while
+    // the daemon runs, that could delete a live mutation's in-flight temp
+    // file (a 500 mid-persist) or quarantine a file the daemon is about to
+    // swap. Docgen only reads the registered routes; nothing it renders
+    // depends on real state.
+    let docgenAppSupport = FileManager.default.temporaryDirectory
+        .appendingPathComponent("podm-docgen-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: docgenAppSupport) }
+    _ = try await RouteRegistry.bootstrap(docgenApp, appSupportDirectory: docgenAppSupport)
     try RouteDocGen.write(to: docgenDir, routes: docgenApp.regexRouter.registeredRoutes)
     try await docgenApp.asyncShutdown()
     exit(0)
