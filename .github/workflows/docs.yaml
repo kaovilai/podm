@@ -30,6 +30,12 @@ jobs:
   docs:
     name: regenerate route coverage + deploy pages
     runs-on: macos-26
+    # deploy-pages requires the job to run in the github-pages environment —
+    # the Pages deployment API rejects a deployment from a job without it
+    # ("Missing environment").
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -87,13 +87,18 @@ struct RouteConformanceTests {
         "GET /libpod/containers/stats",
     ]
 
-    /// Routes that must NEVER be dispatched by this test: they take no path
-    /// parameters and mutate the WHOLE store, so a probe on a developer's Mac
-    /// with images/containers present would prune real data through the real
-    /// service clients (`make test` must never be destructive). They are still
-    /// covered by the routing-match phase, which asserts their registration
-    /// and non-shadowed dispatch target without executing anything.
+    /// Routes that must NEVER be dispatched by this test: they either take no
+    /// path parameters and mutate the WHOLE store (the prune family — a probe
+    /// on a developer's Mac with images/containers present would prune real
+    /// data through the real service clients; `make test` must never be
+    /// destructive), or allocate host-side state outside the app-support
+    /// sandbox (POST /build — an empty probe can create or start a builder in
+    /// the host container store, which the temp app-support dir does not
+    /// isolate). They are still covered by the routing-match phase, which
+    /// asserts their registration and non-shadowed dispatch target without
+    /// executing anything.
     private static let storeWideMutationRoutes: Set<String> = [
+        "POST /build",
         "POST /build/prune",
         "POST /containers/prune",
         "POST /libpod/containers/prune",
