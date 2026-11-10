@@ -1,6 +1,7 @@
 import ContainerResource
 import ContainerizationOCI
 import Foundation
+import Vapor
 
 /// The subset of Docker's container `Config` that `docker commit`'s request
 /// body may carry, as neutral (non-Vapor) values the pure merge below and its
@@ -17,6 +18,8 @@ struct CommitConfigOverrides {
     var volumes: Set<String>?
     var workingDir: String?
     var labels: [String: String]?
+    var stopSignal: String?
+    var healthcheck: HealthcheckConfig?
 
     init(
         user: String? = nil,
@@ -26,7 +29,9 @@ struct CommitConfigOverrides {
         cmd: [String]? = nil,
         volumes: Set<String>? = nil,
         workingDir: String? = nil,
-        labels: [String: String]? = nil
+        labels: [String: String]? = nil,
+        stopSignal: String? = nil,
+        healthcheck: HealthcheckConfig? = nil
     ) {
         self.user = user
         self.exposedPorts = exposedPorts
@@ -36,6 +41,8 @@ struct CommitConfigOverrides {
         self.volumes = volumes
         self.workingDir = workingDir
         self.labels = labels
+        self.stopSignal = stopSignal
+        self.healthcheck = healthcheck
     }
 }
 
@@ -57,19 +64,31 @@ struct CommitConfigOverrides {
 ///   without overrides these already contain the image's values);
 /// - `Entrypoint`/`Cmd` cannot be recovered split from the snapshot alone
 ///   (create flattens `entrypoint + cmd` into `executable + arguments`), so
-///   the parent image's config disambiguates: a parent with an ENTRYPOINT
-///   means `[executable]` / `arguments`; a parent without one means the
-///   executable is the head of the original CMD. Without a parent config the
-///   inspect approximation (`Entrypoint: [executable]`, `Cmd: arguments`) is
-///   used;
-/// - `ExposedPorts`/`Volumes` exist only in the parent's raw config (Apple's
-///   typed OCI `ImageConfig` does not model them) and the snapshot's
-///   `publishedPorts` are host mappings, not image EXPOSE — so these come
-///   only from the body and `--change` instructions, never seeded.
+///   the parent image's config disambiguates: when the live flattened process
+///   begins with the parent's full ENTRYPOINT array, the split happens there
+///   (entrypoint = the parent's array verbatim, cmd = the remainder — a
+///   create-time CMD override survives the split). When it does not, the
+///   entrypoint was overridden at create time and the split is unrecoverable —
+///   the inspect approximation (`Entrypoint: [executable]`, `Cmd: arguments`)
+///   is used, as it also is without a parent config. A parent with an EMPTY
+///   entrypoint means the executable is the head of the original CMD;
+/// - `ExposedPorts`/`Volumes` exist only in the parent's raw config JSON
+///   (Apple's typed OCI `ImageConfig` does not model them) and the snapshot's
+///   `publishedPorts` are host mappings, not image EXPOSE — so the body's and
+///   `--change`'s values are UNIONED with the parent's (extracted by
+///   `commitParentConfig` from the same raw blob), never replaced by them;
+/// - `StopSignal` comes from the body override, else the container's persisted
+///   create-time signal, else the parent's;
+/// - `Healthcheck` comes from the body override, else the container's
+///   effective healthcheck (the JSON label the create route persisted, parsed
+///   the same way inspect parses it — it already holds the image's
+///   HEALTHCHECK merged with any create-time request).
 enum ContainerCommitConfig {
     static func make(
         container: ContainerSnapshot,
         parent: ContainerizationOCI.ImageConfig?,
+        parentExposedPorts: Set<String> = [],
+        parentVolumes: Set<String> = [],
         overrides: CommitConfigOverrides?,
         changes: [String]
     ) throws -> SynthesizedImageConfig {
@@ -85,11 +104,21 @@ enum ContainerCommitConfig {
             config.volumes = overrides.volumes ?? []
             config.workingDir = overrides.workingDir
             config.labels = overrides.labels ?? [:]
+            config.stopSignal = overrides.stopSignal
+            config.healthcheck = overrides.healthcheck
         }
 
         // 2. --change Dockerfile instructions on top (moby BuildFromConfig
         // mutates the same request config before merge runs).
         try DockerfileChangeApplier.apply(changes, to: &config)
+
+        // EXPOSE/VOLUME inheritance: union the parent's raw-config keys with
+        // whatever the body and --change set, so a no-change commit of an
+        // image declaring them keeps them (moby's container config carried
+        // them from create; the union is the closest podm can express since
+        // the snapshot has no image-side EXPOSE/VOLUME to read).
+        config.exposedPorts.formUnion(parentExposedPorts)
+        config.volumes.formUnion(parentVolumes)
 
         // 3. moby's merge(): fill still-unset fields from the container.
         if (config.user ?? "").isEmpty {
@@ -119,17 +148,34 @@ enum ContainerCommitConfig {
         // body that sets Entrypoint suppresses Cmd inheritance, exactly like
         // moby's merge).
         if (config.entrypoint ?? []).isEmpty {
+            let split = snapshotProcessSplit(container, parent: parent)
             if (config.cmd ?? []).isEmpty {
-                config.cmd = snapshotCommand(container, parent: parent)
+                config.cmd = split.cmd
             }
             if config.entrypoint == nil {
-                config.entrypoint = snapshotEntrypoint(container, parent: parent)
+                config.entrypoint = split.entrypoint
             }
         }
 
         if (config.workingDir ?? "").isEmpty {
             let snapshotDir = container.configuration.initProcess.workingDirectory
             config.workingDir = snapshotDir.isEmpty ? parent?.workingDir : snapshotDir
+        }
+
+        // StopSignal: the container's persisted create-time signal, else the
+        // parent's (create only persists an explicit request — a container
+        // from a STOPSIGNAL image that didn't override still needs the image's
+        // signal carried into the commit).
+        if (config.stopSignal ?? "").isEmpty {
+            config.stopSignal = container.configuration.stopSignal ?? parent?.stopSignal
+        }
+
+        // Healthcheck: the container's effective healthcheck — the JSON label
+        // the create route persisted (image HEALTHCHECK merged with the
+        // create-time request), parsed exactly like ContainerInspectRoute
+        // parses it. No label → no healthcheck to carry.
+        if config.healthcheck == nil {
+            config.healthcheck = snapshotHealthcheck(container)
         }
 
         // Labels: fill missing keys — the container's labels (restored to
@@ -158,46 +204,57 @@ enum ContainerCommitConfig {
         }
     }
 
-    /// moby's `container.Config.Entrypoint`: `[executable]` when the parent
-    /// image declares an ENTRYPOINT (the executable is its head), nil when
-    /// the parent declares none (the executable is then really the head of
-    /// the CMD — see `snapshotCommand`). Without a parent config, the same
-    /// approximation `ContainerInspectRoute` reports is used.
-    private static func snapshotEntrypoint(
+    /// Splits the snapshot's flattened live process (`executable +
+    /// arguments`, what create produced from `entrypoint + cmd`) back into
+    /// moby's `container.Config.Entrypoint`/`Cmd` pair:
+    ///
+    /// - Parent with a non-empty ENTRYPOINT: when the flattened process
+    ///   BEGINS with the parent's full entrypoint array, split there —
+    ///   entrypoint is the parent's array verbatim, cmd is the remainder (a
+    ///   create-time CMD override survives). Multi-element entrypoints
+    ///   (`ENTRYPOINT ["/bin/sh", "-c"]`) stay intact instead of leaking
+    ///   their tail into Cmd. When the flattened process does NOT begin with
+    ///   the parent's entrypoint, the entrypoint was overridden at create
+    ///   time and the true split is unrecoverable — fall back to the inspect
+    ///   approximation (`Entrypoint: [executable]`, `Cmd: arguments`).
+    /// - Parent with an empty entrypoint: the create-time flattening put the
+    ///   CMD head in `executable`, so cmd is `[executable] + arguments` and
+    ///   there is no entrypoint.
+    /// - No parent config: the inspect approximation, like
+    ///   `ContainerInspectRoute` reports.
+    ///
+    /// cmd is nil rather than [] when empty, so an unset CMD is omitted from
+    /// the synthesized config instead of pinned to `[]`.
+    private static func snapshotProcessSplit(
         _ container: ContainerSnapshot,
         parent: ContainerizationOCI.ImageConfig?
-    ) -> [String]? {
-        let executable = container.configuration.initProcess.executable
-        guard !executable.isEmpty else { return nil }
-        if let parentEntrypoint = parent?.entrypoint, !parentEntrypoint.isEmpty {
-            return [executable]
-        }
-        if parent == nil {
-            return [executable]
-        }
-        return nil
-    }
-
-    /// moby's `container.Config.Cmd`: the arguments when the parent image
-    /// declares an ENTRYPOINT; `[executable] + arguments` when it declares
-    /// none (create-time flattening put the CMD head in `executable`);
-    /// the bare arguments when the parent config is unknown (inspect
-    /// approximation). nil rather than [] when empty, so an unset CMD is
-    /// omitted from the synthesized config instead of pinned to `[]`.
-    private static func snapshotCommand(
-        _ container: ContainerSnapshot,
-        parent: ContainerizationOCI.ImageConfig?
-    ) -> [String]? {
+    ) -> (entrypoint: [String]?, cmd: [String]?) {
         let executable = container.configuration.initProcess.executable
         let arguments = container.configuration.initProcess.arguments
+        guard !executable.isEmpty else { return (nil, arguments.isEmpty ? nil : arguments) }
+
         if let parentEntrypoint = parent?.entrypoint, !parentEntrypoint.isEmpty {
-            return arguments.isEmpty ? nil : arguments
+            let flattened = [executable] + arguments
+            if flattened.starts(with: parentEntrypoint) {
+                let remainder = Array(flattened[parentEntrypoint.count...])
+                return (parentEntrypoint, remainder.isEmpty ? nil : remainder)
+            }
+            // Overridden at create — the split is unrecoverable; approximate.
+            return ([executable], arguments.isEmpty ? nil : arguments)
         }
         if parent == nil {
-            return arguments.isEmpty ? nil : arguments
+            return ([executable], arguments.isEmpty ? nil : arguments)
         }
-        guard !executable.isEmpty || !arguments.isEmpty else { return nil }
-        return [executable] + arguments
+        return (nil, [executable] + arguments)
+    }
+
+    /// The container's effective healthcheck: the JSON label the create route
+    /// persisted (image HEALTHCHECK merged with the create-time request),
+    /// decoded exactly the way `ContainerInspectRoute` decodes it.
+    private static func snapshotHealthcheck(_ container: ContainerSnapshot) -> HealthcheckConfig? {
+        container.configuration.labels[HealthCheckManager.healthcheckLabel]
+            .flatMap { Data($0.utf8) }
+            .flatMap { try? JSONDecoder().decode(HealthcheckConfig.self, from: $0) }
     }
 
     private static func envKey(_ entry: String) -> String {

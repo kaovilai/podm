@@ -22,8 +22,10 @@ struct ContainerCommitConfigTests {
         environment: [String] = ["PATH=/usr/bin", "MODE=container"],
         workingDirectory: String = "/srv",
         user: ProcessConfiguration.User = .raw(userString: "1000"),
-        labels: [String: String] = ["com.example.owner": "ctr"]
-    ) -> ContainerSnapshot {
+        labels: [String: String] = ["com.example.owner": "ctr"],
+        stopSignal: String? = nil,
+        healthcheck: HealthcheckConfig? = nil
+    ) throws -> ContainerSnapshot {
         let process = ProcessConfiguration(
             executable: executable,
             arguments: arguments,
@@ -39,7 +41,15 @@ struct ContainerCommitConfigTests {
                 digest: "sha256:abc", size: 0)
         )
         var configuration = ContainerConfiguration(id: "web", image: image, process: process)
-        configuration.labels = labels
+        var allLabels = labels
+        if let stopSignal {
+            configuration.stopSignal = stopSignal
+        }
+        if let healthcheck {
+            let json = try JSONEncoder().encode(healthcheck)
+            allLabels[HealthCheckManager.healthcheckLabel] = String(data: json, encoding: .utf8)
+        }
+        configuration.labels = allLabels
         return ContainerSnapshot(configuration: configuration, status: .stopped, networks: [])
     }
 
@@ -66,7 +76,7 @@ struct ContainerCommitConfigTests {
     @Test("with no body, changes, or parent, the config captures the snapshot's live process")
     func capturesSnapshot() throws {
         let config = try ContainerCommitConfig.make(
-            container: makeSnapshot(), parent: nil, overrides: nil, changes: [])
+            container: try makeSnapshot(), parent: nil, overrides: nil, changes: [])
 
         // No parent → the inspect approximation: Entrypoint [executable],
         // Cmd arguments.
@@ -81,7 +91,7 @@ struct ContainerCommitConfigTests {
     @Test("a parent with an ENTRYPOINT splits executable/arguments into Entrypoint/Cmd")
     func parentWithEntrypointSplits() throws {
         let config = try ContainerCommitConfig.make(
-            container: makeSnapshot(), parent: makeParent(), overrides: nil, changes: [])
+            container: try makeSnapshot(), parent: makeParent(), overrides: nil, changes: [])
 
         #expect(config.entrypoint == ["/app"])
         #expect(config.cmd == ["serve", "--verbose"])
@@ -91,7 +101,7 @@ struct ContainerCommitConfigTests {
     func parentWithoutEntrypointFoldsExecutableIntoCmd() throws {
         let parent = makeParent(entrypoint: nil, cmd: ["/app", "serve"])
         let config = try ContainerCommitConfig.make(
-            container: makeSnapshot(), parent: parent, overrides: nil, changes: [])
+            container: try makeSnapshot(), parent: parent, overrides: nil, changes: [])
 
         #expect(config.entrypoint == nil)
         #expect(config.cmd == ["/app", "serve", "--verbose"])
@@ -100,7 +110,7 @@ struct ContainerCommitConfigTests {
     @Test("env unions by key: container entries first, parent entries only for keys neither carries")
     func envUnionsByKey() throws {
         let config = try ContainerCommitConfig.make(
-            container: makeSnapshot(), parent: makeParent(), overrides: nil, changes: [])
+            container: try makeSnapshot(), parent: makeParent(), overrides: nil, changes: [])
 
         // MODE=container (snapshot) wins over MODE=image (parent); EXTRA
         // (parent-only) is appended.
@@ -110,7 +120,7 @@ struct ContainerCommitConfigTests {
     @Test("labels fill missing keys: snapshot labels win, parent labels fill the gaps")
     func labelsFillMissingKeys() throws {
         let config = try ContainerCommitConfig.make(
-            container: makeSnapshot(), parent: makeParent(), overrides: nil, changes: [])
+            container: try makeSnapshot(), parent: makeParent(), overrides: nil, changes: [])
 
         #expect(
             config.labels == [
@@ -121,7 +131,7 @@ struct ContainerCommitConfigTests {
 
     @Test("user and workingDir fall back to the parent when the snapshot has none")
     func userAndWorkdirFallBackToParent() throws {
-        let snapshot = makeSnapshot(workingDirectory: "", user: .raw(userString: ""))
+        let snapshot = try makeSnapshot(workingDirectory: "", user: .raw(userString: ""))
         let config = try ContainerCommitConfig.make(
             container: snapshot, parent: makeParent(user: "42", workingDir: "/opt"), overrides: nil, changes: [])
 
@@ -131,7 +141,7 @@ struct ContainerCommitConfigTests {
 
     @Test("a numeric process user renders as uid:gid, the same as inspect")
     func numericUser() throws {
-        let snapshot = makeSnapshot(user: .id(uid: 1000, gid: 1000))
+        let snapshot = try makeSnapshot(user: .id(uid: 1000, gid: 1000))
         let config = try ContainerCommitConfig.make(
             container: snapshot, parent: nil, overrides: nil, changes: [])
 
@@ -151,7 +161,7 @@ struct ContainerCommitConfigTests {
             labels: ["com.example.owner": "body"])
 
         let config = try ContainerCommitConfig.make(
-            container: makeSnapshot(), parent: makeParent(), overrides: overrides, changes: [])
+            container: try makeSnapshot(), parent: makeParent(), overrides: overrides, changes: [])
 
         #expect(config.user == "nobody")
         #expect(config.entrypoint == ["/init"])
@@ -170,7 +180,7 @@ struct ContainerCommitConfigTests {
     func bodyEnvUnionsWithSnapshot() throws {
         let overrides = CommitConfigOverrides(env: ["MODE=body", "NEW=1"])
         let config = try ContainerCommitConfig.make(
-            container: makeSnapshot(), parent: makeParent(), overrides: overrides, changes: [])
+            container: try makeSnapshot(), parent: makeParent(), overrides: overrides, changes: [])
 
         #expect(config.env == ["MODE=body", "NEW=1", "PATH=/usr/bin", "EXTRA=from-parent"])
     }
@@ -181,7 +191,7 @@ struct ContainerCommitConfigTests {
         // Entrypoint is not refilled from the container.
         let overrides = CommitConfigOverrides(entrypoint: [])
         let config = try ContainerCommitConfig.make(
-            container: makeSnapshot(), parent: makeParent(), overrides: overrides, changes: [])
+            container: try makeSnapshot(), parent: makeParent(), overrides: overrides, changes: [])
 
         #expect(config.entrypoint == [])
         // Cmd may still be inherited when Entrypoint is empty.
@@ -194,7 +204,7 @@ struct ContainerCommitConfigTests {
         // that sets Entrypoint (without Cmd) produces a Cmd-less image.
         let overrides = CommitConfigOverrides(entrypoint: ["/only-entrypoint"])
         let config = try ContainerCommitConfig.make(
-            container: makeSnapshot(), parent: makeParent(), overrides: overrides, changes: [])
+            container: try makeSnapshot(), parent: makeParent(), overrides: overrides, changes: [])
 
         #expect(config.entrypoint == ["/only-entrypoint"])
         #expect(config.cmd == nil)
@@ -205,7 +215,7 @@ struct ContainerCommitConfigTests {
         let overrides = CommitConfigOverrides(
             exposedPorts: ["80/tcp", "53/udp"], volumes: ["/data", "/config"])
         let config = try ContainerCommitConfig.make(
-            container: makeSnapshot(), parent: nil, overrides: overrides, changes: [])
+            container: try makeSnapshot(), parent: nil, overrides: overrides, changes: [])
 
         #expect(config.exposedPorts == ["80/tcp", "53/udp"])
         #expect(config.volumes == ["/data", "/config"])
@@ -216,7 +226,7 @@ struct ContainerCommitConfigTests {
     @Test("--change instructions apply on top of the body and the fill completes around them")
     func changesApplyOnTop() throws {
         let config = try ContainerCommitConfig.make(
-            container: makeSnapshot(),
+            container: try makeSnapshot(),
             parent: makeParent(),
             overrides: nil,
             changes: [
@@ -244,7 +254,7 @@ struct ContainerCommitConfigTests {
     @Test("an ENV change hides the same-key container entry, not just the body's")
     func envChangeHidesContainerEntry() throws {
         let config = try ContainerCommitConfig.make(
-            container: makeSnapshot(), parent: nil, overrides: nil, changes: ["ENV MODE=changed"])
+            container: try makeSnapshot(), parent: nil, overrides: nil, changes: ["ENV MODE=changed"])
 
         #expect(config.env == ["MODE=changed", "PATH=/usr/bin"])
     }
@@ -253,7 +263,197 @@ struct ContainerCommitConfigTests {
     func invalidChangeRejected() throws {
         #expect(throws: DockerfileChangeError.self) {
             _ = try ContainerCommitConfig.make(
-                container: makeSnapshot(), parent: nil, overrides: nil, changes: ["ONBUILD x"])
+                container: try makeSnapshot(), parent: nil, overrides: nil, changes: ["ONBUILD x"])
         }
+    }
+
+    // MARK: - Multi-element ENTRYPOINT split
+
+    @Test("a multi-element parent ENTRYPOINT splits intact: [\"/bin/sh\",\"-c\"] + CMD [\"echo\"] stays two parts")
+    func multiElementEntrypointSplitsIntact() throws {
+        // Parent: ENTRYPOINT ["/bin/sh", "-c"], CMD ["echo"]. Create flattens
+        // to executable "/bin/sh", arguments ["-c", "echo"] — the snapshot's
+        // live shape. The split must recover ["/bin/sh","-c"] / ["echo"], not
+        // the naive ["/bin/sh"] / ["-c","echo"] (which would exec
+        // `/bin/sh -c -c echo`).
+        let snapshot = try makeSnapshot(executable: "/bin/sh", arguments: ["-c", "echo"])
+        let parent = makeParent(entrypoint: ["/bin/sh", "-c"], cmd: ["echo"])
+
+        let config = try ContainerCommitConfig.make(
+            container: snapshot, parent: parent, overrides: nil, changes: [])
+
+        #expect(config.entrypoint == ["/bin/sh", "-c"])
+        #expect(config.cmd == ["echo"])
+    }
+
+    @Test("a create-time CMD override survives the multi-element ENTRYPOINT split")
+    func cmdOverrideSurvivesSplit() throws {
+        // Same parent ENTRYPOINT, but the container was created with
+        // --cmd ["sleep","5"]: the flattened process is
+        // ["/bin/sh","-c","sleep","5"], which still begins with the parent's
+        // entrypoint, so the split yields the parent entrypoint + the override.
+        let snapshot = try makeSnapshot(executable: "/bin/sh", arguments: ["-c", "sleep", "5"])
+        let parent = makeParent(entrypoint: ["/bin/sh", "-c"], cmd: ["echo"])
+
+        let config = try ContainerCommitConfig.make(
+            container: snapshot, parent: parent, overrides: nil, changes: [])
+
+        #expect(config.entrypoint == ["/bin/sh", "-c"])
+        #expect(config.cmd == ["sleep", "5"])
+    }
+
+    @Test("a --change CMD on a multi-element-ENTRYPOINT parent replaces only the cmd part of the split")
+    func changeCmdReplacesSplitRemainder() throws {
+        let snapshot = try makeSnapshot(executable: "/bin/sh", arguments: ["-c", "echo"])
+        let parent = makeParent(entrypoint: ["/bin/sh", "-c"], cmd: ["echo"])
+
+        let config = try ContainerCommitConfig.make(
+            container: snapshot, parent: parent, overrides: nil, changes: ["CMD [\"date\"]"])
+
+        #expect(config.entrypoint == ["/bin/sh", "-c"])
+        #expect(config.cmd == ["date"])
+    }
+
+    @Test("when the live process no longer begins with the parent's ENTRYPOINT, the split falls back to the approximation")
+    func overriddenEntrypointFallsBack() throws {
+        // The container was created with --entrypoint ["/init"]: the flattened
+        // process ["/init","--foreground"] does not begin with the parent's
+        // ["/bin/sh","-c"], so the original split is unrecoverable and the
+        // inspect approximation is used.
+        let snapshot = try makeSnapshot(executable: "/init", arguments: ["--foreground"])
+        let parent = makeParent(entrypoint: ["/bin/sh", "-c"], cmd: ["echo"])
+
+        let config = try ContainerCommitConfig.make(
+            container: snapshot, parent: parent, overrides: nil, changes: [])
+
+        #expect(config.entrypoint == ["/init"])
+        #expect(config.cmd == ["--foreground"])
+    }
+
+    // MARK: - EXPOSE/VOLUME inheritance
+
+    @Test("parent ExposedPorts and Volumes are unioned in, so a no-change commit keeps them")
+    func parentPortsAndVolumesUnion() throws {
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(),
+            parent: makeParent(),
+            parentExposedPorts: ["80/tcp", "443/tcp"],
+            parentVolumes: ["/data"],
+            overrides: nil,
+            changes: [])
+
+        #expect(config.exposedPorts == ["80/tcp", "443/tcp"])
+        #expect(config.volumes == ["/data"])
+    }
+
+    @Test("body and --change EXPOSE/VOLUME union with the parent's, not replace them")
+    func bodyPortsAndVolumesUnionWithParent() throws {
+        let overrides = CommitConfigOverrides(exposedPorts: ["8080/tcp"], volumes: ["/config"])
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(),
+            parent: makeParent(),
+            parentExposedPorts: ["80/tcp"],
+            parentVolumes: ["/data"],
+            overrides: overrides,
+            changes: ["EXPOSE 53/udp"])
+
+        #expect(config.exposedPorts == ["80/tcp", "8080/tcp", "53/udp"])
+        #expect(config.volumes == ["/data", "/config"])
+    }
+
+    // MARK: - StopSignal / Healthcheck carry
+
+    @Test("the container's persisted stop signal is carried into the commit")
+    func containerStopSignalCarried() throws {
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(stopSignal: "SIGQUIT"),
+            parent: makeParent(),
+            overrides: nil,
+            changes: [])
+
+        #expect(config.stopSignal == "SIGQUIT")
+    }
+
+    @Test("stop signal falls back to the parent when the container set none")
+    func stopSignalFallsBackToParent() throws {
+        let parent = makeParent()
+        // ContainerConfiguration.stopSignal stays nil (create only persists an
+        // explicit request), so the image's signal must come through.
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(), parent: parent, overrides: nil, changes: [])
+
+        #expect(config.stopSignal == nil)
+
+        let parentWithSignal = ContainerizationOCI.ImageConfig(
+            env: nil, entrypoint: nil, cmd: nil, workingDir: nil, labels: nil, stopSignal: "SIGUSR1")
+        let configWithParentSignal = try ContainerCommitConfig.make(
+            container: try makeSnapshot(), parent: parentWithSignal, overrides: nil, changes: [])
+        #expect(configWithParentSignal.stopSignal == "SIGUSR1")
+    }
+
+    @Test("a body StopSignal override wins over the container's and the parent's")
+    func bodyStopSignalOverrides() throws {
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(stopSignal: "SIGQUIT"),
+            parent: nil,
+            overrides: CommitConfigOverrides(stopSignal: "SIGTERM"),
+            changes: [])
+
+        #expect(config.stopSignal == "SIGTERM")
+    }
+
+    @Test("the container's effective healthcheck (the create-route label) is carried into the commit")
+    func containerHealthcheckCarried() throws {
+        let healthcheck = HealthcheckConfig(
+            Test: ["CMD-SHELL", "curl -f http://localhost/ || exit 1"],
+            Interval: 30, Timeout: 5, Retries: 3, StartPeriod: 10)
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(healthcheck: healthcheck),
+            parent: nil,
+            overrides: nil,
+            changes: [])
+
+        #expect(config.healthcheck == healthcheck)
+    }
+
+    @Test("a body Healthcheck override wins over the container's effective healthcheck")
+    func bodyHealthcheckOverrides() throws {
+        let carried = HealthcheckConfig(
+            Test: ["CMD", "true"], Interval: 30, Timeout: 5, Retries: 3, StartPeriod: nil)
+        let override = HealthcheckConfig(
+            Test: ["NONE"], Interval: nil, Timeout: nil, Retries: nil, StartPeriod: nil)
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(healthcheck: carried),
+            parent: nil,
+            overrides: CommitConfigOverrides(healthcheck: override),
+            changes: [])
+
+        #expect(config.healthcheck == override)
+    }
+
+    @Test("a container with no healthcheck label commits without one")
+    func noHealthcheckStaysAbsent() throws {
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(), parent: nil, overrides: nil, changes: [])
+
+        #expect(config.healthcheck == nil)
+    }
+
+    @Test("stop signal and healthcheck serialize into the config dict with Docker's keys")
+    func stopSignalAndHealthcheckSerialize() throws {
+        let healthcheck = HealthcheckConfig(
+            Test: ["CMD", "true"], Interval: 30, Timeout: 5, Retries: 3, StartPeriod: 10)
+        var config = SynthesizedImageConfig()
+        config.stopSignal = "SIGQUIT"
+        config.healthcheck = healthcheck
+
+        let dict = config.toDict()
+        #expect(dict["StopSignal"] as? String == "SIGQUIT")
+        let healthcheckDict = try #require(dict["Healthcheck"] as? [String: Any])
+        #expect(healthcheckDict["Test"] as? [String] == ["CMD", "true"])
+        #expect(healthcheckDict["Interval"] as? Int == 30)
+        #expect(healthcheckDict["Timeout"] as? Int == 5)
+        #expect(healthcheckDict["Retries"] as? Int == 3)
+        #expect(healthcheckDict["StartPeriod"] as? Int == 10)
     }
 }

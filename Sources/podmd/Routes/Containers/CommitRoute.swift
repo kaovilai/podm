@@ -26,7 +26,9 @@ struct RESTCommitQuery: Content {
 /// Docker Config carries runtime-only fields (Hostname, AttachStdin, Image,
 /// …) that cannot affect the committed image; moby decodes a superset and
 /// discards them, so they are accepted-and-ignored by omission here rather
-/// than rejected.
+/// than rejected. `StopSignal`/`Healthcheck` carry moby's exact JSON keys
+/// (`StopSignal` string; `Healthcheck` with Test/Interval/Timeout/
+/// StartPeriod/Retries — and Docker 25+ StartInterval).
 struct RESTCommitConfig: Content {
     let User: String?
     let ExposedPorts: [String: EmptyObject]?
@@ -36,6 +38,8 @@ struct RESTCommitConfig: Content {
     let Volumes: [String: EmptyObject]?
     let WorkingDir: String?
     let Labels: [String: String]?
+    let StopSignal: String?
+    let Healthcheck: HealthcheckConfig?
 
     func overrides() -> CommitConfigOverrides {
         CommitConfigOverrides(
@@ -46,7 +50,9 @@ struct RESTCommitConfig: Content {
             cmd: Cmd,
             volumes: Volumes.map { Set($0.keys) },
             workingDir: WorkingDir,
-            labels: Labels
+            labels: Labels,
+            stopSignal: StopSignal,
+            healthcheck: Healthcheck
         )
     }
 }
@@ -79,12 +85,11 @@ struct CommitRoute: RouteCollection {
     let archiveClient: ClientArchiveProtocol
     let imageClient: ClientImageCommitProtocol
 
-    /// The default-argument bridge keeps `RouteRegistry`'s historical
-    /// `CommitRoute()` registration compiling: the real clients connect lazily
-    /// (boot-safe per the registry's own docs) and a probe never gets past the
-    /// container lookup. The registry should pass the daemon's actual clients
-    /// — notably the real `imageClient`, whose system config carries registry
-    /// mirrors — when this goes live.
+    /// Default arguments exist only so tests and the route-conformance probe
+    /// can construct the collection without wiring the daemon's clients — a
+    /// probe never gets past the container lookup. The real registration in
+    /// `RouteRegistry` passes the daemon's actual clients, so this default
+    /// path is never exercised in production.
     init(
         containerClient: ClientContainerProtocol = ClientContainerService(),
         archiveClient: ClientArchiveProtocol = ClientArchiveService(
@@ -140,10 +145,18 @@ struct CommitRoute: RouteCollection {
             // Optional container Config body. moby decodes it with
             // CheckForJSON semantics: an empty body is fine (EOF ignored),
             // a malformed one is a 400. Parsed directly so a missing
-            // Content-Type doesn't reject an otherwise valid body.
-            _ = req.body.collect()
+            // Content-Type doesn't reject an otherwise valid body. The body
+            // is AWAITED with the configured cap — `collect()` with no max
+            // silently caps at Vapor's 16 KB default, and discarding the
+            // future would race a streamed body (the Config overrides would
+            // read as nil before collection finishes); the RegexRouter
+            // bypasses the defaultMaxBodySize collection Vapor's registered
+            // routes do, so the cap must be passed explicitly (same pattern
+            // as `ContainerCreateRoute`).
             let overrides: CommitConfigOverrides?
-            if let bodyData = req.body.data, bodyData.readableBytes > 0 {
+            if let bodyData = try await req.body.collect(max: req.application.routes.defaultMaxBodySize.value).get(),
+                bodyData.readableBytes > 0
+            {
                 let restConfig: RESTCommitConfig
                 do {
                     restConfig = try JSONDecoder().decode(RESTCommitConfig.self, from: Data(buffer: bodyData))
@@ -192,28 +205,42 @@ struct CommitRoute: RouteCollection {
             // `stream` (podman's streamed progress protocol) is ignored: the
             // response is a single JSON object either way.
 
-            let platform = currentPlatform()
-            // Best-effort parent config; nil (image deleted, config blob
+            guard let appleContainerAppSupportUrl = req.application.storage[AppleContainerAppSupportUrlKey.self] else {
+                throw Abort(.internalServerError, reason: "AppleContainerAppSupportUrl not configured")
+            }
+
+            // The CONTAINER's platform, not the host's: create persists the
+            // requested platform (amd64 containers run under Rosetta), and
+            // the committed image must label its filesystem with that
+            // architecture — an amd64 rootfs labeled arm64 could not exec its
+            // own binaries. Defaults to the host platform for containers
+            // created before the field existed.
+            let platform = container.configuration.platform
+
+            // Best-effort parent config, resolved by DIGEST — the tag may
+            // have been re-pulled or retagged since the container was
+            // created, but the digest the container was created from
+            // addresses immutable content. nil (image pruned, blob
             // unreadable) degrades to container-only seeding.
             let parentConfig = await imageClient.commitParentConfig(
-                reference: container.configuration.image.reference,
-                platform: platform
+                digest: container.configuration.image.descriptor.digest,
+                platform: platform,
+                appleContainerAppSupportUrl: appleContainerAppSupportUrl,
+                logger: req.logger
             )
 
             let config: SynthesizedImageConfig
             do {
                 config = try ContainerCommitConfig.make(
                     container: container,
-                    parent: parentConfig,
+                    parent: parentConfig?.config,
+                    parentExposedPorts: parentConfig?.exposedPorts ?? [],
+                    parentVolumes: parentConfig?.volumes ?? [],
                     overrides: overrides,
                     changes: query.changes ?? []
                 )
             } catch let error as DockerfileChangeError {
                 throw Abort(.badRequest, reason: error.localizedDescription)
-            }
-
-            guard let appleContainerAppSupportUrl = req.application.storage[AppleContainerAppSupportUrlKey.self] else {
-                throw Abort(.internalServerError, reason: "AppleContainerAppSupportUrl not configured")
             }
 
             // Volatile snapshot of the container's rootfs — the same file

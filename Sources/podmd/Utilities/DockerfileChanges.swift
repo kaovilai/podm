@@ -1,4 +1,5 @@
 import Foundation
+import Vapor
 
 /// Errors raised while applying `docker import --change` (Dockerfile-instruction-like)
 /// directives to a synthesized image config.
@@ -31,6 +32,16 @@ struct SynthesizedImageConfig {
     var volumes: Set<String> = []
     var workingDir: String?
     var labels: [String: String] = [:]
+    /// `docker commit` only — moby's commit body `Config.StopSignal` /
+    /// `container.Config.StopSignal`. Serialized with Docker's PascalCase key
+    /// (`StopSignal`), the extension key the OCI image-config JSON carries it
+    /// under. Import never sets it.
+    var stopSignal: String?
+    /// `docker commit` only — moby's commit body `Config.Healthcheck` /
+    /// the container's effective healthcheck. Serialized as the config
+    /// object's `Healthcheck` (Test/Interval/Timeout/Retries/StartPeriod/
+    /// StartInterval), matching the docker-shape `HealthcheckConfig` model.
+    var healthcheck: HealthcheckConfig?
 
     mutating func setEnv(key: String, value: String) {
         let prefix = "\(key)="
@@ -51,6 +62,17 @@ struct SynthesizedImageConfig {
         if !volumes.isEmpty { dict["Volumes"] = emptyObjectMap(for: volumes) }
         if let workingDir, !workingDir.isEmpty { dict["WorkingDir"] = workingDir }
         if !labels.isEmpty { dict["Labels"] = labels }
+        if let stopSignal, !stopSignal.isEmpty { dict["StopSignal"] = stopSignal }
+        if let healthcheck {
+            // `HealthcheckConfig` is Codable with Docker's exact key shape, so
+            // round-trip it through JSON to get the nested dictionary
+            // `JSONSerialization`-based config writer needs.
+            if let data = try? JSONEncoder().encode(healthcheck),
+                let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            {
+                dict["Healthcheck"] = object
+            }
+        }
         return dict
     }
 

@@ -21,9 +21,10 @@ struct ContainerCommitRouteTests {
     // MARK: - Mocks
 
     private actor FakeCommitImageClient: ClientImageCommitProtocol {
-        let parentConfig: ContainerizationOCI.ImageConfig?
+        let parentConfig: CommitParentConfig?
         let result: Result<(reference: String?, digest: String), Error>
         private(set) var commitCalls: [CommitImageCall] = []
+        private(set) var parentLookups: [ParentLookup] = []
 
         struct CommitImageCall {
             let repo: String?
@@ -31,11 +32,17 @@ struct ContainerCommitRouteTests {
             let comment: String?
             let author: String?
             let config: SynthesizedImageConfig
+            let platform: Platform
             let tarBytes: Data?
         }
 
+        struct ParentLookup {
+            let digest: String
+            let platform: Platform
+        }
+
         init(
-            parentConfig: ContainerizationOCI.ImageConfig? = nil,
+            parentConfig: CommitParentConfig? = nil,
             result: Result<(reference: String?, digest: String), Error> = .success(
                 ("example/app:v2", committedDigest))
         ) {
@@ -43,8 +50,14 @@ struct ContainerCommitRouteTests {
             self.result = result
         }
 
-        func commitParentConfig(reference: String, platform: Platform) async -> ContainerizationOCI.ImageConfig? {
-            parentConfig
+        func commitParentConfig(
+            digest: String,
+            platform: Platform,
+            appleContainerAppSupportUrl: URL,
+            logger: Logger
+        ) async -> CommitParentConfig? {
+            parentLookups.append(ParentLookup(digest: digest, platform: platform))
+            return parentConfig
         }
 
         func commitImage(
@@ -61,7 +74,8 @@ struct ContainerCommitRouteTests {
             let tarBytes = try? Data(contentsOf: tarPath)
             commitCalls.append(
                 CommitImageCall(
-                    repo: repo, tag: tag, comment: comment, author: author, config: config, tarBytes: tarBytes))
+                    repo: repo, tag: tag, comment: comment, author: author, config: config, platform: platform,
+                    tarBytes: tarBytes))
             switch result {
             case .success(let value): return value
             case .failure(let error): throw error
@@ -174,11 +188,12 @@ struct ContainerCommitRouteTests {
         broadcaster: EventBroadcaster? = nil,
         containerClient: ClientContainerProtocol? = nil,
         libpod: Bool = false,
+        configure: @escaping (Application) -> Void = { _ in },
         run: (Application) async throws -> Void
     ) async throws {
         let client: ClientContainerProtocol =
             containerClient ?? snapshot.map { FixedSnapshotClientMock(snapshot: $0) } ?? EmptyClientMock()
-        try await withApp(configure: { _ in }) { app in
+        try await withApp(configure: configure) { app in
             let regexRouter = app.regexRouter(with: app.logger)
             app.setRegexRouter(regexRouter)
             regexRouter.installMiddleware(on: app)
@@ -286,7 +301,8 @@ struct ContainerCommitRouteTests {
             nativeId: "web", ip: "192.168.65.2", network: "bridge", labels: [:], status: .stopped)
         let parent = ContainerizationOCI.ImageConfig(
             env: ["PARENT=1"], entrypoint: ["/app"], cmd: ["serve"])
-        let imageClient = FakeCommitImageClient(parentConfig: parent)
+        let imageClient = FakeCommitImageClient(
+            parentConfig: CommitParentConfig(config: parent, exposedPorts: [], volumes: []))
 
         try await withCommitApp(snapshot: snapshot, imageClient: imageClient) { app in
             try await app.testing().test(.POST, "/v1.51/commit?container=web") { res async in
@@ -298,6 +314,80 @@ struct ContainerCommitRouteTests {
         let config = try #require(calls.first?.config)
         #expect(config.entrypoint == ["/bin/sh"])
         #expect(config.env.contains("PARENT=1"))
+    }
+
+    @Test("the parent is resolved by the container's image DIGEST, not its reference")
+    func parentResolvedByDigest() async throws {
+        let snapshot = try makeContainerSnapshot(
+            nativeId: "web", ip: "192.168.65.2", network: "bridge", labels: [:], status: .stopped)
+        let imageClient = FakeCommitImageClient()
+
+        try await withCommitApp(snapshot: snapshot, imageClient: imageClient) { app in
+            try await app.testing().test(.POST, "/v1.51/commit?container=web") { res async in
+                #expect(res.status == .created)
+            }
+        }
+
+        // The digest recorded by the snapshot's ImageDescription descriptor —
+        // the immutable content the container was created from, immune to the
+        // tag being re-pulled or retagged afterwards.
+        let lookups = await imageClient.parentLookups
+        #expect(lookups.map(\.digest) == [snapshot.configuration.image.descriptor.digest])
+    }
+
+    @Test("an amd64 (Rosetta) container commits with the CONTAINER's platform, not the host's")
+    func containerPlatformDrivesCommit() async throws {
+        var snapshot = try makeContainerSnapshot(
+            nativeId: "web", ip: "192.168.65.2", network: "bridge", labels: [:], status: .stopped)
+        snapshot.configuration.platform = Platform(arch: "amd64", os: "linux")
+        let imageClient = FakeCommitImageClient()
+
+        try await withCommitApp(snapshot: snapshot, imageClient: imageClient) { app in
+            try await app.testing().test(.POST, "/v1.51/commit?container=web") { res async in
+                #expect(res.status == .created)
+            }
+        }
+
+        let lookups = await imageClient.parentLookups
+        #expect(lookups.map(\.platform) == [Platform(arch: "amd64", os: "linux")])
+        let calls = await imageClient.commitCalls
+        #expect(calls.map(\.platform) == [Platform(arch: "amd64", os: "linux")])
+    }
+
+    @Test("a streamed commit body is collected with the configured cap — the Config overrides survive")
+    func streamedBodyIsCollected() async throws {
+        let snapshot = try makeContainerSnapshot(
+            nativeId: "web", ip: "192.168.65.2", network: "bridge", labels: [:], status: .stopped)
+        let imageClient = FakeCommitImageClient()
+
+        // Valid commit Config, padded well past Vapor's 16 KB default via a
+        // large ignored field, so only a properly awaited collection with the
+        // configured cap can deliver it. Runs against a LIVE server: the
+        // in-memory tester delivers an already-collected body, which cannot
+        // regress (same reasoning as ContainerCreateRouteTests).
+        let padding = String(repeating: "A", count: 20_000)
+        let payload = #"{"Cmd": ["sleep", "1"], "Labels": {"pad": "\#(padding)"}}"#
+        #expect(payload.utf8.count > 16_384)
+
+        try await withCommitApp(
+            snapshot: snapshot,
+            imageClient: imageClient,
+            configure: { app in
+                app.routes.defaultMaxBodySize = "64mb"
+            }
+        ) { app in
+            try await app.testing(method: .running(hostname: "127.0.0.1", port: 0)).test(
+                .POST,
+                "/v1.51/commit?container=web&repo=example/app",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: payload)
+            ) { res async in
+                #expect(res.status == .created)
+            }
+        }
+
+        let calls = await imageClient.commitCalls
+        #expect(try #require(calls.first).config.cmd == ["sleep", "1"])
     }
 
     @Test("the exported rootfs tarball is deleted once the commit finishes")
