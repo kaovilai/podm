@@ -454,6 +454,38 @@ struct LibpodSecretsRouteTests {
 
     // MARK: - Persistence (podman filedriver parity)
 
+    @Test("a remove that fails to persist answers 500; the mutation stands and the next create re-syncs disk")
+    func removePersistFailureIs500() async throws {
+        let dir = uniqueTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = SecretStore(storageDirectory: dir)
+        try await withSecretsApp(store: store) { app in
+            _ = try await createSecret(app, name: "stuck", payload: "still-here")
+            // Read-only metadata directory: remove persists metadata(final)
+            // first, so the very first write fails mid-sequence.
+            let secretsDir = dir.appendingPathComponent("podm-secrets", isDirectory: true)
+            try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: secretsDir.path)
+            try await app.testing().test(.DELETE, "/v1.51/libpod/secrets/stuck") { res async in
+                #expect(res.status == .internalServerError)
+                #expect(res.body.string.contains("could not persist"))
+            }
+            // The in-memory mutation stands (podman's db cache behaves the
+            // same): the secret is gone from memory even though the disk
+            // still holds it. A 404 here is what podman would answer too.
+            try await app.testing().test(.GET, "/v1.51/libpod/secrets/stuck/json") { res async in
+                #expect(res.status == .notFound)
+            }
+            // Permissions restored: the next successful mutation persists
+            // BOTH files from the in-memory state — the failed remove must
+            // not resurrect the secret on reload.
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: secretsDir.path)
+            _ = try await createSecret(app, name: "after", payload: "y")
+        }
+        let reloaded = SecretStore(storageDirectory: dir)
+        let listed = await reloaded.list()
+        #expect(listed.map(\.name) == ["after"], "the failed remove must stay removed after the next persist re-syncs disk")
+    }
+
     // MARK: - Helpers
 
     /// Boots a VaporTesting app with ONLY the libpod secrets collection

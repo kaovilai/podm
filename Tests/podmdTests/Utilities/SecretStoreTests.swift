@@ -121,7 +121,7 @@ struct SecretStoreTests {
 
         let store = SecretStore(storageDirectory: dir)
         // Loading starts empty; the corrupt file must have been moved aside.
-        let listed = try await store.list()
+        let listed = await store.list()
         #expect(listed.isEmpty)
         #expect(!FileManager.default.fileExists(atPath: metadata.path), "original name freed for the next persist")
         let backups = try FileManager.default.contentsOfDirectory(
@@ -144,7 +144,7 @@ struct SecretStoreTests {
             .write(to: filedriverDir.appendingPathComponent("secretsdata.json"))
 
         let store = SecretStore(storageDirectory: dir)
-        let listed = try await store.list()
+        let listed = await store.list()
         #expect(listed.isEmpty)
         let metaFiles = try FileManager.default.contentsOfDirectory(atPath: podmDir.path)
         #expect(metaFiles.contains { $0.hasPrefix("secrets.json.corrupt-") }, "metadata quarantined")
@@ -186,11 +186,41 @@ struct SecretStoreTests {
         try Data("garbage".utf8).write(to: filedriverDir.appendingPathComponent("secretsdata.json"))
 
         let store = SecretStore(storageDirectory: dir)
-        let listed = try await store.list()
+        let listed = await store.list()
         #expect(listed.isEmpty)
         let payloadFiles = try FileManager.default.contentsOfDirectory(atPath: filedriverDir.path)
         #expect(payloadFiles.contains { $0.hasPrefix("secretsdata.json.corrupt-") }, "payloads quarantined")
         #expect(!FileManager.default.fileExists(atPath: filedriverDir.appendingPathComponent("secretsdata.json").path))
+    }
+
+    @Test("a quarantine that cannot move the file logs and leaves it in place")
+    func failedQuarantineMoveLeavesFileInPlace() async throws {
+        let dir = uniqueTempDir()
+        let podmDir = dir.appendingPathComponent("podm-secrets")
+        let filedriverDir = podmDir.appendingPathComponent("filedriver")
+        try FileManager.default.createDirectory(at: filedriverDir, withIntermediateDirectories: true)
+        try Data("garbage".utf8).write(to: podmDir.appendingPathComponent("secrets.json"))
+        try Data("garbage".utf8).write(to: filedriverDir.appendingPathComponent("secretsdata.json"))
+        // Deny write on BOTH store directories — either quarantine rename
+        // would succeed against a writable dir (we are not root, so a
+        // read-only dir blocks the rename), exercising the catch branch.
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: podmDir.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: filedriverDir.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: podmDir.path)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: filedriverDir.path)
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        let store = SecretStore(storageDirectory: dir)
+        #expect(await store.list().isEmpty, "load still starts empty")
+        // Neither file could be moved aside — both remain under their
+        // original names, so the next persist will overwrite them (logged).
+        #expect(FileManager.default.fileExists(atPath: podmDir.appendingPathComponent("secrets.json").path))
+        #expect(
+            FileManager.default.fileExists(atPath: filedriverDir.appendingPathComponent("secretsdata.json").path))
+        let metaFiles = try FileManager.default.contentsOfDirectory(atPath: podmDir.path)
+        #expect(!metaFiles.contains { $0.hasPrefix("secrets.json.corrupt-") })
     }
 
     private func uniqueTempDir() -> URL {
