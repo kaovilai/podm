@@ -317,9 +317,10 @@ struct ExecRoute: RouteCollection {
             let execBroadcaster = req.application.storage[EventBroadcasterKey.self]
             let execEventHexId = DockerContainerID.hexId(for: container)
             let execEventImage = container.configuration.image.reference
-            // Resolved once, up front: the effective (possibly renamed) name,
-            // so all of an exec's events agree even if a rename lands mid-exec.
-            let execEventName = await ContainerNameOverrideStore.effectiveName(for: container)
+            // Resolved at each emission (inside broadcastExecEvent): a rename
+            // landing mid-exec must be reflected in the LATER events (exec_die
+            // carries the name effective at emission time, like moby).
+
             let execEventLabels = LabelNormalization.restore(container.configuration.labels)
             // Docker formats the action as "exec_start: <command>" (action + ": " + cmd).
             let execStartAction = "exec_start: \(config.cmd.joined(separator: " "))"
@@ -331,7 +332,8 @@ struct ExecRoute: RouteCollection {
                 if let exitCode { attrs["exitCode"] = String(exitCode) }
                 let event = DockerEvent.simpleEvent(
                     id: execEventHexId, type: "container", status: status,
-                    image: execEventImage, name: execEventName, labels: attrs)
+                    image: execEventImage,
+                    name: await ContainerNameOverrideStore.effectiveName(for: container), labels: attrs)
                 await broadcaster.broadcast(event)
             }
 

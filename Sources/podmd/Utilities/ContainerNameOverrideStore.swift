@@ -40,8 +40,20 @@ actor ContainerNameOverrideStore {
         overrides[hexId]
     }
 
+    /// Deleted (pruned, removed, auto-removed) instance keys. A rename that
+    /// read the container's override BEFORE the deletion suspended, and its
+    /// claim arrives AFTER `remove` — the claim must fail, or it persists a
+    /// name for a container that no longer exists and reserves it across
+    /// restarts. Hex ids are instance-unique, so a tombstone can never name a
+    /// future container; the set is bounded (drop-oldest) purely to cap memory.
+    private var tombstones: [String] = []
+
     func remove(hexId: String) {
-        guard overrides.removeValue(forKey: hexId) != nil else { return }
+        overrides.removeValue(forKey: hexId)
+        if !tombstones.contains(hexId) {
+            tombstones.append(hexId)
+            if tombstones.count > 4_096 { tombstones.removeFirst() }
+        }
         persist()
     }
 
@@ -51,18 +63,12 @@ actor ContainerNameOverrideStore {
     /// create's name check and Apple accepting (or rejecting) the container.
     private var pendingCreates: Set<String> = []
 
-    /// True when `name` is held as some container's effective (renamed) name
-    /// or by an in-flight create — consulted by container CREATE so a new
-    /// native container cannot steal a renamed container's name, and by the
-    /// pending reservation so a concurrent RENAME cannot steal a create's
-    /// name during image preparation (the Apple store only rejects native-id
-    /// duplicates and knows nothing about overrides).
-    func isTaken(name: String) -> Bool {
-        overrides.values.contains(name) || pendingCreates.contains(name)
-    }
-
-    /// Reserves `name` for an in-flight create. Returns false when the name
-    /// is already taken (override or another pending create).
+    /// Reserves `name` for an in-flight create — the atomic check-then-act
+    /// path container CREATE consults (so a new native container cannot steal
+    /// a renamed container's name, and a concurrent rename cannot steal a
+    /// create's name during image preparation; the Apple store only rejects
+    /// native-id duplicates and knows nothing about overrides). Returns false
+    /// when the name is already taken (override or another pending create).
     func reserveForCreate(name: String) -> Bool {
         if overrides.values.contains(name) || pendingCreates.contains(name) {
             return false
@@ -94,6 +100,7 @@ actor ContainerNameOverrideStore {
         if overrides.values.contains(name) { return false }
         if pendingCreates.contains(name) { return false }
         if overrides[hexId] != expectedOverride { return false }
+        if tombstones.contains(hexId) { return false }
         overrides[hexId] = name
         persist()
         return true

@@ -182,11 +182,17 @@ struct ClientContainerService: ClientContainerProtocol {
             case "before":
                 result = result.filter { container in
                     for beforeId in values {
+                        // Exact matches (id or effective name) win over prefix
+                        // matches: `before=api` must not select `api-server`
+                        // merely because it appears first in the pool.
                         if let beforeContainer = referencePool.first(where: {
-                            $0.id == beforeId || $0.id.hasPrefix(beforeId)
-                                || DockerContainerID.hexId(for: $0).hasPrefix(beforeId)
-                                || effectiveNames[$0.id] == beforeId
-                        }) {
+                            $0.id == beforeId || effectiveNames[$0.id] == beforeId
+                        })
+                            ?? referencePool.first(where: {
+                                $0.id.hasPrefix(beforeId)
+                                    || DockerContainerID.hexId(for: $0).hasPrefix(beforeId)
+                            })
+                        {
                             if let beforeTimestamp = AppleContainerTimestampResolver.containerCreationDate(beforeContainer),
                                 let containerTimestamp = AppleContainerTimestampResolver.containerCreationDate(container)
                             {
@@ -201,10 +207,13 @@ struct ClientContainerService: ClientContainerProtocol {
                 result = result.filter { container in
                     for sinceId in values {
                         if let sinceContainer = referencePool.first(where: {
-                            $0.id == sinceId || $0.id.hasPrefix(sinceId)
-                                || DockerContainerID.hexId(for: $0).hasPrefix(sinceId)
-                                || effectiveNames[$0.id] == sinceId
-                        }) {
+                            $0.id == sinceId || effectiveNames[$0.id] == sinceId
+                        })
+                            ?? referencePool.first(where: {
+                                $0.id.hasPrefix(sinceId)
+                                    || DockerContainerID.hexId(for: $0).hasPrefix(sinceId)
+                            })
+                        {
                             if let sinceTimestamp = AppleContainerTimestampResolver.containerCreationDate(sinceContainer),
                                 let containerTimestamp = AppleContainerTimestampResolver.containerCreationDate(container)
                             {
