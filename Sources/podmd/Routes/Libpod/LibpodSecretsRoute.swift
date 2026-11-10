@@ -104,7 +104,7 @@ extension LibpodSecretsRoute {
                 throw Abort(.conflict, reason: "\(name): secret name in use")
             } catch SecretStore.StoreError.unsupportedDriver(let driver) {
                 throw Abort(.badRequest, reason: "unknown secrets driver \(driver): only the file driver is implemented")
-            } catch SecretStore.StoreError.persistFailed(let reason) {
+            } catch SecretStore.StoreError.persistFailed(let reason, _) {
                 // Podman maps store/persist failures to 500 too
                 // (utils.InternalServerError in both the libpod and compat
                 // create handlers) — a create that cannot be durably written
@@ -178,7 +178,7 @@ extension LibpodSecretsRoute {
                     throw Abort(.notFound, reason: "no such secret")
                 }
                 removed = found
-            } catch SecretStore.StoreError.persistFailed(let reason) {
+            } catch SecretStore.StoreError.persistFailed(let reason, _) {
                 throw Abort(.internalServerError, reason: "could not persist the secret store: \(reason)")
             }
             Self.broadcast(event: "remove", secret: removed, req: req)
@@ -242,6 +242,17 @@ extension LibpodSecretsRoute {
             } else if let dict = value as? [String: Any] {
                 // Docker-style {"name": {"mysecret": true}} object form.
                 filters[key] = dict.compactMap { (key, value) in (value as? Bool == true) ? key : nil }
+            } else {
+                // A value that is neither an array of strings nor the
+                // object form ("db-password", [123], true) is a client
+                // error: Go decodes filters into map[string][]string and
+                // fails the whole request on such a value — and silently
+                // dropping it would return every secret where the caller
+                // asked for a subset.
+                throw Abort(
+                    .badRequest,
+                    reason: "invalid filter value for \(key): expected an array of strings"
+                )
             }
         }
         return filters

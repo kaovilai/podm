@@ -223,6 +223,47 @@ struct SecretStoreTests {
         #expect(!metaFiles.contains { $0.hasPrefix("secrets.json.corrupt-") })
     }
 
+    @Test("a replace whose metadata write fails rolls back to the old secret (superset invariant)")
+    func failedReplaceRollsBackToOldSecret() async throws {
+        let dir = uniqueTempDir()
+        let podmDir = dir.appendingPathComponent("podm-secrets")
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: podmDir.path)
+            try? FileManager.default.removeItem(at: dir)
+        }
+        let store = SecretStore(storageDirectory: dir)
+        let original = try await store.create(
+            name: "orig", data: Data("old-data".utf8), driver: nil,
+            labels: [:], driverOptions: [:], replace: false, ignore: false
+        )
+        // Read-only metadata dir, writable payload dir: the replace's
+        // transitional payload write (old ∪ new) LANDS, the metadata write
+        // fails — the branch where keeping the replacement in memory would
+        // let a later mutation drop the old payload while the on-disk
+        // metadata still references it.
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: podmDir.path)
+        await #expect(throws: SecretStore.StoreError.self) {
+            _ = try await store.create(
+                name: "orig", data: Data("new-data".utf8), driver: nil,
+                labels: [:], driverOptions: [:], replace: true, ignore: false
+            )
+        }
+        // Rollback: the OLD secret is intact in memory, same ID, same payload.
+        let afterFailure = await store.inspect(nameOrID: "orig", showSecret: true)
+        #expect(afterFailure?.secret.id == original.id)
+        #expect(afterFailure?.payload == Data("old-data".utf8))
+
+        // "Crash" + reload: the transitional payload entry is an orphan the
+        // load prunes; the old secret survives whole.
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: podmDir.path)
+        let reloaded = SecretStore(storageDirectory: dir)
+        let revealed = await reloaded.inspect(nameOrID: "orig", showSecret: true)
+        #expect(revealed?.secret.id == original.id)
+        #expect(revealed?.payload == Data("old-data".utf8))
+        let listed = await reloaded.list()
+        #expect(listed.count == 1)
+    }
+
     private func uniqueTempDir() -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

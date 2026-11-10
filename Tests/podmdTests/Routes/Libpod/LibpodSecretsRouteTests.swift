@@ -454,7 +454,7 @@ struct LibpodSecretsRouteTests {
 
     // MARK: - Persistence (podman filedriver parity)
 
-    @Test("a remove that fails to persist answers 500; the mutation stands and the next create re-syncs disk")
+    @Test("a remove that fails to persist answers 500 and stays fully retryable")
     func removePersistFailureIs500() async throws {
         let dir = uniqueTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -469,21 +469,57 @@ struct LibpodSecretsRouteTests {
                 #expect(res.status == .internalServerError)
                 #expect(res.body.string.contains("could not persist"))
             }
-            // The in-memory mutation stands (podman's db cache behaves the
-            // same): the secret is gone from memory even though the disk
-            // still holds it. A 404 here is what podman would answer too.
+            // Pre-mutation rollback: memory mirrors the last-persisted disk
+            // state, so the secret is still fully present — nothing
+            // half-removed, and a retry is possible.
+            try await app.testing().test(.GET, "/v1.51/libpod/secrets/stuck/json") { res async in
+                #expect(res.status == .ok)
+            }
+            // Permissions restored, the retry goes through cleanly.
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: secretsDir.path)
+            try await app.testing().test(.DELETE, "/v1.51/libpod/secrets/stuck") { res async in
+                #expect(res.status == .noContent)
+            }
             try await app.testing().test(.GET, "/v1.51/libpod/secrets/stuck/json") { res async in
                 #expect(res.status == .notFound)
             }
-            // Permissions restored: the next successful mutation persists
-            // BOTH files from the in-memory state — the failed remove must
-            // not resurrect the secret on reload.
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: secretsDir.path)
-            _ = try await createSecret(app, name: "after", payload: "y")
         }
+    }
+
+    @Test("consecutive persist failures never lose a committed secret (payload-superset invariant)")
+    func consecutivePersistFailuresKeepCommittedPayloads() async throws {
+        let dir = uniqueTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = SecretStore(storageDirectory: dir)
+        try await withSecretsApp(store: store) { app in
+            _ = try await createSecret(app, name: "committed", payload: "precious")
+            // Read-only METADATA dir only — the payload dir stays writable,
+            // so failed mutations still land their payload writes on disk
+            // (the exact window where a lost secret could slip through).
+            let secretsDir = dir.appendingPathComponent("podm-secrets", isDirectory: true)
+            try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: secretsDir.path)
+            // Failed delete…
+            try await app.testing().test(.DELETE, "/v1.51/libpod/secrets/committed") { res async in
+                #expect(res.status == .internalServerError)
+            }
+            // …followed by a failed create on top: its payload write lands
+            // (filedriver is writable), its metadata write does not.
+            try await app.testing().test(
+                .POST, "/v1.51/libpod/secrets/create?name=doomed",
+                body: ByteBuffer(string: "x")
+            ) { res async in
+                #expect(res.status == .internalServerError)
+            }
+            // The failed create left no trace in memory — the name is free.
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: secretsDir.path)
+            _ = try await createSecret(app, name: "doomed", payload: "x")
+        }
+        // "Crash" + reload from disk: the committed secret is still fully
+        // recoverable — metadata references it and its payload survived
+        // every failed mutation's payload write.
         let reloaded = SecretStore(storageDirectory: dir)
-        let listed = await reloaded.list()
-        #expect(listed.map(\.name) == ["after"], "the failed remove must stay removed after the next persist re-syncs disk")
+        let revealed = await reloaded.inspect(nameOrID: "committed", showSecret: true)
+        #expect(revealed?.payload == Data("precious".utf8), "a committed secret's payload must survive consecutive persist failures")
     }
 
     // MARK: - Helpers
@@ -563,6 +599,18 @@ struct LibpodSecretsRouteTests {
             }
             // A malformed regex pattern is also a 400, not a 500.
             try await app.testing().test(.GET, "/v1.51/libpod/secrets/json?filters=%7B%22name%22%3A%5B%22%5B%22%5D%7D") { res async in
+                #expect(res.status == .badRequest)
+            }
+            // A filter value that is not an array of strings (Go decodes
+            // filters into map[string][]string and fails the request) is a
+            // 400 — silently dropping it would return every secret.
+            try await app.testing().test(.GET, "/v1.51/libpod/secrets/json?filters=%7B%22name%22%3A%22somename%22%7D") { res async in
+                #expect(res.status == .badRequest)
+            }
+            try await app.testing().test(.GET, "/v1.51/libpod/secrets/json?filters=%7B%22name%22%3A%5B123%5D%7D") { res async in
+                #expect(res.status == .badRequest)
+            }
+            try await app.testing().test(.GET, "/v1.51/libpod/secrets/json?filters=%7B%22name%22%3Atrue%7D") { res async in
                 #expect(res.status == .badRequest)
             }
         }

@@ -56,11 +56,14 @@ actor SecretStore {
         case nameInUse(String)
         /// Only the "file" driver exists here (podman also has "pass" etc.).
         case unsupportedDriver(String)
-        /// A `persist()` write failed — the mutation is live in memory but
-        /// will not survive a restart. Podman propagates its driver and db
-        /// write errors to the caller the same way (`SecretsManager.Store`
-        /// wraps both as "creating secret %s: %w"); the route answers 500.
-        case persistFailed(String)
+        /// A `persist()` write failed — `writeIndex` is the 0-based position
+        /// of the failed write in the mutation's persist sequence, so callers
+        /// can tell "nothing committed" (early writes) from "the final state
+        /// already landed" (late writes) when deciding what to roll back.
+        /// Podman propagates its driver and db write errors to the caller the
+        /// same way (`SecretsManager.Store` wraps both as "creating secret
+        /// %s: %w"); the route answers 500.
+        case persistFailed(reason: String, writeIndex: Int)
     }
 
     /// `common/pkg/secrets` `maxSecretSize` — 512kB.
@@ -172,8 +175,8 @@ actor SecretStore {
     /// `SecretsManager.Store` including its validation order, so error
     /// precedence matches podman: name → data size → ignore+replace →
     /// name-in-use. Throws `persistFailed` when the files cannot be written
-    /// (the in-memory mutation stands, like podman's mutated db cache, and
-    /// the next successful mutation re-syncs both files).
+    /// (the in-memory state rolls back to the pre-mutation snapshot, keeping
+    /// memory a payload-superset of the on-disk metadata).
     @discardableResult
     func create(
         name: String,
@@ -231,6 +234,8 @@ actor SecretStore {
             replacement.labels = labels
             replacement.driverOptions = driverOptions
             replacement.driver = resolvedDriver
+            let savedSecrets = secrets
+            let savedPayloads = payloads
             secrets[index] = replacement
             payloads.removeValue(forKey: oldID)
             payloads[replacement.id] = data
@@ -238,7 +243,28 @@ actor SecretStore {
             if let oldPayload {
                 transitional[oldID] = oldPayload
             }
-            try persist([.payload(transitional), .metadata(secrets), .payload(payloads)])
+            do {
+                try persist([.payload(transitional), .metadata(secrets), .payload(payloads)])
+            } catch {
+                if let storeError = error as? StoreError,
+                    case .persistFailed(_, let writeIndex) = storeError, writeIndex >= 2
+                {
+                    // Only the final payload TRIM failed — the replacement
+                    // metadata has already committed, so the pre-replacement
+                    // state is no longer recoverable (its metadata is gone
+                    // from disk). The replacement stands; the old-ID payload
+                    // the trim never removed is an orphan that load prunes.
+                    throw error
+                }
+                // An early write failed — disk still describes the OLD
+                // secret, so memory must too: keeping the replacement in
+                // memory would let the next mutation's payload write drop
+                // the old payload while the on-disk metadata still
+                // references it (dangling reference, data lost forever).
+                secrets = savedSecrets
+                payloads = savedPayloads
+                throw error
+            }
             return replacement
         }
 
@@ -252,16 +278,18 @@ actor SecretStore {
             driver: resolvedDriver,
             driverOptions: driverOptions
         )
-        secrets.append(secret)
-        payloads[secret.id] = data
-        // Snapshot-and-restore: with a two-file store, leaving a failed
-        // mutation in memory breaks the payload-superset invariant across
-        // the NEXT mutation (a delete that failed to persist would vanish
-        // from the next create's payload write). Memory always mirrors the
-        // last-persisted disk state — podman can cache-before-write because
-        // its db is one file; we cannot.
+        // Snapshot-and-restore, taken BEFORE the mutation: with a two-file
+        // store, a failed mutation left in memory breaks the payload-superset
+        // invariant across the NEXT mutation — a failed delete followed by a
+        // failed create would write a payload file without the "deleted"
+        // secret's data while the on-disk metadata still references it
+        // (dangling reference; the payload is gone forever). Memory must
+        // mirror the last-PERSISTED disk state. Podman can keep its mutated
+        // db cache because its store is one file; we cannot.
         let savedSecrets = secrets
         let savedPayloads = payloads
+        secrets.append(secret)
+        payloads[secret.id] = data
         do {
             try persist([.payload(payloads), .metadata(secrets)])
         } catch {
@@ -282,10 +310,13 @@ actor SecretStore {
         guard let secret = lookup(nameOrID: nameOrID),
             let index = secrets.firstIndex(where: { $0.id == secret.id })
         else { return nil }
-        let removed = secrets.remove(at: index)
-        payloads.removeValue(forKey: removed.id)
+        // Snapshot BEFORE mutating, same rationale as create(): a failed
+        // remove left applied in memory would let the next mutation's
+        // payload write drop data the on-disk metadata still references.
         let savedSecrets = secrets
         let savedPayloads = payloads
+        let removed = secrets.remove(at: index)
+        payloads.removeValue(forKey: removed.id)
         do {
             try persist([.metadata(secrets), .payload(payloads)])
         } catch {
@@ -361,10 +392,11 @@ actor SecretStore {
     /// acknowledging a create that would vanish on restart — podman
     /// propagates its driver.Store and db write errors the same way
     /// ("creating secret %s: %w"). A mid-sequence failure may leave earlier
-    /// writes on disk; the in-memory mutation stands (as does podman's
-    /// mutated db cache) and the next successful mutation re-syncs both
-    /// files. On restart, `load` repairs whatever the interrupted sequence
-    /// left behind.
+    /// writes on disk; callers roll memory back to the pre-mutation state
+    /// (except where a late write already committed the new metadata — see
+    /// the replace branch), keeping memory a payload-superset of whatever
+    /// the on-disk metadata references. On restart, `load` repairs whatever
+    /// the interrupted sequence left behind.
     ///
     /// Ordering invariant — why the payload file always lands first as a
     /// SUPERSET of the IDs the incoming metadata references, and is only
@@ -383,17 +415,17 @@ actor SecretStore {
     /// window on deletes/replace (driver.Delete runs first); the
     /// superset-first scheme closes that as well.
     private func persist(_ writes: [PersistWrite]) throws {
-        do {
-            for write in writes {
+        for (index, write) in writes.enumerated() {
+            do {
                 switch write {
                 case .payload(let payloads):
                     try Self.writeJSON(payloads, to: payloadURL)
                 case .metadata(let secrets):
                     try Self.writeJSON(secrets, to: metadataURL)
                 }
+            } catch {
+                throw StoreError.persistFailed(reason: "\(error)", writeIndex: index)
             }
-        } catch {
-            throw StoreError.persistFailed("\(error)")
         }
     }
 
