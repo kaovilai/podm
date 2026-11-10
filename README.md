@@ -317,7 +317,7 @@ gives you; the point is nothing above it stays resident.
      overwritten on the next run. Regenerate locally with:
      swift build && .build/debug/podmd --docgen /tmp/podm-docs -->
 
-178 routes registered (132 supported, 46 deliberately not
+178 routes registered (134 supported, 44 deliberately not
 implemented — every gap carries its reason and its tracking context in
 [RouteSupportManifest.swift](Sources/podmd/Utilities/RouteSupportManifest.swift)).
 Full, searchable version: **[podm route coverage site](https://github.tig.pw/podm/)**.
@@ -343,7 +343,7 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `DELETE` | `/containers/{id}` | docker |  |
 | ✅ | `POST` | `/containers/{id}/attach` | docker |  |
 | ✅ | `GET` | `/containers/{id}/attach/ws` | docker |  |
-| 🚫 | `GET` | `/containers/{id}/changes` | docker | `docker diff` needs a filesystem-baseline design (captured at create, diffed later) that isn't built yet. |
+| ✅ | `GET` | `/containers/{id}/changes` | docker |  |
 | ✅ | `POST` | `/containers/{id}/exec` | docker |  |
 | ✅ | `GET` | `/containers/{id}/export` | docker |  |
 | ✅ | `GET` | `/containers/{id}/json` | docker |  |
@@ -440,7 +440,7 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `PUT` | `/libpod/containers/{id:.*}/archive` | libpod |  |
 | ✅ | `DELETE` | `/libpod/containers/{id}` | libpod |  |
 | ✅ | `POST` | `/libpod/containers/{id}/attach` | libpod |  |
-| 🚫 | `GET` | `/libpod/containers/{id}/changes` | libpod | `podman diff` needs a filesystem-baseline design (captured at create, diffed later) that isn't built yet. |
+| ✅ | `GET` | `/libpod/containers/{id}/changes` | libpod |  |
 | ✅ | `POST` | `/libpod/containers/{id}/exec` | libpod |  |
 | ✅ | `GET` | `/libpod/containers/{id}/exists` | libpod |  |
 | ✅ | `GET` | `/libpod/containers/{id}/export` | libpod |  |
