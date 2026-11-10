@@ -547,6 +547,10 @@ struct ClientContainerService: ClientContainerProtocol {
             do {
                 try await containerClient.withClient { try await $0.delete(id: container.id) }
                 deletedIds.append(container.id)
+                // A renamed container's override dies with it — otherwise the
+                // name stays reserved (create/rename 409) forever, even across
+                // daemon restarts, since the map is persisted.
+                await ContainerNameOverrideStore.shared.remove(hexId: DockerContainerID.hexId(for: container))
             } catch {
                 continue
             }

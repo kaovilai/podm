@@ -44,7 +44,11 @@ struct ContainerRenameRoute: RouteCollection {
                 throw Abort(.badRequest, reason: "invalid container name: \(requestedName)")
             }
             let hexId = DockerContainerID.hexId(for: container)
-            let currentName = await ContainerNameOverrideStore.shared.get(hexId: hexId) ?? container.id
+            // The RAW override feeds the claim's compare-and-swap: a concurrent
+            // rename of the same container that already won must make this
+            // request fail instead of publishing a stale old name.
+            let currentOverride = await ContainerNameOverrideStore.shared.get(hexId: hexId)
+            let currentName = currentOverride ?? container.id
             guard newName != currentName else {
                 throw Abort(.badRequest, reason: "Renaming a container with the same name as its current name")
             }
@@ -67,10 +71,23 @@ struct ContainerRenameRoute: RouteCollection {
             var reserved = Set<String>()
             for other in others where other.id != container.id {
                 reserved.insert(other.id)
-                reserved.insert(DockerContainerID.hexId(for: other))
+                let otherHexId = DockerContainerID.hexId(for: other)
+                // The SANITIZED hex id too: sanitize() truncates to 63 chars,
+                // so a rename requesting another container's full 64-char
+                // Docker id would otherwise pass the raw-id check yet match
+                // that container's id in lookups (sanitizedReference).
+                reserved.insert(otherHexId)
+                reserved.insert(ContainerNameUtility.sanitize(otherHexId))
             }
-            guard await ContainerNameOverrideStore.shared.claim(hexId: hexId, name: newName, reserved: reserved) else {
-                throw Abort(.conflict, reason: "name is already in use: \(newName)")
+            guard
+                await ContainerNameOverrideStore.shared.claim(
+                    hexId: hexId, name: newName, expectedOverride: currentOverride, reserved: reserved)
+            else {
+                throw Abort(
+                    .conflict,
+                    reason:
+                        "name is already in use: \(newName)"
+                )
             }
             // Swap the container's DNS hostname alias while it runs so peers
             // resolve the new name immediately. Label-derived aliases
