@@ -1,23 +1,39 @@
 import ContainerAPIClient
 import ContainerResource
+import Logging
 import Vapor
 
 struct ContainerListQuery: Content {
     var all: Bool?
     var limit: Int?
     var filters: String?
+    var size: Bool?
 }
 
 struct ContainerListRoute: RouteCollection {
     let client: ClientContainerProtocol
+    let diskUsageProvider: ContainerDiskUsageProviding
+
+    init(
+        client: ClientContainerProtocol,
+        diskUsageProvider: ContainerDiskUsageProviding = ContainerClientDiskUsageProvider()
+    ) {
+        self.client = client
+        self.diskUsageProvider = diskUsageProvider
+    }
 
     func boot(routes: RoutesBuilder) throws {
-        try routes.registerVersionedRoute(.GET, pattern: "/containers/json", use: ContainerListRoute.handler(client: client))
+        try routes.registerVersionedRoute(
+            .GET, pattern: "/containers/json",
+            use: ContainerListRoute.handler(client: client, diskUsageProvider: diskUsageProvider))
     }
 }
 
 extension ContainerListRoute {
-    static func handler(client: ClientContainerProtocol) -> @Sendable (Request) async throws -> [RESTContainerSummary] {
+    static func handler(
+        client: ClientContainerProtocol,
+        diskUsageProvider: ContainerDiskUsageProviding = ContainerClientDiskUsageProvider()
+    ) -> @Sendable (Request) async throws -> [RESTContainerSummary] {
         { req in
             let query = try req.query.decode(ContainerListQuery.self)
             let limit = query.limit ?? 0
@@ -57,6 +73,20 @@ extension ContainerListRoute {
             // A positive limit keeps only the N most recently created containers.
             if limit > 0 {
                 decorated = Array(decorated.prefix(limit))
+            }
+
+            // `docker ps -s` / ?size=1: per-container disk usage, resolved
+            // concurrently like /system/df does. Apple exposes a single
+            // aggregate figure (no rw-vs-rootfs split), so it is reported as
+            // SizeRootFs and SizeRw stays omitted rather than duplicating the
+            // number into both fields.
+            var sizeRootFsById: [String: Int64] = [:]
+            if query.size == true {
+                sizeRootFsById = await Self.diskUsageByIds(
+                    Set(decorated.map { $0.container.id }),
+                    provider: diskUsageProvider,
+                    logger: req.logger
+                )
             }
 
             var summaries: [RESTContainerSummary] = []
@@ -169,8 +199,12 @@ extension ContainerListRoute {
                         }
                         : nil,
                     Ports: ports,
-                    SizeRw: nil,  // there is no mechanism to retrieve this value from apple container
-                    SizeRootFs: nil,  // there is no mechanism to retrieve this value from apple container
+                    // Apple exposes one aggregate disk-usage figure, not Docker's
+                    // rw/rootfs split: the aggregate is reported as SizeRootFs
+                    // (the number `docker ps -s` users read) and SizeRw stays
+                    // omitted rather than duplicating it into both fields.
+                    SizeRw: nil,
+                    SizeRootFs: sizeRootFsById[container.id],
                     Labels: LabelNormalization.restore(container.configuration.labels),
                     State: mobyState,
                     Status: statusStr,
@@ -195,5 +229,35 @@ extension ContainerListRoute {
         if hours < 24 { return "\(hours) hour\(hours == 1 ? "" : "s")" }
         let days = hours / 24
         return "\(days) day\(days == 1 ? "" : "s")"
+    }
+
+    /// Per-container disk usage keyed by native container id, resolved
+    /// concurrently like SystemDFRoute.buildContainerSummaries. A lookup that
+    /// fails (e.g. the container is being torn down mid-request) logs and is
+    /// skipped — the container still lists, just without its size, rather than
+    /// failing the whole `docker ps -s` listing.
+    static func diskUsageByIds(
+        _ ids: Set<String>,
+        provider: ContainerDiskUsageProviding,
+        logger: Logger
+    ) async -> [String: Int64] {
+        await withTaskGroup(of: (String, Int64?).self) { group in
+            for id in ids {
+                group.addTask {
+                    do {
+                        let bytes = try await provider.diskUsage(id: id)
+                        return (id, Int64(clamping: bytes))
+                    } catch {
+                        logger.warning("container disk usage lookup failed for \(id): \(error)")
+                        return (id, nil)
+                    }
+                }
+            }
+            var usage: [String: Int64] = [:]
+            for await (id, bytes) in group {
+                if let bytes { usage[id] = bytes }
+            }
+            return usage
+        }
     }
 }
