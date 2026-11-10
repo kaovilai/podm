@@ -41,6 +41,10 @@ extension ContainerDeleteRoute {
                 // Prevents a container recreated under the same name from inheriting this one's restart-attempt count.
                 await ContainerRestartState.shared.reset(id: eventName)
                 await RestartPolicyOverrideStore.shared.remove(id: eventId)
+                // A rename's override dies with the container — removal is
+                // hygiene (a recreated container gets a fresh hex key), but
+                // keeps the persisted map from growing forever.
+                await ContainerNameOverrideStore.shared.remove(hexId: eventId)
                 guard let broadcaster = req.application.storage[EventBroadcasterKey.self] else { return }
                 await broadcaster.broadcast(
                     DockerEvent.simpleEvent(
@@ -80,7 +84,8 @@ extension ContainerDeleteRoute {
                         nativeId: container.id,
                         labels: cached?.labels ?? LabelNormalization.restore(container.configuration.labels),
                         cachedIP: cached?.ip ?? containerIP,
-                        dnsServer: dnsServer
+                        dnsServer: dnsServer,
+                        effectiveName: await ContainerNameOverrideStore.effectiveName(for: container)
                     )
                 }
 

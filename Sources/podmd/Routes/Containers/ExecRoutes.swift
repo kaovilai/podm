@@ -245,7 +245,7 @@ struct ExecRoute: RouteCollection {
                     type: "container",
                     status: "exec_create: \(config.cmd.joined(separator: " "))",
                     image: container.configuration.image.reference,
-                    name: container.id,
+                    name: await ContainerNameOverrideStore.effectiveName(for: container),
                     labels: attrs
                 )
                 await broadcaster.broadcast(event)
@@ -317,7 +317,10 @@ struct ExecRoute: RouteCollection {
             let execBroadcaster = req.application.storage[EventBroadcasterKey.self]
             let execEventHexId = DockerContainerID.hexId(for: container)
             let execEventImage = container.configuration.image.reference
-            let execEventName = container.id
+            // Resolved at each emission (inside broadcastExecEvent): a rename
+            // landing mid-exec must be reflected in the LATER events (exec_die
+            // carries the name effective at emission time, like moby).
+
             let execEventLabels = LabelNormalization.restore(container.configuration.labels)
             // Docker formats the action as "exec_start: <command>" (action + ": " + cmd).
             let execStartAction = "exec_start: \(config.cmd.joined(separator: " "))"
@@ -329,7 +332,8 @@ struct ExecRoute: RouteCollection {
                 if let exitCode { attrs["exitCode"] = String(exitCode) }
                 let event = DockerEvent.simpleEvent(
                     id: execEventHexId, type: "container", status: status,
-                    image: execEventImage, name: execEventName, labels: attrs)
+                    image: execEventImage,
+                    name: await ContainerNameOverrideStore.effectiveName(for: container), labels: attrs)
                 await broadcaster.broadcast(event)
             }
 
@@ -836,7 +840,7 @@ struct ExecRoute: RouteCollection {
     /// the channel, so `execRunning` is false there and nothing is emitted.
     static func broadcastExecDetach(execRunning: Bool, execId: String, container: ContainerSnapshot, broadcaster: EventBroadcaster?) async {
         guard execRunning, let broadcaster else { return }
-        await broadcaster.broadcast(DockerEvent.containerEvent("exec_detach", container: container, extraAttributes: ["execID": execId]))
+        await broadcaster.broadcast(await DockerEvent.containerEvent("exec_detach", container: container, extraAttributes: ["execID": execId]))
     }
 
     /// Maps Docker's exec-start `ConsoleSize` to an initial terminal size.

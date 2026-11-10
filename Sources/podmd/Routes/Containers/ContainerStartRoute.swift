@@ -238,7 +238,8 @@ extension ContainerStartRoute {
                         nativeId: nativeId,
                         labels: cached?.labels ?? labels,
                         cachedIP: cached?.ip,
-                        dnsServer: dnsServer
+                        dnsServer: dnsServer,
+                        effectiveName: await ContainerNameOverrideStore.shared.get(hexId: eventId)
                     )
                 }
                 return
@@ -388,6 +389,14 @@ extension ContainerStartRoute {
                     dnsServer.register(hostname: snapshot.id, ip: ip)
                     logger.info("[dns] registered container name '\(snapshot.id)' → \(ip)")
                 }
+                // A renamed container's DNS alias is its effective name —
+                // register it alongside the native id so peers resolve both.
+                if let override = await ContainerNameOverrideStore.shared.get(hexId: DockerContainerID.hexId(for: snapshot)),
+                    !override.isEmpty
+                {
+                    dnsServer.register(hostname: override, ip: ip)
+                    logger.info("[dns] registered renamed container '\(override)' → \(ip)")
+                }
 
                 // Names stored at create time (Compose service aliases via podm.dns.names)
                 if let namesLabel = snapshot.configuration.labels["podm.dns.names"] {
@@ -474,10 +483,17 @@ extension ContainerStartRoute {
     /// across daemon restarts. Uses dnsAttachmentIP so a container whose first network
     /// attachment happens to be reserved (e.g. bridge) still gets re-registered on its
     /// named network, instead of being skipped entirely.
-    static func registerDNSAliasesOnResume(container: ContainerSnapshot, dnsServer: PodmDNSServer, logger: Logger) {
+    static func registerDNSAliasesOnResume(container: ContainerSnapshot, dnsServer: PodmDNSServer, logger: Logger) async {
         guard let ip = ContainerStartRoute.dnsAttachmentIP(in: container) else { return }
 
         dnsServer.register(hostname: container.id, ip: ip)
+        // A renamed container resolves under its effective name — re-register
+        // the override too (the registry is in-memory, lost on daemon restart).
+        if let override = await ContainerNameOverrideStore.shared.get(hexId: DockerContainerID.hexId(for: container)),
+            !override.isEmpty
+        {
+            dnsServer.register(hostname: override, ip: ip)
+        }
         if let namesLabel = container.configuration.labels["podm.dns.names"] {
             for name in namesLabel.split(separator: ",").map(String.init) where !name.isEmpty {
                 dnsServer.register(hostname: name, ip: ip)

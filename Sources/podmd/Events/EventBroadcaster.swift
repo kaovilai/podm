@@ -73,19 +73,21 @@ extension DockerEvent {
     }
 
     /// Container-shaped event derived from a snapshot: canonical 64-char Docker id,
-    /// image reference, native name, and restored labels — the fields every
-    /// container lifecycle event site otherwise re-derives by hand.
+    /// image reference, Docker-visible (possibly renamed) name, and restored
+    /// labels — the fields every container lifecycle event site otherwise
+    /// re-derives by hand.
     static func containerEvent(
         _ action: String,
         container: ContainerSnapshot,
         extraAttributes: [String: String] = [:]
-    ) -> DockerEvent {
-        simpleEvent(
+    ) async -> DockerEvent {
+        let name = await ContainerNameOverrideStore.effectiveName(for: container)
+        return simpleEvent(
             id: DockerContainerID.hexId(for: container),
             type: "container",
             status: action,
             image: container.configuration.image.reference,
-            name: container.id,
+            name: name,
             labels: LabelNormalization.restore(container.configuration.labels),
             extraAttributes: extraAttributes
         )

@@ -44,12 +44,6 @@ enum RouteSupportManifest {
         DeliberateStub(
             method: "POST", pattern: "/libpod/containers/{id}/unpause",
             reason: "Apple container has no pause primitive for a microVM."),
-        DeliberateStub(
-            method: "POST", pattern: "/containers/{id}/rename",
-            reason: "Never implemented post-fork; porting socktainer#418's delete-and-recreate is tracked (it blocks `docker compose up` recreation)."),
-        DeliberateStub(
-            method: "POST", pattern: "/libpod/containers/{id}/rename",
-            reason: "Never implemented post-fork; porting socktainer#418's delete-and-recreate is tracked (it blocks `docker compose up` recreation)."),
         // ── buildx session channel ───────────────────────────────────────────
         DeliberateStub(
             method: "GET", pattern: "/session",

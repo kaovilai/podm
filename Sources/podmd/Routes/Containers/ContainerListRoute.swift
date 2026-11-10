@@ -28,6 +28,9 @@ extension ContainerListRoute {
 
             let parsedFilters = try DockerContainerFilterUtility.parseContainerFilters(filtersParam: query.filters, logger: req.logger)
             let containers = try await client.list(showAll: showAll, filters: parsedFilters)
+            // Rename overrides shadow the native id as the Docker-visible
+            // name — resolve once for the whole listing.
+            let effectiveNames = await ContainerNameOverrideStore.effectiveNames(for: containers)
 
             // Apply health filter here using the real HealthCheckManager state.
             // ClientContainerService skips the health filter to avoid a stale heuristic.
@@ -144,7 +147,7 @@ extension ContainerListRoute {
 
                 let summary = RESTContainerSummary(
                     Id: DockerContainerID.hexId(for: container),
-                    Names: ["/" + container.id],
+                    Names: ["/" + (effectiveNames[container.id] ?? container.id)],
                     Image: container.configuration.image.reference,
                     ImageID: container.configuration.image.digest,
                     ImageManifestDescriptor: nil,

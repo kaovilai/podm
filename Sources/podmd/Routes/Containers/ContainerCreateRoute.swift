@@ -144,6 +144,21 @@ extension ContainerCreateRoute {
             guard ManagedContainer.nameValid(id) else {
                 throw Abort(.badRequest, reason: "invalid container name: \(id)")
             }
+            // A renamed container holds this name as its effective name; the
+            // Apple store only rejects native-id duplicates and knows nothing
+            // about overrides, so a create would silently shadow the rename
+            // (getContainer would resolve this container instead). The name
+            // is RESERVED for the rest of this request — image preparation
+            // suspends, and a concurrent rename claiming the name in that
+            // window would leave two containers answering to it. The
+            // reservation is in-memory and released when the handler exits
+            // (on success the new container covers its own native name; on
+            // failure the name frees; a daemon crash mid-create frees it too
+            // since reservations never persist).
+            guard await ContainerNameOverrideStore.shared.reserveForCreate(name: id) else {
+                throw Abort(.conflict, reason: "name is already in use: \(id)")
+            }
+            defer { Task { await ContainerNameOverrideStore.shared.releaseCreateReservation(name: id) } }
 
             // Validate the requested platform only if provided
             var requestedPlatform = try Platform(from: containerPlatform)

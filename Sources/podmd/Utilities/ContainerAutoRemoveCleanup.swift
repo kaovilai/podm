@@ -22,15 +22,21 @@ enum ContainerAutoRemoveCleanup {
                 nativeId: nativeId,
                 labels: labels,
                 cachedIP: cached?.ip,
-                dnsServer: dnsServer
+                dnsServer: dnsServer,
+                effectiveName: await ContainerNameOverrideStore.shared.get(hexId: hexId)
             )
         }
+        // A rename's override dies with the container, like the delete route
+        // does — otherwise every removed instance grows the persisted map.
+        // Read it first so the destroy event can carry the name clients knew.
+        let effectiveName = await ContainerNameOverrideStore.shared.get(hexId: hexId)
+        await ContainerNameOverrideStore.shared.remove(hexId: hexId)
         if let broadcaster {
             await broadcaster.broadcast(
                 ContainerAttachRoute.makeAutoRemoveEvent(
                     id: hexId,
                     image: cached?.image ?? fallbackImage,
-                    name: cached?.nativeId ?? nativeId,
+                    name: effectiveName ?? cached?.nativeId ?? nativeId,
                     labels: labels
                 ))
         }

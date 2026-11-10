@@ -11,12 +11,18 @@ enum ContainerAliasCleanup {
         nativeId: String,
         labels: [String: String],
         cachedIP: String?,
-        dnsServer: PodmDNSServer
+        dnsServer: PodmDNSServer,
+        effectiveName: String? = nil
     ) {
         guard let cachedIP else { return }
 
         if !nativeId.isEmpty {
             dnsServer.unregisterIfOwned(hostname: nativeId, expectedIP: cachedIP)
+        }
+        // A rename swaps the DNS alias from the native id to the override —
+        // unregister whichever name is actually visible (when it differs).
+        if let effectiveName, !effectiveName.isEmpty, effectiveName != nativeId {
+            dnsServer.unregisterIfOwned(hostname: effectiveName, expectedIP: cachedIP)
         }
         if let namesLabel = labels["podm.dns.names"] {
             for name in namesLabel.split(separator: ",").map(String.init) where !name.isEmpty {
