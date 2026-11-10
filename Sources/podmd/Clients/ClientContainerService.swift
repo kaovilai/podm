@@ -554,12 +554,17 @@ struct ClientContainerService: ClientContainerProtocol {
 
         for container in containersToDelete {
             do {
+                // Capture the hex id BEFORE the delete: it derives from the
+                // bundle's on-disk creation date, which is gone once the
+                // container is deleted — computing it after would produce a
+                // different key and miss the persisted override.
+                let hexId = DockerContainerID.hexId(for: container)
                 try await containerClient.withClient { try await $0.delete(id: container.id) }
                 deletedIds.append(container.id)
                 // A renamed container's override dies with it — otherwise the
                 // name stays reserved (create/rename 409) forever, even across
                 // daemon restarts, since the map is persisted.
-                await ContainerNameOverrideStore.shared.remove(hexId: DockerContainerID.hexId(for: container))
+                await ContainerNameOverrideStore.shared.remove(hexId: hexId)
             } catch {
                 continue
             }
