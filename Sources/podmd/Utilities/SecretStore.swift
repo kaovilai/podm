@@ -216,6 +216,18 @@ actor SecretStore {
         for secret in secrets where payloads[secret.id] == nil {
             log.error("secret \(secret.name) (\(secret.id)) has no payload on disk — --showsecret will return no data")
         }
+
+        // Crash leftovers: writeJSON's temp files (".secrets.json.tmp-<uuid>")
+        // from a persist interrupted between temp creation and the swap are
+        // unreferenced garbage nothing else removes — sweep them so they
+        // cannot accumulate. (The `.corrupt-` quarantine backups are NOT
+        // touched: they hold recoverable data.)
+        for directory in [metadataURL.deletingLastPathComponent(), payloadURL.deletingLastPathComponent()] {
+            guard let contents = try? fm.contentsOfDirectory(atPath: directory.path) else { continue }
+            for entry in contents where entry.hasPrefix(".") && entry.contains(".tmp-") {
+                try? fm.removeItem(at: directory.appendingPathComponent(entry))
+            }
+        }
         return (secrets, payloads, quarantineBlocked)
     }
 
@@ -445,12 +457,22 @@ actor SecretStore {
     }
 
     /// Index of the secret matching `nameOrID` exactly — full ID first, then
-    /// exact name — mirroring podman's `getExactNameAndID` precedence.
+    /// exact name — mirroring podman's `getExactNameAndID` precedence. Names
+    /// compare by UTF-8 BYTES, not Swift's `==`: Go string equality (and
+    /// podman's name maps) is byte-wise, so "café" in NFC and NFD are two
+    /// DISTINCT secrets — canonical-equivalence matching would collide them
+    /// into a 409, or worse let a replace overwrite the other one.
     private func exactIndex(nameOrID: String) -> Int? {
         if let byID = secrets.firstIndex(where: { $0.id == nameOrID }) {
             return byID
         }
-        return secrets.firstIndex(where: { $0.name == nameOrID })
+        return secrets.firstIndex(where: { Self.sameName($0.name, nameOrID) })
+    }
+
+    /// Go's string equality: byte-for-byte UTF-8, with no Unicode
+    /// canonical-equivalence folding.
+    private static func sameName(_ a: String, _ b: String) -> Bool {
+        a.utf8.elementsEqual(b.utf8)
     }
 
     /// Metadata plus (optionally) the payload in ONE actor hop, so a

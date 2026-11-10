@@ -440,6 +440,60 @@ struct SecretStoreTests {
         #expect(await store.lookup(nameOrID: "locked") == nil)
     }
 
+    @Test("canonically-equivalent names are DISTINCT secrets (Go byte equality, not Swift ==)")
+    func unicodeNameEquivalenceIsByteWise() async throws {
+        let dir = uniqueTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = SecretStore(storageDirectory: dir)
+        // "café" in NFC and NFD: Swift's == calls them equal; Go (podman's
+        // name maps and string equality) compares UTF-8 bytes and keeps
+        // them distinct. They must be two separate secrets.
+        let nfc = "caf\u{00E9}"
+        let nfd = "cafe\u{0301}"
+        #expect(nfc == nfd, "sanity: Swift folds these — the store must not")
+        let first = try await store.create(
+            name: nfc, data: Data("one".utf8), driver: nil,
+            labels: [:], driverOptions: [:], replace: false, ignore: false
+        )
+        let second = try await store.create(
+            name: nfd, data: Data("two".utf8), driver: nil,
+            labels: [:], driverOptions: [:], replace: false, ignore: false
+        )
+        #expect(first.id != second.id, "an NFD name must not collide with the NFC secret")
+        #expect(await store.lookup(nameOrID: nfc)?.id == first.id)
+        #expect(await store.lookup(nameOrID: nfd)?.id == second.id)
+        // Replacing the NFD secret must not touch the NFC one.
+        let third = try await store.create(
+            name: nfd, data: Data("three".utf8), driver: nil,
+            labels: [:], driverOptions: [:], replace: true, ignore: false
+        )
+        #expect(third.id != first.id)
+        #expect(await store.lookup(nameOrID: nfc)?.id == first.id, "a byte-distinct secret must never be overwritten")
+        #expect(await store.list().count == 2)
+    }
+
+    @Test("interrupted-persist temp files are swept on load")
+    func crashLeftoverTempFilesSwept() async throws {
+        let dir = uniqueTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let podmDir = dir.appendingPathComponent("podm-secrets")
+        let filedriverDir = podmDir.appendingPathComponent("filedriver")
+        try FileManager.default.createDirectory(at: filedriverDir, withIntermediateDirectories: true)
+        // A crash between temp creation and the swap leaves these behind.
+        try Data("garbage".utf8).write(to: podmDir.appendingPathComponent(".secrets.json.tmp-AAAA"))
+        try Data("garbage".utf8).write(to: filedriverDir.appendingPathComponent(".secretsdata.json.tmp-BBBB"))
+        // A quarantine backup must NOT be swept.
+        let backup = podmDir.appendingPathComponent("secrets.json.corrupt-123")
+        try Data("recoverable".utf8).write(to: backup)
+
+        _ = SecretStore(storageDirectory: dir)
+
+        #expect(!FileManager.default.fileExists(atPath: podmDir.appendingPathComponent(".secrets.json.tmp-AAAA").path))
+        #expect(
+            !FileManager.default.fileExists(atPath: filedriverDir.appendingPathComponent(".secretsdata.json.tmp-BBBB").path))
+        #expect(FileManager.default.fileExists(atPath: backup.path), "quarantine backups hold recoverable data")
+    }
+
     private func uniqueTempDir() -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
