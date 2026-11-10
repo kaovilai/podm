@@ -381,7 +381,7 @@ enum ContainerTopUtility {
     /// Resumes with the task's result, or `nil` if the timeout elapses first.
     /// The loser is never awaited on the winning path: whichever finishes
     /// second finds the continuation already consumed and is ignored.
-    private static func raceFirstOrTimeout<T: Sendable>(_ task: Task<T?, Never>, timeoutNs: UInt64) async -> T? {
+    static func raceFirstOrTimeout<T: Sendable>(_ task: Task<T?, Never>, timeoutNs: UInt64) async -> T? {
         await withCheckedContinuation { (cont: CheckedContinuation<T?, Never>) in
             let once = ResumeOnce(cont)
             Task {
@@ -396,7 +396,7 @@ enum ContainerTopUtility {
 
     /// One-shot continuation wrapper — the second resume is a no-op instead
     /// of a fatal error (the losing racer is guaranteed to fire late).
-    private final class ResumeOnce<T: Sendable>: @unchecked Sendable {
+    final class ResumeOnce<T: Sendable>: @unchecked Sendable {
         private let lock = NSLock()
         private var continuation: CheckedContinuation<T, Never>?
 
