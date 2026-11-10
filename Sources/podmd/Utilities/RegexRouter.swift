@@ -17,6 +17,10 @@ extension RoutesBuilder {
 
 struct RegexRoute {
     let method: HTTPMethod
+    /// The original route TEMPLATE as registered (e.g. "/containers/{id}/top"),
+    /// before `{param}` → regex conversion. Exposed for diagnostics and the
+    /// route-conformance test, which enumerates the registered surface.
+    let pattern: String
     let regex: NSRegularExpression
     let handler: @Sendable (Request, [String]) async throws -> Response
     /// Precomputed at registration time (the pattern never changes afterward) so per-request
@@ -31,10 +35,11 @@ struct RegexRoute {
     let specificityLength: Int
 
     init(
-        method: HTTPMethod, regex: NSRegularExpression, handler: @escaping @Sendable (Request, [String]) async throws -> Response,
+        method: HTTPMethod, pattern: String, regex: NSRegularExpression, handler: @escaping @Sendable (Request, [String]) async throws -> Response,
         specificitySlashes: Int, specificityLength: Int
     ) {
         self.method = method
+        self.pattern = pattern
         self.regex = regex
         self.handler = handler
         self.specificitySlashes = specificitySlashes
@@ -51,13 +56,38 @@ final class RegexRouter: @unchecked Sendable {
         self.logger = logger
     }
 
+    /// Every registered route's method + original template, for diagnostics
+    /// and the route-conformance test that enumerates the supported surface.
+    var registeredRoutes: [(method: HTTPMethod, pattern: String)] {
+        routes.map { (method: $0.method, pattern: $0.pattern) }
+    }
+
+    /// The template of the route the middleware would dispatch `path` to:
+    /// same pre-sorted iteration and first-match-wins rule as
+    /// `RegexRoutingMiddleware.respond`, minus the handler invocation. This is
+    /// how the conformance test catches route SHADOWING (e.g. a specific
+    /// `/libpod/images/remove` swallowed by the `/libpod/images/{name:.*}`
+    /// wildcard) without executing anything.
+    func matchedPattern(method: HTTPMethod, path: String) -> String? {
+        let range = NSRange(location: 0, length: path.utf16.count)
+        for route in routes where route.method == method {
+            if route.regex.firstMatch(in: path, range: range) != nil {
+                return route.pattern
+            }
+        }
+        return nil
+    }
+
     func register(
         _ method: HTTPMethod, pattern: String,
         handler: @escaping @Sendable (Request, [String]) async throws -> Response
     ) throws {
         let regex = try NSRegularExpression(pattern: pattern)
         let (slashes, length) = Self.templateSpecificity(pattern)
-        insertSorted(RegexRoute(method: method, regex: regex, handler: handler, specificitySlashes: slashes, specificityLength: length))
+        insertSorted(
+            RegexRoute(
+                method: method, pattern: pattern, regex: regex, handler: handler,
+                specificitySlashes: slashes, specificityLength: length))
     }
 
     func register<T: AsyncResponseEncodable & Sendable>(
@@ -97,7 +127,7 @@ final class RegexRouter: @unchecked Sendable {
         let specificity = Self.templateSpecificity(pattern)
         insertSorted(
             RegexRoute(
-                method: method, regex: regex, handler: handler,
+                method: method, pattern: pattern, regex: regex, handler: handler,
                 specificitySlashes: specificity.slashes, specificityLength: specificity.length))
     }
 

@@ -1,0 +1,64 @@
+name: periodic route conformance
+
+# Mechanical drift guard for the daemon's API surface, per the parity
+# contract: the route-conformance test enumerates EVERY route the production
+# daemon registers (RouteRegistry.bootstrap — the same code path configure()
+# uses, currently ~170 routes across the docker and libpod dialects) and
+# dispatches a synthetic request to each. A route may only answer with a
+# not-implemented/not-supported stub when it appears in the test's deliberate
+# manifest — the support-surface decision record. This catches, mechanically
+# and on a schedule, exactly the class of bug where a CLI path silently
+# regresses (e.g. podman rmi falling into the /libpod/images/{name:.*}
+# wildcard) while PR-time reviews and hand-picked smoke commands miss it.
+#
+# Runs daily plus on demand. The full unit suite (including conformance)
+# also runs per-PR in pr-check.yaml; this workflow exists so main itself is
+# continuously proven, not just changes to it.
+
+on:
+  schedule:
+    # Daily 04:17 UTC — off-peak, offset from the top of the hour.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: periodic-conformance
+  cancel-in-progress: true
+
+jobs:
+  conformance:
+    name: formatters, tests & route conformance
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      # Read-only audit job: nothing here pushes, so the checkout keeps no
+      # github-token credentials at all (belt-and-suspenders with the top-level
+      # `permissions: contents: read`).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: latest-stable
+
+      - name: Display swift version
+        run: |
+          which swift
+          swift --version
+
+      - name: Formatters, tests & route conformance
+        run: make test
+
+      - name: Release build
+        run: swift build -c release --product podmd

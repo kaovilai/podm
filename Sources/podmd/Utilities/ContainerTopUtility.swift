@@ -330,7 +330,7 @@ enum ContainerTopUtility {
         // The collector reports Result so a COLLECTION error (pipe read
         // failure) stays distinguishable from a timeout.
         typealias PsOutput = (exitCode: Int32, stdout: Data, stderr: Data)
-        let collector = Task<Result<PsOutput, Error>?, Never> {
+        let collector = Task<Result<PsOutput, Error>, Never> {
             do {
                 return .success(
                     try await pipes.collectOutput {
@@ -340,7 +340,7 @@ enum ContainerTopUtility {
                 return .failure(error)
             }
         }
-        let outcome = await raceFirstOrTimeout(collector, timeoutNs: execTimeoutNs)
+        let outcome = await AsyncRace.firstOrTimeout(collector, timeoutNs: execTimeoutNs)
 
         guard let outcome else {
             // Timed out: kill ps so Apple closes the write ends (letting the
@@ -376,41 +376,6 @@ enum ContainerTopUtility {
         }
         let text = String(data: output.stdout, encoding: .utf8) ?? ""
         return filterPsSelfRow(text, command: (["ps"] + arguments).joined(separator: " "))
-    }
-
-    /// Resumes with the task's result, or `nil` if the timeout elapses first.
-    /// The loser is never awaited on the winning path: whichever finishes
-    /// second finds the continuation already consumed and is ignored.
-    private static func raceFirstOrTimeout<T: Sendable>(_ task: Task<T?, Never>, timeoutNs: UInt64) async -> T? {
-        await withCheckedContinuation { (cont: CheckedContinuation<T?, Never>) in
-            let once = ResumeOnce(cont)
-            Task {
-                once.resume(returning: await task.value)
-            }
-            Task {
-                try? await Task.sleep(nanoseconds: timeoutNs)
-                once.resume(returning: nil)
-            }
-        }
-    }
-
-    /// One-shot continuation wrapper — the second resume is a no-op instead
-    /// of a fatal error (the losing racer is guaranteed to fire late).
-    private final class ResumeOnce<T: Sendable>: @unchecked Sendable {
-        private let lock = NSLock()
-        private var continuation: CheckedContinuation<T, Never>?
-
-        init(_ continuation: CheckedContinuation<T, Never>) {
-            self.continuation = continuation
-        }
-
-        func resume(returning value: T) {
-            lock.lock()
-            let cont = continuation
-            continuation = nil
-            lock.unlock()
-            cont?.resume(returning: value)
-        }
     }
 
     /// moby runs ps on the HOST filtered to the container's pids, so the ps
