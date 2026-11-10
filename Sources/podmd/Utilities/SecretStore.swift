@@ -104,10 +104,23 @@ actor SecretStore {
 
         // Restrictive permissions from the start: 0700 dirs (readable/traversable
         // only by the daemon's user), so payloads can never be world-readable
-        // even between init and first write.
+        // even between init and first write. Pre-existing directories are
+        // TIGHTENED, not trusted: write permission on the directory is what
+        // lets another local user replace or delete the store files, and a
+        // directory left behind by an older build or a restored backup can
+        // carry group/world bits. Only bits are cleared, never set — a
+        // deliberately read-only directory keeps its owner bits.
         let fm = FileManager.default
-        for directory in [dir, filedriverDir] where !fm.fileExists(atPath: directory.path) {
-            try? fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        for directory in [dir, filedriverDir] {
+            if !fm.fileExists(atPath: directory.path) {
+                try? fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            } else {
+                Self.tightenPermissions(of: directory, fm: fm)
+            }
+        }
+        // Same for store files that predate the 0600 discipline.
+        for file in [metadataURL, payloadURL] where fm.fileExists(atPath: file.path) {
+            Self.tightenPermissions(of: file, fm: fm)
         }
 
         let loaded = Self.load(metadataURL: metadataURL, payloadURL: payloadURL, log: log)
@@ -495,15 +508,50 @@ actor SecretStore {
     /// Encodes and atomically replaces one store file. Payloads get 0600
     /// (podman's file driver `os.WriteFile(..., 0o600)`); metadata follows
     /// suit — labels aren't secret, but there's no reason for them to be
-    /// readable either.
+    /// readable either. The temp file is created 0600 FROM THE START:
+    /// `data.write(options: .atomic)` would create it with the process
+    /// umask (typically 0644), leaving a world-readable window before any
+    /// post-rename chmod — and replaceItemAt can keep the destination's
+    /// existing attributes, so the mode is re-asserted after the swap.
     private static func writeJSON<T: Encodable>(_ value: T, to url: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(value)
-        try data.write(to: url, options: .atomic)
-        // write(to:options:) has no permissions argument — tighten after
-        // the atomic rename (the temp file is created with the default umask).
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        let temp = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
+        guard
+            FileManager.default.createFile(
+                atPath: temp.path, contents: data, attributes: [.posixPermissions: 0o600]
+            )
+        else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        do {
+            if FileManager.default.fileExists(atPath: url.path) {
+                _ = try FileManager.default.replaceItemAt(url, withItemAt: temp)
+            } else {
+                try FileManager.default.moveItem(at: temp, to: url)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: temp)
+            throw error
+        }
+        // A same-directory swap may leave the temp behind holding the old
+        // data; either way it must not linger.
+        try? FileManager.default.removeItem(at: temp)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    /// Strips group/other access bits from an existing file or directory.
+    /// Only bits are cleared, never set, so a deliberately read-only item
+    /// keeps its owner bits — this closes replacement/deletion of store
+    /// files by other local users (directory write permission) without
+    /// fighting an operator's intentional modes.
+    private static func tightenPermissions(of url: URL, fm: FileManager) {
+        guard let attrs = try? fm.attributesOfItem(atPath: url.path),
+            let perms = (attrs[.posixPermissions] as? NSNumber)?.intValue, perms & 0o077 != 0
+        else { return }
+        try? fm.setAttributes([.posixPermissions: perms & ~0o077], ofItemAtPath: url.path)
     }
 
     /// 25 lowercase hex characters — `stringid.GenerateNonCryptoID()` truncated
@@ -533,6 +581,9 @@ actor SecretStore {
         let backup = url.appendingPathExtension("corrupt-\(stamp)")
         do {
             try fm.moveItem(at: url, to: backup)
+            // The backup holds secret payloads — owner-only, regardless of
+            // the modes the corrupt file carried.
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
             log.error(
                 "could not load store file \(url.path) — moved aside as \(backup.lastPathComponent); starting empty. The file remains available for manual recovery."
             )

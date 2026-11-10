@@ -335,6 +335,41 @@ struct SecretStoreTests {
         #expect(await reloaded.list().isEmpty)
     }
 
+    @Test("pre-existing loose permissions are tightened on load (other local users must not reach the store)")
+    func loosePreexistingPermissionsTightened() async throws {
+        let dir = uniqueTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let podmDir = dir.appendingPathComponent("podm-secrets")
+        let filedriverDir = podmDir.appendingPathComponent("filedriver")
+        // Directories and files as a previous build or a restored backup
+        // with a loose umask could have left them: group/world bits set.
+        // Directory write permission is what would let another local user
+        // replace or delete the store files.
+        try FileManager.default.createDirectory(
+            at: filedriverDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o775])
+        let metadata = podmDir.appendingPathComponent("secrets.json")
+        try Data("[]".utf8).write(to: metadata)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: metadata.path)
+        let payloads = filedriverDir.appendingPathComponent("secretsdata.json")
+        try Data("garbage".utf8).write(to: payloads)
+        try FileManager.default.setAttributes([.posixPermissions: 0o666], ofItemAtPath: payloads.path)
+
+        _ = SecretStore(storageDirectory: dir)  // load also quarantines the garbage payload
+
+        func groupOtherBits(_ path: String) throws -> Int {
+            let perms = try FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as! Int
+            return perms & 0o077
+        }
+        #expect(try groupOtherBits(podmDir.path) == 0, "store directory must lose group/world bits")
+        #expect(try groupOtherBits(filedriverDir.path) == 0, "payload directory must lose group/world bits")
+        #expect(try groupOtherBits(metadata.path) == 0, "metadata file must lose group/world bits")
+        // The quarantine backup holds secret payloads — owner-only too.
+        let backups = try FileManager.default.contentsOfDirectory(atPath: filedriverDir.path)
+            .filter { $0.hasPrefix("secretsdata.json.corrupt-") }
+        #expect(backups.count == 1)
+        #expect(try groupOtherBits(filedriverDir.appendingPathComponent(backups[0]).path) == 0)
+    }
+
     private func uniqueTempDir() -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
