@@ -317,7 +317,7 @@ gives you; the point is nothing above it stays resident.
      overwritten on the next run. Regenerate locally with:
      swift build && .build/debug/podmd --docgen /tmp/podm-docs -->
 
-178 routes registered (130 supported, 48 deliberately not
+178 routes registered (132 supported, 46 deliberately not
 implemented — every gap carries its reason and its tracking context in
 [RouteSupportManifest.swift](Sources/podmd/Utilities/RouteSupportManifest.swift)).
 Full, searchable version: **[podm route coverage site](https://github.tig.pw/podm/)**.
@@ -350,7 +350,7 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `POST` | `/containers/{id}/kill` | docker |  |
 | ✅ | `GET` | `/containers/{id}/logs` | docker |  |
 | 🚫 | `POST` | `/containers/{id}/pause` | docker | Apple container has no pause primitive for a microVM. |
-| 🚫 | `POST` | `/containers/{id}/rename` | docker | Never implemented post-fork; porting socktainer#418's delete-and-recreate is tracked (it blocks `docker compose up` recreation). |
+| ✅ | `POST` | `/containers/{id}/rename` | docker |  |
 | ✅ | `POST` | `/containers/{id}/resize` | docker |  |
 | ✅ | `POST` | `/containers/{id}/restart` | docker |  |
 | ✅ | `POST` | `/containers/{id}/start` | docker |  |
@@ -448,7 +448,7 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `POST` | `/libpod/containers/{id}/kill` | libpod |  |
 | ✅ | `GET` | `/libpod/containers/{id}/logs` | libpod |  |
 | 🚫 | `POST` | `/libpod/containers/{id}/pause` | libpod | Apple container has no pause primitive for a microVM. |
-| 🚫 | `POST` | `/libpod/containers/{id}/rename` | libpod | Never implemented post-fork; porting socktainer#418's delete-and-recreate is tracked (it blocks `docker compose up` recreation). |
+| ✅ | `POST` | `/libpod/containers/{id}/rename` | libpod |  |
 | ✅ | `POST` | `/libpod/containers/{id}/restart` | libpod |  |
 | ✅ | `POST` | `/libpod/containers/{id}/start` | libpod |  |
 | ✅ | `GET` | `/libpod/containers/{id}/stats` | libpod |  |
