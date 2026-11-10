@@ -53,6 +53,9 @@ enum RouteRegistry {
         let networkClient = ClientNetworkService()
         let volumeClient = ClientVolumeService()
         let registryClient = ClientRegistryService()
+        // podman's LOCAL secret store (libpod dialect) — file-backed under
+        // app support, 0600 payloads; distinct from the swarm /secrets stubs.
+        let secretStore = SecretStore(storageDirectory: appleContainerAppSupportUrl)
         let archiveClient = ClientArchiveService(appSupportPath: appleContainerAppSupportUrl)
         let builderClient = ClientBuilderService(appSupportURL: appleContainerAppSupportUrl, containerSystemConfig: systemConfig)
 
@@ -269,6 +272,9 @@ enum RouteRegistry {
         try app.register(collection: LibpodContainerExistsRoute(client: containerClient))
         try app.register(collection: LibpodImageExistsRoute(systemConfig: systemConfig))
         try app.register(collection: LibpodVolumeExistsRoute(client: volumeClient))
+
+        // libpod secrets (podman secret create/ls/inspect/rm)
+        try app.register(collection: LibpodSecretsRoute(store: secretStore))
         try app.register(collection: LibpodNetworkExistsRoute(client: networkClient))
 
         try app.register(collection: LibpodManifestCreateRoute(client: manifestClient))
