@@ -303,7 +303,8 @@ extension ContainerStartRoute {
                 dnsServer: dnsServer,
                 healthManager: healthManager,
                 client: client,
-                logger: logger
+                logger: logger,
+                freshLogBoot: true
             )
             if let snap = restartedSnapshot ?? exitSnapshot {
                 await VolumeMountEvents.broadcastMounts(for: snap, containerId: eventId, broadcaster: broadcaster)
@@ -317,6 +318,10 @@ extension ContainerStartRoute {
     /// Refreshes `ContainerInfoCache` (when `refreshCache` is true) and arms `observeExit`
     /// to watch the container's next exit. Shared by `/start`, `/restart`, and the internal
     /// restart-policy restart so all three leave the same cache/observer state behind.
+    /// - Parameter freshLogBoot: true from the restart paths — Apple truncates
+    ///   the container's log file at every boot, so the timestamped log journal
+    ///   must reset and a fresh follower must take over; a plain `/start` on an
+    ///   already-followed running container leaves the existing follower alone.
     static func armRestartObserver(
         nativeId: String,
         eventId: String,
@@ -331,7 +336,8 @@ extension ContainerStartRoute {
         dnsServer: PodmDNSServer?,
         healthManager: HealthCheckManager?,
         client: ClientContainerProtocol,
-        logger: Logger
+        logger: Logger,
+        freshLogBoot: Bool = false
     ) async {
         if refreshCache {
             await ContainerInfoCache.shared.set(hexId: eventId, nativeId: nativeId, image: image, labels: labels, ip: ip)
@@ -341,6 +347,14 @@ extension ContainerStartRoute {
         // explicitly-stopped; clear it here so the new observer doesn't mistake a manual
         // restart for a stop that should suppress restart-policy enforcement on the next exit.
         _ = await ContainerRestartState.shared.consumeExplicitlyStopped(id: nativeId)
+
+        // Arm the log-journal follower for this boot alongside the exit
+        // observer: it records per-line arrival times into
+        // ContainerLogJournal, which backs `docker logs --since/--until` and
+        // accurate historical `--timestamps` (Apple's log stream carries no
+        // write-time metadata of its own).
+        await ContainerLogFollowerRegistry.shared.arm(
+            nativeId: nativeId, client: client, logger: logger, freshBoot: freshLogBoot)
 
         ContainerStartRoute.observeExit(
             nativeId: nativeId, eventId: eventId, image: image, name: name, labels: labels,

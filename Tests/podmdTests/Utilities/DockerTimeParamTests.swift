@@ -142,4 +142,24 @@ struct DockerTimeParamTests {
         #expect(a < b)
         #expect(!(b < a))
     }
+
+    // Ported from the logs window's parser (now served by the same enum):
+    // Go durations resolve relative to now, per moby's GetTimestamp.
+    @Test("Go durations resolve relative to now")
+    func durations() throws {
+        let before = UInt64(Date().timeIntervalSince1970 * 1_000_000_000)
+        let since = try DockerTimeParam.unixNanoseconds("42m")
+        let after = UInt64(Date().timeIntervalSince1970 * 1_000_000_000)
+        let fortyTwoMinutes: UInt64 = 42 * 60 * 1_000_000_000
+        #expect(since != nil)
+        if let since {
+            #expect(since <= before - fortyTwoMinutes + 50_000_000)
+            #expect(since >= after - fortyTwoMinutes - 50_000_000)
+        }
+        #expect(try DockerTimeParam.unixNanoseconds("1h30m") != nil)
+        #expect(try DockerTimeParam.unixNanoseconds("500ms") != nil)
+        // "0" is never a duration (moby excludes it explicitly).
+        #expect(try DockerTimeParam.unixNanoseconds("0") == 0)
+    }
+
 }

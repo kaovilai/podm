@@ -80,7 +80,8 @@ extension ContainerRestartRoute {
                     dnsServer: dnsServer,
                     healthManager: healthManager,
                     client: client,
-                    logger: req.logger
+                    logger: req.logger,
+                    freshLogBoot: true
                 )
             }
 

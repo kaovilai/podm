@@ -70,6 +70,10 @@ enum DockerTimeParam {
             UInt64(max(nanoSinceEpoch, 0))
         }
 
+        var unixNanoseconds: UInt64 {
+            UInt64(max(nanoSinceEpoch, 0))
+        }
+
         static func < (lhs: Timestamp, rhs: Timestamp) -> Bool {
             lhs.nanoSinceEpoch < rhs.nanoSinceEpoch
         }
@@ -88,6 +92,52 @@ enum DockerTimeParam {
 
     /// Parses an optional query value. `nil`/empty → `nil` (no bound);
     /// anything unparseable → `ParseError.invalid` (the route maps it to 400).
+    /// Parses `value` to unix NANOSECONDS — the convenience entry point the
+    /// logs window uses (`since`/`until` compare against journal nanos).
+    /// Falls back to moby's `GetTimestamp` duration branch: a Go duration
+    /// string ("10m") resolves relative to now; `"0"` is excluded there and
+    /// parses as 0 (callers treat it per moby — until=0 ignored,
+    /// since=0 filters nothing).
+    static func unixNanoseconds(_ value: String?) throws -> UInt64? {
+        guard let value, !value.isEmpty else { return nil }
+        // The timestamp parser THROWS on unparseable values (routes map that
+        // to 400) — here a throw just means "not a timestamp", and the Go
+        // duration branch below gets its chance before we rethrow.
+        if let stamp = (try? Self.parse(value as String?)) ?? nil {
+            return stamp.unixNanoseconds
+        }
+        if value != "0", let interval = goDuration(value) {
+            let now = UInt64(max(0, Date().timeIntervalSince1970 * 1_000_000_000))
+            let delta = UInt64(min(interval, TimeInterval(now) / 1e9) * 1_000_000_000)
+            return now - delta
+        }
+        throw ParseError.invalid(value)
+    }
+
+    /// Parses a Go duration (`"1h30m"`, `"500ms"`, `"1.5s"`) to seconds, or
+    /// nil when the value is not a duration at all.
+    private static func goDuration(_ value: String) -> TimeInterval? {
+        let units: [(suffix: String, seconds: TimeInterval)] = [
+            ("ns", 1e-9), ("us", 1e-6), ("µs", 1e-6), ("μs", 1e-6), ("ms", 1e-3),
+            ("s", 1), ("m", 60), ("h", 3600),
+        ]
+        var remaining = Substring(value)
+        var total = 0.0
+        var matchedAny = false
+        while !remaining.isEmpty {
+            guard let unit = units.first(where: { remaining.hasSuffix($0.suffix) }) else { return nil }
+            remaining = remaining.dropLast(unit.suffix.count)
+            let numberPart = remaining.reversed().prefix { $0.isNumber || $0 == "." }
+            guard !numberPart.isEmpty else { return nil }
+            let number = String(numberPart.reversed())
+            remaining = remaining.dropLast(number.count)
+            guard let magnitude = Double(number), magnitude >= 0 else { return nil }
+            total += magnitude * unit.seconds
+            matchedAny = true
+        }
+        return matchedAny ? total : nil
+    }
+
     static func parse(_ value: String?) throws -> Timestamp? {
         guard let value, !value.isEmpty else { return nil }
         return try parse(value)

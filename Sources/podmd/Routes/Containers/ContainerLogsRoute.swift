@@ -43,6 +43,22 @@ extension ContainerLogsRoute {
             // Tty setting, so the framing here must match it.
             let isTTY = container.configuration.initProcess.terminal
 
+            // moby parses `since`/`until` after resolving the container and
+            // rejects unparseable values. The docker CLI converts durations
+            // ("42m") and RFC3339 timestamps to unix seconds client-side;
+            // DockerTimeParam accepts those forms too. `until=0` is treated as
+            // absent, exactly like dockerd.
+            let since: UInt64?
+            let until: UInt64?
+            do {
+                since = try DockerTimeParam.unixNanoseconds(req.query["since"] as String?)
+                var parsedUntil = try DockerTimeParam.unixNanoseconds(req.query["until"] as String?)
+                if parsedUntil == 0 { parsedUntil = nil }
+                until = parsedUntil
+            } catch {
+                throw Abort(.badRequest, reason: "Bad parameters: invalid since/until timestamp: \(error)")
+            }
+
             // always use the container's log, not the boot of the container
             let boot = false
             let fhs = try await ContainerClient().logs(id: container.id)
@@ -52,6 +68,19 @@ extension ContainerLogsRoute {
             let follow = MobyBool.queryValue(req.query["follow"] as String?)
             let timestamps = MobyBool.queryValue(req.query["timestamps"] as String?)
 
+            // Timestamped or windowed reads need per-line write times, which
+            // Apple's log stream does not carry: the journal the background
+            // follower records while the container runs supplies them for
+            // backlog lines (read time is the fallback for lines it does not
+            // cover). Plain reads skip the journal entirely.
+            let windowed = timestamps || since != nil || until != nil
+            let journalEntries =
+                windowed
+                ? await ContainerLogJournal.shared.entries(nativeId: container.id)
+                : []
+            // `until` in the past bounds the response: backlog only, no stream.
+            let followActive = follow && (until == nil || until! > ContainerLogJournal.currentUnixNano())
+
             let body = Response.Body.idleTracked(stream: { writer in
                 Task.detached {
                     var buffer = Data()
@@ -60,8 +89,14 @@ extension ContainerLogsRoute {
                     // newline yet, then closes out the response. Only call this once
                     // the stream has genuinely ended — flushing on a mid-stream read
                     // gap could stamp and emit a line the writer hasn't finished yet.
+                    // The trailing line can never be journal-covered (the journal
+                    // records only complete lines), so it is stamped with the flush
+                    // time and still has to pass the since/until window, if any.
                     func finish() {
-                        ContainerLogsRoute.flushFinalLogLine(buffer, ttyMode: isTTY, timestamps: timestamps) { outputBuffer in
+                        ContainerLogsRoute.flushFinalLogLine(
+                            buffer, ttyMode: isTTY, timestamps: timestamps, since: since, until: until,
+                            emitWithoutTimestamps: windowed
+                        ) { outputBuffer in
                             _ = writer.write(.buffer(outputBuffer))
                         }
                         try? fileHandle.close()
@@ -69,7 +104,28 @@ extension ContainerLogsRoute {
                     }
 
                     do {
-                        if let tail {
+                        if windowed {
+                            // tail=0 without follow returns an empty backlog; skip
+                            // reading the log at all, like the plain tail path.
+                            if tail == 0, !followActive {
+                                finish()
+                                return
+                            }
+                            buffer = try await ContainerLogsRoute.scanWindowedBacklog(
+                                read: { try fileHandle.read(upToCount: 4096) },
+                                journalEntries: journalEntries,
+                                since: since,
+                                until: until,
+                                tail: tail,
+                                ttyMode: isTTY,
+                                timestamps: timestamps,
+                                nowNanos: { ContainerLogJournal.currentUnixNano() }
+                            ) { frame in
+                                // Await each write so a client disconnect aborts the
+                                // response instead of queueing the whole window.
+                                try await writer.write(.buffer(frame)).get()
+                            }
+                        } else if let tail {
                             // tail=0 without follow returns an empty backlog; skip
                             // reading the log at all. With follow the read-through
                             // below still runs so the handle reaches EOF and the
@@ -112,7 +168,7 @@ extension ContainerLogsRoute {
                             }
                         }
 
-                        if !follow {
+                        if !followActive {
                             finish()
                             return
                         }
@@ -128,6 +184,51 @@ extension ContainerLogsRoute {
                     // libdispatch trap. Polling is robust. Exit once the
                     // container is no longer running.
                     let logFollowClient = ContainerClient()
+                    if windowed {
+                        // Windowed follow: same polling contract, but each live
+                        // line is stamped with its arrival time and the window
+                        // keeps applying — a line (or the wall clock) passing
+                        // `until` ends the read, matching moby.
+                        follow: while true {
+                            var gotData = false
+                            var frames: [ByteBuffer] = []
+                            do {
+                                while let data = try fileHandle.read(upToCount: 4096), !data.isEmpty {
+                                    gotData = true
+                                    buffer.append(data)
+                                    while let newline = buffer.firstIndex(of: 0x0A) {
+                                        let line = buffer.subdata(in: buffer.startIndex..<buffer.index(after: newline))
+                                        buffer = buffer.subdata(in: buffer.index(after: newline)..<buffer.endIndex)
+                                        let unixNano = ContainerLogJournal.currentUnixNano()
+                                        if let since, unixNano < since { continue }
+                                        if let until, unixNano > until { break follow }
+                                        frames.append(
+                                            ContainerLogsRoute.stampedFrame(
+                                                line, unixNano: unixNano, ttyMode: isTTY, timestamps: timestamps))
+                                    }
+                                }
+                            } catch {
+                                break
+                            }
+                            for frame in frames {
+                                do {
+                                    try await writer.write(.buffer(frame)).get()
+                                } catch {
+                                    break follow
+                                }
+                            }
+                            // A future `until` also bounds the follow on wall
+                            // clock alone, so the response cannot outlive it.
+                            if let until, ContainerLogJournal.currentUnixNano() > until { break }
+                            if !gotData {
+                                let current = try? await logFollowClient.get(id: container.id)
+                                if current == nil || current?.status != .running { break }
+                                try? await Task.sleep(for: .milliseconds(150))
+                            }
+                        }
+                        finish()
+                        return
+                    }
                     follow: while true {
                         var gotData = false
                         var frames: [ByteBuffer] = []
@@ -249,16 +350,98 @@ extension ContainerLogsRoute {
         return Data(remaining)
     }
 
-    /// Stamps and frames a trailing line left over with no terminating newline —
-    /// called once the stream has genuinely ended, not on a mid-stream read gap that
-    /// might just mean the writer hasn't flushed the rest of the line yet.
-    static func flushFinalLogLine(_ buffer: Data, ttyMode: Bool, timestamps: Bool, writeOutput: (ByteBuffer) -> Void) {
-        guard timestamps, !buffer.isEmpty else { return }
-        emitFrame(timestampPrefix() + buffer, ttyMode: ttyMode, writeOutput: writeOutput)
+    /// Reads the Apple log stream through once, resolving each complete line's
+    /// write time from the journal (falling back to read time for lines the
+    /// journal does not cover), applying the `since`/`until` window, and
+    /// emitting passing lines as framed output. With `tail` set the passing
+    /// lines are kept in a ring and emitted at the end — moby applies `tail` to
+    /// the window-filtered set — bounded by the tail count; without it they are
+    /// emitted as they are scanned, so memory stays bounded by the window
+    /// rather than the whole log. Returns the trailing partial line, like
+    /// `processDockerLogFrames`, so a follow can carry it onward.
+    static func scanWindowedBacklog(
+        read: () throws -> Data?,
+        journalEntries: [ContainerLogJournal.Entry],
+        since: UInt64?,
+        until: UInt64?,
+        tail: Int?,
+        ttyMode: Bool,
+        timestamps: Bool,
+        nowNanos: () -> UInt64,
+        emit: (ByteBuffer) async throws -> Void
+    ) async throws -> Data {
+        var alignment = ContainerLogJournal.Alignment(entries: journalEntries)
+        var ring: [(line: Data, unixNano: UInt64)]? = tail != nil ? [] : nil
+        var pending = Data()
+        while let chunk = try read(), !chunk.isEmpty {
+            pending.append(chunk)
+            while let newline = pending.firstIndex(of: 0x0A) {
+                let line = pending.subdata(in: pending.startIndex..<pending.index(after: newline))
+                pending = pending.subdata(in: pending.index(after: newline)..<pending.endIndex)
+                let unixNano = alignment.timestamp(for: line) ?? nowNanos()
+                // moby: lines written before `since` or after `until` are dropped.
+                if let since, unixNano < since { continue }
+                if let until, unixNano > until { continue }
+                if ring != nil {
+                    ring!.append((line, unixNano))
+                    if let tail, ring!.count > tail { ring!.removeFirst() }
+                } else {
+                    try await emit(stampedFrame(line, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
+                }
+            }
+        }
+        if let ring {
+            for (line, unixNano) in ring {
+                try await emit(stampedFrame(line, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
+            }
+        }
+        return pending
     }
 
-    private static func timestampPrefix() -> Data {
-        Data("\(AppleContainerTimestampResolver.iso8601Timestamp(Date())) ".utf8)
+    /// Frames one windowed line for output, prefixing the resolved write time
+    /// (journal-recorded, or read/arrival time) when `timestamps` is set.
+    static func stampedFrame(_ line: Data, unixNano: UInt64, ttyMode: Bool, timestamps: Bool) -> ByteBuffer {
+        let payload = timestamps ? timestampPrefix(unixNano) + line : line
+        var outputBuffer = ByteBufferAllocator().buffer(capacity: payload.count + (ttyMode ? 0 : 8))
+        outputBuffer.writeDockerFrame(streamType: .stdout, data: payload, ttyMode: ttyMode)
+        return outputBuffer
+    }
+
+    /// Stamps and frames a trailing line left over with no terminating newline —
+    /// called once the stream has genuinely ended, not on a mid-stream read gap that
+    /// might just mean the writer hasn't flushed the rest of the line yet. The
+    /// trailing line can never be journal-covered (the journal records only
+    /// complete lines), so it is stamped with the flush time and must still pass
+    /// the since/until window, if any.
+    ///
+    /// In the plain (non-windowed) path, an unstamped trailing line was already
+    /// emitted inline by `processDockerLogFrames`, so flushing there would
+    /// double-emit — hence `emitWithoutTimestamps` is only set by the windowed
+    /// path, whose scanner holds partial lines back for window filtering.
+    static func flushFinalLogLine(
+        _ buffer: Data,
+        ttyMode: Bool,
+        timestamps: Bool,
+        since: UInt64? = nil,
+        until: UInt64? = nil,
+        nowNanos: () -> UInt64 = { ContainerLogJournal.currentUnixNano() },
+        emitWithoutTimestamps: Bool = false,
+        writeOutput: (ByteBuffer) -> Void
+    ) {
+        guard !buffer.isEmpty, timestamps || emitWithoutTimestamps else { return }
+        let unixNano = nowNanos()
+        if let since, unixNano < since { return }
+        if let until, unixNano > until { return }
+        guard timestamps else {
+            emitFrame(buffer, ttyMode: ttyMode, writeOutput: writeOutput)
+            return
+        }
+        emitFrame(timestampPrefix(unixNano) + buffer, ttyMode: ttyMode, writeOutput: writeOutput)
+    }
+
+    private static func timestampPrefix(_ unixNano: UInt64? = nil) -> Data {
+        let date = unixNano.map { Date(timeIntervalSince1970: Double($0) / 1_000_000_000) } ?? Date()
+        return Data("\(AppleContainerTimestampResolver.iso8601Timestamp(date)) ".utf8)
     }
 
     /// Match the container's TTY mode: a TTY produces a raw, unmultiplexed stream, while
