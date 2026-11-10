@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import Vapor
+import os
 
 /// Podman's LOCAL secret store family — `podman secret create/ls/inspect/rm/exists`
 /// over the bindings client. NOT the Docker swarm `/secrets` surface (that stays a
@@ -281,9 +282,12 @@ extension LibpodSecretsRoute {
     /// immune by construction because Go's regexp package is RE2 (linear
     /// time, no backtracking). Every match therefore runs off the event
     /// loop under a deadline; a pattern that exceeds the budget is a client
-    /// error. A blown match keeps spinning on its Dispatch thread
-    /// (NSRegularExpression cannot be interrupted), but the daemon stays
-    /// responsive.
+    /// error, and blown matches are capped (`maxBlownFilterMatches`) so
+    /// repeated hostile filters cannot accumulate runaway threads — at
+    /// saturation, filter matching is refused until the daemon restarts. A
+    /// blown match keeps spinning on its Dispatch thread (NSRegularExpression
+    /// cannot be interrupted), but the daemon stays responsive and the
+    /// damage stays bounded.
     static func passesFilters(_ secret: StoredSecret, filters: [String: [String]]) async throws -> Bool {
         for (key, values) in filters {
             let target = key == "name" ? secret.name : secret.id
@@ -315,9 +319,35 @@ extension LibpodSecretsRoute {
     /// an exponential blowup.
     private static let matchBudgetMs = 200
 
+    /// Admission control for filter matching: ICU cannot be interrupted, so
+    /// a blown match keeps spinning on its Dispatch thread until it
+    /// finishes — for an exponential pattern, effectively never. Bounding
+    /// the damage therefore means bounding how many blown matches are
+    /// tolerated: once this many have blown their budget, filter matching
+    /// is refused outright until the daemon restarts. Honest patterns are
+    /// unaffected until saturation (podman avoids the entire class: Go's
+    /// regexp is RE2, linear time, no backtracking).
+    static let maxBlownFilterMatches = 8
+    private static let blownFilterMatches = OSAllocatedUnfairLock(initialState: 0)
+
+    /// Tests only: the blown-match accounting is process-global and every
+    /// blown test match burns a real slot — reset it so suites stay
+    /// independent.
+    static func resetFilterMatcherAccounting() {
+        blownFilterMatches.withLock { $0 = 0 }
+    }
+
     /// Runs one regex match on a Dispatch global queue, racing a deadline:
     /// whichever finishes first resumes the continuation (exactly once).
+    /// A blown match is accounted for PERMANENTLY (see
+    /// `maxBlownFilterMatches`) — ICU offers no way to stop it.
     private static func timedMatch(_ regex: NSRegularExpression, in target: String) async throws -> Bool {
+        if blownFilterMatches.withLock({ $0 >= maxBlownFilterMatches }) {
+            throw Abort(
+                .badRequest,
+                reason: "filter matching is saturated by pathological patterns — refusing further matches until the daemon restarts"
+            )
+        }
         let once = ResumeOnce()
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
             once.install(continuation)
@@ -326,6 +356,9 @@ extension LibpodSecretsRoute {
                 once.resume(.success(regex.firstMatch(in: target, range: range) != nil))
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(Self.matchBudgetMs)) {
+                // The match is presumed still spinning (ICU cannot be
+                // interrupted) — account for it permanently.
+                blownFilterMatches.withLock { $0 += 1 }
                 once.resume(
                     .failure(
                         Abort(

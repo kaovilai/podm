@@ -26,7 +26,11 @@ import VaporTesting
 /// - The store survives re-instantiation from the same directory, with 0600
 ///   payload files (podman filedriver parity), and repairs interrupted
 ///   persists (orphan payload GC) on load.
-@Suite("LibpodSecretsRoute")
+// Serialized: the catastrophic-regex tests burn global filter-matcher
+// slots (see LibpodSecretsRoute.maxBlownFilterMatches); running them
+// concurrently with the other filter tests would saturate the matcher
+// and fail their assertions.
+@Suite("LibpodSecretsRoute", .serialized)
 struct LibpodSecretsRouteTests {
 
     // MARK: - Create
@@ -576,18 +580,35 @@ struct LibpodSecretsRouteTests {
         }
     }
 
-    @Test("a pathological filter pattern is rejected by the matching budget, not a hang")
-    func catastrophicRegexRejectedByBudget() async throws {
+    @Test("pathological filter patterns: budget rejection, then saturation cap")
+    func catastrophicRegexBudgetAndSaturation() async throws {
+        // The matcher accounting is process-global; start clean so the
+        // burn count below is exact.
+        LibpodSecretsRoute.resetFilterMatcherAccounting()
+        defer { LibpodSecretsRoute.resetFilterMatcherAccounting() }
         try await withSecretsApp { app in
-            // (a+)+b against a long run of a's is exponential in ICU's
+            // (a+)+b against a run of a's is exponential in ICU's
             // backtracking engine; podman is immune (Go regexp is RE2,
-            // linear time). The match runs under a 200ms deadline and the
-            // pattern is rejected as a client error.
-            _ = try await createSecret(app, name: String(repeating: "a", count: 40), payload: "x")
-            try await app.testing().test(.GET, "/v1.51/libpod/secrets/json?filters=%7B%22name%22%3A%5B%22(a%2B)%2Bb%22%5D%7D") {
-                res async in
+            // linear time). 25 a's blows the 200ms budget but terminates
+            // in ~1s, keeping the leaked thread's CPU cost bounded.
+            _ = try await createSecret(app, name: String(repeating: "a", count: 25), payload: "x")
+            let hostile = "/v1.51/libpod/secrets/json?filters=%7B%22name%22%3A%5B%22(a%2B)%2Bb%22%5D%7D"
+            try await app.testing().test(.GET, hostile) { res async in
                 #expect(res.status == .badRequest)
                 #expect(res.body.string.contains("matching budget"))
+            }
+            // Burn the remaining budget slots; each is accounted
+            // permanently (ICU cannot be interrupted).
+            for _ in 1..<LibpodSecretsRoute.maxBlownFilterMatches {
+                try await app.testing().test(.GET, hostile) { res async in
+                    #expect(res.status == .badRequest)
+                }
+            }
+            // Saturated: further filter matching is refused outright,
+            // without spawning another matcher.
+            try await app.testing().test(.GET, hostile) { res async in
+                #expect(res.status == .badRequest)
+                #expect(res.body.string.contains("saturated"))
             }
         }
     }
