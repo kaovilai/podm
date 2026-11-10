@@ -503,8 +503,6 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `GET` | `/libpod/volumes/{name}/exists` | libpod |  |
 | ✅ | `GET` | `/libpod/volumes/{name}/json` | libpod |  |
 
-_Generated 2026-11-10T01:20:24Z by the docs workflow._
-
 <!-- podm:route-coverage:end -->
 
 ## Project status

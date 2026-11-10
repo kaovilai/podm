@@ -15,10 +15,21 @@ import Vapor
 /// lookup/validation code paths (a bogus container/image reference is a 404
 /// long before any VM or store mutation).
 enum RouteRegistry {
-    static func bootstrap(_ app: Application) async throws -> (appSupportUrl: URL, systemConfig: ContainerSystemConfig) {
+    /// - Parameter appSupportDirectory: overrides where podm's own
+    ///   app-support-managed state lives (notably the restart-policy override
+    ///   store, a singleton). The daemon passes nothing and gets the real
+    ///   `~/Library/Application Support/com.apple.container`; the conformance
+    ///   test passes a throwaway directory so `RestartPolicyOverrideStore.shared`
+    ///   is never pointed at a developer's real store by a test boot.
+    static func bootstrap(
+        _ app: Application,
+        appSupportDirectory: URL? = nil
+    ) async throws -> (appSupportUrl: URL, systemConfig: ContainerSystemConfig) {
         // Define app support path early since it's needed by multiple services
-        let folderPath = ("\(NSHomeDirectory())/Library/Application Support/com.apple.container")
-        let appleContainerAppSupportUrl = URL(fileURLWithPath: folderPath)
+        let appleContainerAppSupportUrl =
+            appSupportDirectory
+            ?? URL(
+                fileURLWithPath: "\(NSHomeDirectory())/Library/Application Support/com.apple.container")
 
         let systemConfig: ContainerSystemConfig
         do {

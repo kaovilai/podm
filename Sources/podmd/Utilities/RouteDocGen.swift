@@ -39,7 +39,13 @@ enum RouteDocGen {
 
     /// The README section body — a summary line plus the full table. CI splices
     /// this between the README's route-coverage markers.
-    static func markdown(_ rows: [RouteRow], generatedAt: Date = Date()) -> String {
+    ///
+    /// Deterministic by design: no wall-clock timestamp in the output, so a run
+    /// over an unchanged route surface produces byte-identical Markdown and the
+    /// docs workflow takes its "README unchanged" branch instead of committing
+    /// timestamp churn daily. The route table itself (counts, rows) only changes
+    /// when the surface does, which is exactly what should produce a commit.
+    static func markdown(_ rows: [RouteRow]) -> String {
         let supported = rows.filter(\.supported).count
         let stubs = rows.count - supported
         var out = """
@@ -61,8 +67,6 @@ enum RouteDocGen {
             let reason = row.reason.isEmpty ? "" : row.reason.replacingOccurrences(of: "|", with: "\\|")
             out += "| \(status) | `\(row.method)` | `\(row.pattern)` | \(row.dialect) | \(reason) |\n"
         }
-        let formatter = ISO8601DateFormatter()
-        out += "\n_Generated \(formatter.string(from: generatedAt)) by the docs workflow._\n"
         return out
     }
 

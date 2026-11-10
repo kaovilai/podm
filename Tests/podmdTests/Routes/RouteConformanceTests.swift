@@ -52,7 +52,9 @@ struct RouteConformanceTests {
     /// carrying podm's not-implemented / not-supported marker strings (see
     /// `NotImplemented.respond` and `AppleContainerNotSupported.respond`).
     private actor StubProbe {
-        private(set) var outcome = ProbeOutcome.live
+        /// nil = no response was recorded (the request failed before the
+        /// response closure ran) — never silently classified as live.
+        private(set) var outcome: ProbeOutcome?
 
         func record(status: HTTPResponseStatus, body: String) {
             let isStub =
@@ -90,7 +92,14 @@ struct RouteConformanceTests {
     @Test("every registered route answers; stub responses appear only in the manifest")
     func registeredSurfaceConforms() async throws {
         try await withApp(configure: { app in
-            _ = try await RouteRegistry.bootstrap(app)
+            // Throwaway app-support directory: `RestartPolicyOverrideStore.shared`
+            // is a singleton, so booting the production registry in-process must
+            // never aim it (or anything else under app support) at the developer's
+            // real store.
+            let scratchAppSupport = FileManager.default.temporaryDirectory
+                .appendingPathComponent("podm-conformance-\(UUID().uuidString)", isDirectory: true)
+            try? FileManager.default.createDirectory(at: scratchAppSupport, withIntermediateDirectories: true)
+            _ = try await RouteRegistry.bootstrap(app, appSupportDirectory: scratchAppSupport)
         }) { app in
             let routes = app.regexRouter.registeredRoutes
             // The full production surface must be present — a configure()
@@ -127,13 +136,12 @@ struct RouteConformanceTests {
                 // never terminates with dummy input is "engaged" (it answered
                 // with a stream), which is all this test asserts.
                 let probeTask = Task<ProbeOutcome?, Never> {
-                    try? await app.testing().test(route.method, path) { res in
+                    _ = try? await app.testing().test(route.method, path) { res in
                         await probe.record(status: res.status, body: res.body.string ?? "")
                     }
                     return await probe.outcome
                 }
-                let outcome = await ContainerTopUtility.raceFirstOrTimeout(
-                    probeTask, timeoutNs: 5_000_000_000)
+                let outcome = await AsyncRace.firstOrTimeout(probeTask, timeoutNs: 5_000_000_000)
 
                 switch outcome {
                 case nil:
@@ -141,6 +149,10 @@ struct RouteConformanceTests {
                     // stub by construction; the leaked task dies with the
                     // test process.
                     streamingSkips += 1
+                case .some(nil):
+                    // The request failed before any response was recorded —
+                    // must not masquerade as a healthy route.
+                    failures.append("\(key) produced no response (request failed before the response phase)")
                 case .some(.stub):
                     stubsSeen.insert(key)
                     if !Self.deliberateStubRoutes.contains(key) {
