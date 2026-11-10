@@ -320,6 +320,19 @@ actor SecretStore {
         do {
             try persist([.metadata(secrets), .payload(payloads)])
         } catch {
+            if let storeError = error as? StoreError,
+                case .persistFailed(_, let writeIndex) = storeError, writeIndex >= 1
+            {
+                // Only the payload TRIM failed — the deletion already
+                // committed to the metadata on disk, so restoring the
+                // secret in memory would disagree with disk: a restart
+                // loses it while the next successful mutation writes it
+                // back (resurrection). The deletion stands; the un-trimmed
+                // payload entry is an orphan that load prunes.
+                throw error
+            }
+            // The metadata write failed — nothing committed, so memory
+            // keeps mirroring disk: the secret stays, fully retryable.
             secrets = savedSecrets
             payloads = savedPayloads
             throw error

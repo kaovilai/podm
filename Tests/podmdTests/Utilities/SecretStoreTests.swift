@@ -264,6 +264,37 @@ struct SecretStoreTests {
         #expect(listed.count == 1)
     }
 
+    @Test("a remove whose payload trim fails keeps the committed deletion")
+    func failedRemoveTrimKeepsDeletion() async throws {
+        let dir = uniqueTempDir()
+        let filedriverDir = dir.appendingPathComponent("podm-secrets/filedriver")
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: filedriverDir.path)
+            try? FileManager.default.removeItem(at: dir)
+        }
+        let store = SecretStore(storageDirectory: dir)
+        let created = try await store.create(
+            name: "half-removed", data: Data("leftover".utf8), driver: nil,
+            labels: [:], driverOptions: [:], replace: false, ignore: false
+        )
+        // Read-only PAYLOAD dir, writable metadata dir: remove's metadata
+        // write commits the deletion, the payload trim fails.
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: filedriverDir.path)
+        await #expect(throws: SecretStore.StoreError.self) {
+            _ = try await store.remove(nameOrID: "half-removed")
+        }
+        // The deletion stands in memory — it already committed to disk.
+        #expect(await store.lookup(nameOrID: "half-removed") == nil)
+        // "Crash" + reload: the metadata no longer references the secret;
+        // the un-trimmed payload entry is an orphan that load prunes —
+        // the secret must NOT resurrect.
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: filedriverDir.path)
+        let reloaded = SecretStore(storageDirectory: dir)
+        #expect(await reloaded.lookup(nameOrID: "half-removed") == nil)
+        #expect(await reloaded.payload(id: created.id) == nil)
+        #expect(await reloaded.list().isEmpty)
+    }
+
     private func uniqueTempDir() -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
