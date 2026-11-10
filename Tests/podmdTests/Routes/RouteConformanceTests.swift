@@ -100,6 +100,7 @@ struct RouteConformanceTests {
     private static let storeWideMutationRoutes: Set<String> = [
         "POST /build",
         "POST /build/prune",
+        "POST /libpod/build",
         "POST /containers/prune",
         "POST /libpod/containers/prune",
         "POST /images/prune",
