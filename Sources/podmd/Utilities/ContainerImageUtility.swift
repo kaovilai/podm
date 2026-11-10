@@ -155,6 +155,7 @@ enum ContainerImageUtility {
         platform: Platform,
         config: SynthesizedImageConfig,
         message: String?,
+        author: String? = nil,
         reference: String?,
         logger: Logger,
         maxExpandedLayerSize: Int = ContainerImageUtility.maxExpandedLayerSize
@@ -189,6 +190,11 @@ enum ContainerImageUtility {
         ]
         if let variant = platform.variant {
             imageConfigDict["variant"] = variant
+        }
+        // OCI top-level `author` (docker commit --author). Import passes nil;
+        // commit seeds it from the query parameter.
+        if let author, !author.isEmpty {
+            imageConfigDict["author"] = author
         }
 
         let configData = try JSONSerialization.data(withJSONObject: imageConfigDict, options: [])

@@ -50,6 +50,35 @@ protocol ClientImageProtocol: Sendable {
     ) async throws -> (reference: String?, digest: String)
 }
 
+/// Commit-specific image operations (`docker commit` / `podman commit`).
+/// Split from `ClientImageProtocol` so the commit route's tests can stub just
+/// the commit surface without re-implementing the full image client; the
+/// production conformer is `ClientImageService` (same file, so it can reach
+/// the private `containerSystemConfig`).
+protocol ClientImageCommitProtocol: Sendable {
+    /// Best-effort parent-image run config used to seed the committed image's
+    /// config. Returns nil when the reference no longer resolves (image
+    /// deleted, digest missing) or its config blob can't be read — commit then
+    /// proceeds with container-only data, the same fallback inspect uses.
+    func commitParentConfig(reference: String, platform: Platform) async -> ContainerizationOCI.ImageConfig?
+
+    /// `docker commit`: the same single-layer OCI synthesis pipeline
+    /// `importImage` uses, with the layer sourced from the container's
+    /// exported rootfs tarball and the config seeded from the container +
+    /// parent image (already merged by the caller) rather than blank.
+    func commitImage(
+        tarPath: URL,
+        repo: String?,
+        tag: String?,
+        comment: String?,
+        author: String?,
+        config: SynthesizedImageConfig,
+        platform: Platform,
+        appleContainerAppSupportUrl: URL,
+        logger: Logger
+    ) async throws -> (reference: String?, digest: String)
+}
+
 extension ClientImageProtocol {
     func list() async throws -> [ClientImage] {
         try await list(includeSystemImages: false)
@@ -890,5 +919,58 @@ struct ClientImageService: ClientImageProtocol {
     /// already-cached image, so this is used unconditionally — docker-java accepts it either way.
     static func pulledStatusMessage(for reference: String) -> String {
         "Status: Downloaded newer image for \(reference)"
+    }
+}
+
+extension ClientImageService: ClientImageCommitProtocol {
+    func commitParentConfig(reference: String, platform: Platform) async -> ContainerizationOCI.ImageConfig? {
+        guard
+            let image = try? await ClientImage.get(
+                reference: reference, containerSystemConfig: containerSystemConfig)
+        else { return nil }
+        return (try? await image.config(for: platform))?.config
+    }
+
+    func commitImage(
+        tarPath: URL,
+        repo: String?,
+        tag: String?,
+        comment: String?,
+        author: String?,
+        config: SynthesizedImageConfig,
+        platform: Platform,
+        appleContainerAppSupportUrl: URL,
+        logger: Logger
+    ) async throws -> (reference: String?, digest: String) {
+        // Same repo/tag grammar as import (moby's httputils.RepoTagReference):
+        // no repo → untagged, empty tag → latest, digest references rejected.
+        let reference = try resolveImportReference(repo: repo, tag: tag)
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let ociLayoutPath = tempDir.appendingPathComponent("oci-layout")
+        try FileManager.default.createDirectory(at: ociLayoutPath, withIntermediateDirectories: true)
+
+        _ = try ContainerImageUtility.buildSingleLayerOCILayout(
+            tarPath: tarPath,
+            ociLayoutPath: ociLayoutPath,
+            platform: platform,
+            config: config,
+            message: comment,
+            author: author,
+            reference: reference,
+            logger: logger
+        )
+
+        let imageStore = try ImageStore(path: appleContainerAppSupportUrl)
+        let images = try await imageStore.load(from: ociLayoutPath, progress: nil)
+        guard let image = images.first else {
+            throw ClientImageError.notFound(id: reference ?? "committed image")
+        }
+
+        logger.info("Committed image \(image.reference) (\(image.digest)) from a container rootfs")
+        return (reference, image.digest)
     }
 }
