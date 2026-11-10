@@ -105,7 +105,7 @@ func configure(_ app: Application) async throws {
             guard !ClientContainerService.isDNSSidecar(container)
             else { continue }
 
-            ContainerStartRoute.registerDNSAliasesOnResume(container: container, dnsServer: dnsServer, logger: app.logger)
+            await ContainerStartRoute.registerDNSAliasesOnResume(container: container, dnsServer: dnsServer, logger: app.logger)
 
             // Resume healthcheck loop if the container has one.
             guard let json = container.configuration.labels[HealthCheckManager.healthcheckLabel],

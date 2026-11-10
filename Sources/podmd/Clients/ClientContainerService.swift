@@ -113,7 +113,14 @@ struct ClientContainerService: ClientContainerProtocol {
     func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] {
         let allContainers = Self.withoutDNSSidecars(try await containerClient.withClient { try await $0.list() })
         let running = showAll ? allContainers : allContainers.filter { $0.status == .running }
-        return Self.applyFilters(running, filters: filters, allContainers: allContainers)
+        // Rename overrides shadow the native id as the Docker-visible name;
+        // resolve them once here so the (sync) filter stage can match them.
+        let overrides = await ContainerNameOverrideStore.shared.snapshot()
+        let effectiveNames = Dictionary(
+            uniqueKeysWithValues: allContainers.map {
+                ($0.id, overrides[DockerContainerID.hexId(for: $0)] ?? $0.id)
+            })
+        return Self.applyFilters(running, filters: filters, allContainers: allContainers, effectiveNames: effectiveNames)
     }
 
     static func withoutDNSSidecars(_ snapshots: [ContainerSnapshot]) -> [ContainerSnapshot] {
@@ -127,10 +134,14 @@ struct ClientContainerService: ClientContainerProtocol {
     /// Applies parsed Docker container filters to a snapshot list.
     /// `allContainers` is the unfiltered set used by `before`/`since` for
     /// relative ordering; defaults to `containers` when not available.
+    /// `effectiveNames` maps native id → Docker-visible name (a recorded
+    /// rename override, else the native id) so the `name` filter matches
+    /// what clients actually see.
     static func applyFilters(
         _ containers: [ContainerSnapshot],
         filters: [String: [String]],
-        allContainers: [ContainerSnapshot] = []
+        allContainers: [ContainerSnapshot] = [],
+        effectiveNames: [String: String] = [:]
     ) -> [ContainerSnapshot] {
         let referencePool = allContainers.isEmpty ? containers : allContainers
         var result = containers
@@ -156,7 +167,10 @@ struct ClientContainerService: ClientContainerProtocol {
                     }
                 }
             case "name":
-                result = result.filter { values.contains($0.id) }
+                result = result.filter { container in
+                    let effective = effectiveNames[container.id] ?? container.id
+                    return values.contains(effective) || values.contains(container.id)
+                }
             case "id":
                 result = result.filter { container in
                     values.contains { value in
@@ -250,6 +264,15 @@ struct ClientContainerService: ClientContainerProtocol {
             // unsanitized reference: sanitize() mangles 64-char hex IDs into
             // non-hex strings (containing "-"), which breaks hex prefix matching.
             let allContainers = Self.withoutDNSSidecars(try await containerClient.withClient { try await $0.list() })
+            // A rename override can shadow the native id as the Docker-visible
+            // name — Apple's store knows nothing about it, so match it here
+            // before hex-prefix resolution (`docker stop <newname>`).
+            let overrides = await ContainerNameOverrideStore.shared.snapshot()
+            if let byRename = allContainers.first(where: {
+                overrides[DockerContainerID.hexId(for: $0)] == id
+            }) {
+                return byRename
+            }
             let entries = allContainers.map { (nativeId: $0.id, hexId: DockerContainerID.hexId(for: $0)) }
             switch DockerContainerID.resolve(reference: id, entries: entries) {
             case .match(let nativeId):

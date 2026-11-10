@@ -22,7 +22,8 @@ enum ContainerAutoRemoveCleanup {
                 nativeId: nativeId,
                 labels: labels,
                 cachedIP: cached?.ip,
-                dnsServer: dnsServer
+                dnsServer: dnsServer,
+                effectiveName: await ContainerNameOverrideStore.shared.get(hexId: hexId)
             )
         }
         if let broadcaster {

@@ -836,7 +836,7 @@ struct ExecRoute: RouteCollection {
     /// the channel, so `execRunning` is false there and nothing is emitted.
     static func broadcastExecDetach(execRunning: Bool, execId: String, container: ContainerSnapshot, broadcaster: EventBroadcaster?) async {
         guard execRunning, let broadcaster else { return }
-        await broadcaster.broadcast(DockerEvent.containerEvent("exec_detach", container: container, extraAttributes: ["execID": execId]))
+        await broadcaster.broadcast(await DockerEvent.containerEvent("exec_detach", container: container, extraAttributes: ["execID": execId]))
     }
 
     /// Maps Docker's exec-start `ConsoleSize` to an initial terminal size.
