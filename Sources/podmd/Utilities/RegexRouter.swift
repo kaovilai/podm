@@ -62,6 +62,22 @@ final class RegexRouter: @unchecked Sendable {
         routes.map { (method: $0.method, pattern: $0.pattern) }
     }
 
+    /// The template of the route the middleware would dispatch `path` to:
+    /// same pre-sorted iteration and first-match-wins rule as
+    /// `RegexRoutingMiddleware.respond`, minus the handler invocation. This is
+    /// how the conformance test catches route SHADOWING (e.g. a specific
+    /// `/libpod/images/remove` swallowed by the `/libpod/images/{name:.*}`
+    /// wildcard) without executing anything.
+    func matchedPattern(method: HTTPMethod, path: String) -> String? {
+        let range = NSRange(location: 0, length: path.utf16.count)
+        for route in routes where route.method == method {
+            if route.regex.firstMatch(in: path, range: range) != nil {
+                return route.pattern
+            }
+        }
+        return nil
+    }
+
     func register(
         _ method: HTTPMethod, pattern: String,
         handler: @escaping @Sendable (Request, [String]) async throws -> Response

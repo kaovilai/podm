@@ -69,6 +69,24 @@ struct RouteConformanceTests {
             of: #"\{[^}]*\}"#, with: "conformance-dummy", options: .regularExpression)
     }
 
+    /// Routes that must NEVER be dispatched by this test: they take no path
+    /// parameters and mutate the WHOLE store, so a probe on a developer's Mac
+    /// with images/containers present would prune real data through the real
+    /// service clients (`make test` must never be destructive). They are still
+    /// covered by the routing-match phase, which asserts their registration
+    /// and non-shadowed dispatch target without executing anything.
+    private static let storeWideMutationRoutes: Set<String> = [
+        "POST /build/prune",
+        "POST /containers/prune",
+        "POST /libpod/containers/prune",
+        "POST /images/prune",
+        "POST /libpod/images/prune",
+        "POST /networks/prune",
+        "POST /libpod/networks/prune",
+        "POST /volumes/prune",
+        "POST /libpod/volumes/prune",
+    ]
+
     @Test("every registered route answers; stub responses appear only in the manifest")
     func registeredSurfaceConforms() async throws {
         try await withApp(configure: { app in
@@ -83,8 +101,26 @@ struct RouteConformanceTests {
             var stubsSeen = Set<String>()
             var streamingSkips = 0
 
+            // Phase 1 — ROUTING, zero side effects: every registered route's
+            // dispatch path must resolve back to that SAME route. This is what
+            // catches shadowing — the motivating `podman rmi` bug was
+            // `DELETE /libpod/images/remove` being swallowed by the
+            // `/libpod/images/{name:.*}` wildcard, whose 404 ("No such image:
+            // remove") would classify as a live route in the dispatch phase.
             for route in routes {
                 let key = "\(route.method) \(route.pattern)"
+                let path = dispatchPath(from: route.pattern)
+                let matched = app.regexRouter.matchedPattern(method: route.method, path: path)
+                if matched != route.pattern {
+                    failures.append("\(key) is shadowed: path \(path) dispatches to \(matched ?? "nothing")")
+                }
+            }
+
+            // Phase 2 — DISPATCH, stub classification. Store-wide mutation
+            // routes are excluded: a probe must never prune real data.
+            for route in routes {
+                let key = "\(route.method) \(route.pattern)"
+                if Self.storeWideMutationRoutes.contains(key) { continue }
                 let path = dispatchPath(from: route.pattern)
                 let probe = StubProbe()
                 // The probe task races a deadline: a streaming route that
@@ -122,6 +158,15 @@ struct RouteConformanceTests {
             // without updating the manifest fails loudly too.
             let missing = Self.deliberateStubRoutes.subtracting(stubsSeen)
             #expect(missing.isEmpty, "manifest entries that did not answer as registered stubs (removed or implemented?): \(missing.sorted().joined(separator: ", "))")
+
+            // The store-wide-mutation skip list must track reality too: a
+            // prune route that disappears (or is renamed without updating the
+            // list) would otherwise silently re-enable destructive probing.
+            let registeredKeys = Set(routes.map { "\($0.method) \($0.pattern)" })
+            let missingMutationRoutes = Self.storeWideMutationRoutes.subtracting(registeredKeys)
+            #expect(
+                missingMutationRoutes.isEmpty,
+                "destructive-route skip list entries no longer registered (rename without updating the guard?): \(missingMutationRoutes.sorted().joined(separator: ", "))")
 
             #expect(failures.isEmpty, "\(failures.count) conformance failure(s): \(failures.joined(separator: "; "))")
             // The skip count stays tiny (events/attach-style streaming routes
