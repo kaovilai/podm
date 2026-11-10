@@ -15,6 +15,12 @@ import Vapor
 /// lookup/validation code paths (a bogus container/image reference is a 404
 /// long before any VM or store mutation).
 enum RouteRegistry {
+    /// The default Apple container app-support directory — the single source
+    /// of the literal that route collections' no-argument defaults also need
+    /// (they must compile without the registry passing anything).
+    static let defaultAppSupportURL = URL(
+        fileURLWithPath: "\(NSHomeDirectory())/Library/Application Support/com.apple.container")
+
     /// - Parameter appSupportDirectory: overrides where podm's own
     ///   app-support-managed state lives (notably the restart-policy override
     ///   store, a singleton). The daemon passes nothing and gets the real
@@ -26,10 +32,7 @@ enum RouteRegistry {
         appSupportDirectory: URL? = nil
     ) async throws -> (appSupportUrl: URL, systemConfig: ContainerSystemConfig) {
         // Define app support path early since it's needed by multiple services
-        let appleContainerAppSupportUrl =
-            appSupportDirectory
-            ?? URL(
-                fileURLWithPath: "\(NSHomeDirectory())/Library/Application Support/com.apple.container")
+        let appleContainerAppSupportUrl = appSupportDirectory ?? RouteRegistry.defaultAppSupportURL
 
         let systemConfig: ContainerSystemConfig
         do {

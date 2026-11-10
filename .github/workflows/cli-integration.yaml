@@ -221,6 +221,60 @@ jobs:
           echo "$OUT"
           [[ "$OUT" == *"built by docker CLI"* ]] || { echo "docker run of built image failed"; exit 1; }
 
+      - name: docker diff on a live container
+        if: inputs.enable-vm-steps == true
+        run: |
+          # End-to-end proof of GET /containers/{id}/changes (docker diff):
+          # podmd walks the container's rootfs.ext4 against the image's
+          # unpacked snapshot under
+          # ~/Library/Application Support/com.apple.container/snapshots/<digest>/snapshot.
+          # Like docker run/exec above, this boots a microVM, so it needs the
+          # Virtualization framework (vm-steps gate).
+          # Clean up any stale container from a failed previous run (the name must
+          # be free), and always remove this run's container — even when an
+          # assertion exits early (trap), so a persistent self-hosted runner
+          # never inherits a running sleep container.
+          sudo docker rm -f diff-verify >/dev/null 2>&1 || true
+          trap 'sudo docker rm -f diff-verify >/dev/null 2>&1 || true' EXIT
+          sudo docker run -d --name diff-verify alpine:latest sleep 300
+          # Baseline: a freshly started container must diff empty, or only
+          # list boot-time /etc injections (hosts/hostname/resolv.conf — and
+          # the /etc directory entry itself when the runtime adds one).
+          BASE="$(sudo docker diff diff-verify)"
+          echo "baseline diff:"
+          echo "$BASE"
+          UNEXPECTED="$(echo "$BASE" | grep -vE '^[ACD] /etc(/(hosts|hostname|resolv.conf))?$' || true)"
+          [ -z "$UNEXPECTED" ] || { echo "ERROR: unexpected entries in baseline diff"; exit 1; }
+          # Touch a new file and modify an existing image file, then assert
+          # the docker CLI output ("<Kind> <path>" lines: A=added, C=changed,
+          # D=deleted) reports exactly those changes. The sync flushes the
+          # guest's dirty pages to the block device first: the walker reads
+          # the HOST-side rootfs.ext4, and page-cache-lagged writes would
+          # otherwise make this step flaky (the same lag applies to any
+          # client diffing a RUNNING container — documented on the route).
+          sudo docker exec diff-verify touch /tmp/commit-verify
+          sudo docker exec diff-verify sh -c 'echo podm-diff-test > /etc/alpine-release'
+          sudo docker exec diff-verify sync
+          DIFF="$(sudo docker diff diff-verify)"
+          echo "diff after changes:"
+          echo "$DIFF"
+          echo "$DIFF" | grep -Fxq 'A /tmp/commit-verify' || { echo "ERROR: added file /tmp/commit-verify missing from diff"; exit 1; }
+          echo "$DIFF" | grep -Fxq 'C /etc/alpine-release' || { echo "ERROR: modified file /etc/alpine-release missing from diff"; exit 1; }
+          # Untouched image content must NOT be listed as changed.
+          if echo "$DIFF" | grep -Eq '^[ACD] /bin/busybox$'; then
+            echo "ERROR: untouched image file /bin/busybox listed in diff"; exit 1
+          fi
+
+          # Bogus container: nonzero exit + "No such container" error.
+          ERR="$RUNNER_TEMP/diff-bogus.err"
+          if sudo docker diff podm-no-such-container >/dev/null 2>"$ERR"; then
+            echo "ERROR: docker diff on a bogus container exited 0"; exit 1
+          fi
+          grep -q 'No such container' "$ERR" || { echo "ERROR: expected 'No such container' error, got:"; cat "$ERR"; exit 1; }
+          echo "docker diff verified end-to-end"
+
+          sudo docker rm -f diff-verify
+
       # ── podman CLI ───────────────────────────────────────────────────────────
       - name: install podman cli
         run: |
