@@ -27,12 +27,6 @@ enum RouteSupportManifest {
             method: "POST", pattern: "/libpod/commit",
             reason: "No image-from-container path yet — flattening the container rootfs into an image (export + single-layer import) is tracked parity work."),
         DeliberateStub(
-            method: "GET", pattern: "/containers/{id}/changes",
-            reason: "`docker diff` needs a filesystem-baseline design (captured at create, diffed later) that isn't built yet."),
-        DeliberateStub(
-            method: "GET", pattern: "/libpod/containers/{id}/changes",
-            reason: "`podman diff` needs a filesystem-baseline design (captured at create, diffed later) that isn't built yet."),
-        DeliberateStub(
             method: "POST", pattern: "/containers/{id}/pause",
             reason: "Apple container has no pause primitive for a microVM."),
         DeliberateStub(
