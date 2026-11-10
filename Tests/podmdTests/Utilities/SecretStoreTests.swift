@@ -370,6 +370,47 @@ struct SecretStoreTests {
         #expect(try groupOtherBits(filedriverDir.appendingPathComponent(backups[0]).path) == 0)
     }
 
+    @Test("a store directory that cannot be secured blocks mutations")
+    func unsecurableDirectoryBlocksMutations() async throws {
+        let dir = uniqueTempDir()
+        let podmDir = dir.appendingPathComponent("podm-secrets")
+        let filedriverDir = podmDir.appendingPathComponent("filedriver")
+        try FileManager.default.createDirectory(
+            at: filedriverDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o775])
+        // Lock the directory's mode (user-immutable): chmod now fails even
+        // for the owning user, so init cannot strip the group bits.
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: podmDir.path)
+        defer {
+            try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: podmDir.path)
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        let store = SecretStore(storageDirectory: dir)
+        do {
+            _ = try await store.create(
+                name: "blocked", data: Data("x".utf8), driver: nil,
+                labels: [:], driverOptions: [:], replace: false, ignore: false
+            )
+            Issue.record("create must be refused while the store directory cannot be secured")
+        } catch SecretStore.StoreError.quarantineBlocked {
+            // expected
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        // The mode lock released, a fresh instance secures the directory
+        // and works.
+        try FileManager.default.setAttributes([.immutable: false], ofItemAtPath: podmDir.path)
+        let recovered = SecretStore(storageDirectory: dir)
+        _ = try await recovered.create(
+            name: "fresh", data: Data("x".utf8), driver: nil,
+            labels: [:], driverOptions: [:], replace: false, ignore: false
+        )
+        #expect(await recovered.lookup(nameOrID: "fresh") != nil)
+        let perms =
+            try FileManager.default.attributesOfItem(atPath: podmDir.path)[.posixPermissions] as! Int
+        #expect(perms & 0o077 == 0, "the recovered instance tightened the directory")
+    }
+
     private func uniqueTempDir() -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

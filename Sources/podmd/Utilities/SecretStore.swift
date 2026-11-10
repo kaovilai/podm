@@ -64,11 +64,14 @@ actor SecretStore {
         /// same way (`SecretsManager.Store` wraps both as "creating secret
         /// %s: %w"); the route answers 500.
         case persistFailed(reason: String, writeIndex: Int)
-        /// A corrupt store file could not be quarantined aside at load time
-        /// (its directory was not writable), so the unreadable data still
-        /// sits under its original name. Mutations are REFUSED rather than
-        /// persisting over the only copy of data the store could not read;
-        /// the operator resolves the files and restarts the daemon.
+        /// The store could not be secured at load time — a corrupt file
+        /// could not be quarantined aside (its directory was not writable),
+        /// or a store directory's permissions could not be verified or
+        /// tightened to owner-only. Either way the unreadable/insecure data
+        /// still sits where the next persist would touch it: mutations are
+        /// REFUSED rather than persisting over the only copy or exposing
+        /// secret material to other local users; the operator resolves the
+        /// files and restarts the daemon.
         case quarantineBlocked(String)
     }
 
@@ -109,24 +112,38 @@ actor SecretStore {
         // lets another local user replace or delete the store files, and a
         // directory left behind by an older build or a restored backup can
         // carry group/world bits. Only bits are cleared, never set — a
-        // deliberately read-only directory keeps its owner bits.
+        // deliberately read-only directory keeps its owner bits. A directory
+        // that cannot be inspected or secured BLOCKS the store: proceeding
+        // would expose secret material to other local users.
+        var permissionsUnsecured = false
         let fm = FileManager.default
         for directory in [dir, filedriverDir] {
             if !fm.fileExists(atPath: directory.path) {
-                try? fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            } else {
-                Self.tightenPermissions(of: directory, fm: fm)
+                do {
+                    try fm.createDirectory(
+                        at: directory, withIntermediateDirectories: true,
+                        attributes: [.posixPermissions: 0o700])
+                } catch {
+                    log.error(
+                        "could not create store directory \(directory.path) (\(error.localizedDescription)) — the store will refuse mutations"
+                    )
+                    permissionsUnsecured = true
+                }
+            } else if !Self.tightenPermissions(of: directory, fm: fm, log: log) {
+                permissionsUnsecured = true
             }
         }
-        // Same for store files that predate the 0600 discipline.
+        // Same for store files that predate the 0600 discipline — best
+        // effort: they are only reachable through the (now owner-only)
+        // directories above.
         for file in [metadataURL, payloadURL] where fm.fileExists(atPath: file.path) {
-            Self.tightenPermissions(of: file, fm: fm)
+            Self.tightenPermissions(of: file, fm: fm, log: log)
         }
 
         let loaded = Self.load(metadataURL: metadataURL, payloadURL: payloadURL, log: log)
         secrets = loaded.secrets
         payloads = loaded.payloads
-        quarantineBlocked = loaded.quarantineBlocked
+        quarantineBlocked = loaded.quarantineBlocked || permissionsUnsecured
     }
 
     /// Static so the actor's nonisolated initializer stays in its
@@ -204,15 +221,17 @@ actor SecretStore {
 
     // MARK: - Mutations
 
-    /// Mutations refuse to run while a corrupt store file still sits under
-    /// its original name (its quarantine move failed at load time):
-    /// persisting would overwrite the only copy of data the store could
-    /// not read. Reads keep working; the operator resolves the files and
-    /// restarts the daemon.
+    /// Mutations refuse to run while the store could not be secured at load
+    /// time — a corrupt file still sits under its original name (quarantine
+    /// move failed), or a store directory could not be verified/tightened
+    /// to owner-only: persisting would overwrite the only copy of
+    /// unreadable data or expose secret material to other local users.
+    /// Reads keep working; the operator resolves the files and restarts
+    /// the daemon.
     private func ensureNotBlocked() throws {
         if quarantineBlocked {
             throw StoreError.quarantineBlocked(
-                "a corrupt store file could not be moved aside at load time (directory not writable?) — resolve the files under "
+                "the secret store could not be secured at load time (unreadable permissions, or a corrupt file could not be moved aside) — resolve the files under "
                     + metadataURL.deletingLastPathComponent().path + " and restart podmd")
         }
     }
@@ -542,16 +561,32 @@ actor SecretStore {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
-    /// Strips group/other access bits from an existing file or directory.
+    /// Strips group/other access bits from an existing file or directory,
+    /// reporting whether the item is verifiably owner-only afterwards.
     /// Only bits are cleared, never set, so a deliberately read-only item
     /// keeps its owner bits — this closes replacement/deletion of store
     /// files by other local users (directory write permission) without
-    /// fighting an operator's intentional modes.
-    private static func tightenPermissions(of url: URL, fm: FileManager) {
+    /// fighting an operator's intentional modes. False means the item's
+    /// mode could not be inspected or secured: the caller must refuse
+    /// mutations rather than expose secret material.
+    @discardableResult
+    private static func tightenPermissions(of url: URL, fm: FileManager, log: Logger) -> Bool {
         guard let attrs = try? fm.attributesOfItem(atPath: url.path),
-            let perms = (attrs[.posixPermissions] as? NSNumber)?.intValue, perms & 0o077 != 0
-        else { return }
-        try? fm.setAttributes([.posixPermissions: perms & ~0o077], ofItemAtPath: url.path)
+            let perms = (attrs[.posixPermissions] as? NSNumber)?.intValue
+        else {
+            log.error("could not inspect permissions of \(url.path) — treating the store as unsecured")
+            return false
+        }
+        guard perms & 0o077 != 0 else { return true }
+        do {
+            try fm.setAttributes([.posixPermissions: perms & ~0o077], ofItemAtPath: url.path)
+            return true
+        } catch {
+            log.error(
+                "could not tighten permissions of \(url.path) (\(error.localizedDescription)) — other local users may reach the store; refusing mutations"
+            )
+            return false
+        }
     }
 
     /// 25 lowercase hex characters — `stringid.GenerateNonCryptoID()` truncated
