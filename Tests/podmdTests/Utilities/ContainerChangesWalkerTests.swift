@@ -428,4 +428,56 @@ struct ContainerChangesWalkerTests {
             appSupportURL: fixture.url, imageDescriptorDigest: "sha256:eeee", platform: nil)
         #expect(resolved?.deletingLastPathComponent().lastPathComponent == "bbbb")
     }
+
+    @Test("baseline resolution matches the platform variant when both sides specify one")
+    func baselineVariantMatching() throws {
+        let fixture = Ext4TreeFixture(name: "store")
+        defer { fixture.cleanUp() }
+        // Both arm64 variants have snapshots on disk.
+        for digest in ["v8snap", "v7snap"] {
+            try fixture.write(files: ["/bin/true": "elf"])
+            let snapshot =
+                fixture.url
+                .appendingPathComponent("snapshots")
+                .appendingPathComponent(digest)
+                .appendingPathComponent("snapshot")
+            try FileManager.default.createDirectory(
+                at: snapshot.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.moveItem(
+                at: fixture.url.appendingPathComponent("rootfs.ext4"), to: snapshot)
+        }
+        let index =
+            """
+            {"schemaVersion": 2, "manifests": [
+              {"digest": "sha256:v8snap", "mediaType": "application/vnd.oci.image.manifest.v1+json",
+               "platform": {"architecture": "arm64", "os": "linux", "variant": "v8"}},
+              {"digest": "sha256:v7snap", "mediaType": "application/vnd.oci.image.manifest.v1+json",
+               "platform": {"architecture": "arm64", "os": "linux", "variant": "v7"}}
+            ]}
+            """
+        let blob =
+            fixture.url
+            .appendingPathComponent("content")
+            .appendingPathComponent("blobs")
+            .appendingPathComponent("sha256")
+        try FileManager.default.createDirectory(at: blob, withIntermediateDirectories: true)
+        try Data(index.utf8).write(to: blob.appendingPathComponent("index"))
+
+        let v7 = Platform(arch: "arm64", os: "linux", variant: "v7")
+        let v7Resolved = ContainerChangesWalker.baselineSnapshotPath(
+            appSupportURL: fixture.url, imageDescriptorDigest: "sha256:index", platform: v7)
+        #expect(v7Resolved?.deletingLastPathComponent().lastPathComponent == "v7snap")
+
+        let v8 = Platform(arch: "arm64", os: "linux", variant: "v8")
+        let v8Resolved = ContainerChangesWalker.baselineSnapshotPath(
+            appSupportURL: fixture.url, imageDescriptorDigest: "sha256:index", platform: v8)
+        #expect(v8Resolved?.deletingLastPathComponent().lastPathComponent == "v8snap")
+
+        // No variant requested: either arm64 child is compatible — a snapshot
+        // resolves (the arm64-preference order picks the first child).
+        let unspecified = Platform(arch: "arm64", os: "linux")
+        let anyResolved = ContainerChangesWalker.baselineSnapshotPath(
+            appSupportURL: fixture.url, imageDescriptorDigest: "sha256:index", platform: unspecified)
+        #expect(anyResolved != nil)
+    }
 }
