@@ -535,7 +535,7 @@ struct HealthCheckManagerStartIntervalTests {
             Interval: 1_000_000,
             Timeout: 1_000_000_000,
             Retries: 2,
-            StartPeriod: 5_000_000_000,  // the gated sequence needs ~600ms unloaded; 5s rides out a heavily loaded runner
+            StartPeriod: 9_000_000_000,  // the gated sequence needs ~600ms unloaded; CI load once drifted it to 5.15s, so the budget is generous
             StartInterval: 1_000_000
         )
         let startNs = DispatchTime.now().uptimeNanoseconds
@@ -560,7 +560,7 @@ struct HealthCheckManagerStartIntervalTests {
         #expect(endHealth?.Status == "unhealthy")
         #expect((endHealth?.FailingStreak ?? 0) >= 2, "post-success failures must count toward the retry budget")
         #expect(
-            DispatchTime.now().uptimeNanoseconds - startNs < 5_000_000_000,
+            DispatchTime.now().uptimeNanoseconds - startNs < 9_000_000_000,
             "unhealthy arrived only after the start period expired — the grace window was reopened")
         await mgr.stop(containerId: "grace-closed")
     }
