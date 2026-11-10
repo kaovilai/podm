@@ -388,7 +388,11 @@ struct HealthCheckManagerStartIntervalTests {
             Interval: 1_000_000,
             Timeout: 1_000_000_000,
             Retries: 1,  // a single counted failure must flip the container unhealthy
-            StartPeriod: 1_000_000_000,  // 1s: wide margin over the probe-count poll below
+            StartPeriod: 3_000_000_000,  // 3s: the probe-count poll below must finish
+            // inside the window (a loaded CI runner once burned the whole 1s
+            // poll loop before the mid-window assertion), while the 6s
+            // waitForStatus budget below still covers the post-window
+            // transition after the period ends
             StartInterval: 1_000_000
         )
         await mgr.start(containerId: "forgiven", config: cfg)
