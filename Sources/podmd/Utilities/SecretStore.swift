@@ -56,6 +56,12 @@ actor SecretStore {
         case nameInUse(String)
         /// Only the "file" driver exists here (podman also has "pass" etc.).
         case unsupportedDriver(String)
+        /// The file driver's `path` option points somewhere other than
+        /// podm's single supported storage location. Podman honors
+        /// caller-supplied paths (its `getDriver` builds a file driver per
+        /// path); podm keeps one store and REJECTS the misplacement
+        /// rather than silently storing the payload elsewhere.
+        case unsupportedDriverOption(String)
         /// A `persist()` write failed — `writeIndex` is the 0-based position
         /// of the failed write in the mutation's persist sequence, so callers
         /// can tell "nothing committed" (early writes) from "the final state
@@ -283,6 +289,21 @@ actor SecretStore {
         let resolvedDriver = driver ?? "file"
         guard resolvedDriver == "file" else {
             throw StoreError.unsupportedDriver(resolvedDriver)
+        }
+        // Podman's file driver REQUIRES a path option (`getDriver`: "need
+        // path for filedriver"); its API layer defaults it to
+        // <secrets>/filedriver and honors a caller-supplied one — the
+        // payload then lives at that path per secret. Podm implements one
+        // fixed store: an explicit path EQUAL to it is accepted
+        // (podman-parity), anything else is rejected so a caller relying
+        // on `--driver-opt path=X` fails loudly instead of finding the
+        // payload silently misplaced.
+        if let requestedPath = driverOptions["path"] {
+            let requested = URL(fileURLWithPath: requestedPath).standardizedFileURL.path
+            let supported = payloadURL.deletingLastPathComponent().standardizedFileURL.path
+            guard requested == supported else {
+                throw StoreError.unsupportedDriverOption("path")
+            }
         }
         // A blocked store (unquarantinable corrupt file) refuses mutations:
         // persisting would overwrite the only copy of unreadable data.

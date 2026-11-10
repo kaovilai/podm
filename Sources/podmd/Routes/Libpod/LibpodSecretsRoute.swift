@@ -104,6 +104,11 @@ extension LibpodSecretsRoute {
                 throw Abort(.conflict, reason: "\(name): secret name in use")
             } catch SecretStore.StoreError.unsupportedDriver(let driver) {
                 throw Abort(.badRequest, reason: "unknown secrets driver \(driver): only the file driver is implemented")
+            } catch SecretStore.StoreError.unsupportedDriverOption(let option) {
+                throw Abort(
+                    .badRequest,
+                    reason: "unsupported driver option \(option): the file driver only supports its default storage location"
+                )
             } catch SecretStore.StoreError.persistFailed(let reason, _) {
                 // Podman maps store/persist failures to 500 too
                 // (utils.InternalServerError in both the libpod and compat
@@ -121,9 +126,13 @@ extension LibpodSecretsRoute {
         { req in
             let secrets = await store.list()
             let filters = try Self.parseFilters(req.query[String.self, at: "filters"])
-            return try secrets.filter { secret in
-                try Self.passesFilters(secret, filters: filters)
-            }.map { Self.report($0) }
+            // passesFilters is async (time-boxed regex matching — see its
+            // doc comment), so the filter loop cannot be a `filter` closure.
+            var reports: [LibpodSecretInfoReport] = []
+            for secret in secrets where try await Self.passesFilters(secret, filters: filters) {
+                reports.append(Self.report(secret))
+            }
+            return reports
         }
     }
 
@@ -265,7 +274,17 @@ extension LibpodSecretsRoute {
     /// Regex matching per podman's `util.StringMatchRegexSlice`: a value
     /// matches when its regex is found anywhere in the target string. An
     /// invalid pattern is a client error.
-    static func passesFilters(_ secret: StoredSecret, filters: [String: [String]]) throws -> Bool {
+    ///
+    /// NSRegularExpression (ICU) is a BACKTRACKING engine with no
+    /// cancellation: a pathological pattern such as `(a+)+b` against a run
+    /// of a's runs exponentially and would hang the event loop — podman is
+    /// immune by construction because Go's regexp package is RE2 (linear
+    /// time, no backtracking). Every match therefore runs off the event
+    /// loop under a deadline; a pattern that exceeds the budget is a client
+    /// error. A blown match keeps spinning on its Dispatch thread
+    /// (NSRegularExpression cannot be interrupted), but the daemon stays
+    /// responsive.
+    static func passesFilters(_ secret: StoredSecret, filters: [String: [String]]) async throws -> Bool {
         for (key, values) in filters {
             let target = key == "name" ? secret.name : secret.id
             var matched = false
@@ -279,7 +298,7 @@ extension LibpodSecretsRoute {
                 } catch {
                     throw Abort(.badRequest, reason: "invalid filter pattern \(key)=\(value): \(error.localizedDescription)")
                 }
-                if regex.firstMatch(in: target, range: NSRange(location: 0, length: target.utf16.count)) != nil {
+                if try await Self.timedMatch(regex, in: target) {
                     matched = true
                     break
                 }
@@ -289,6 +308,53 @@ extension LibpodSecretsRoute {
             }
         }
         return true
+    }
+
+    /// Per-match wall-clock budget. Generous for honest patterns (subjects
+    /// are secret names, ≤253 bytes), far below the first doubling step of
+    /// an exponential blowup.
+    private static let matchBudgetMs = 200
+
+    /// Runs one regex match on a Dispatch global queue, racing a deadline:
+    /// whichever finishes first resumes the continuation (exactly once).
+    private static func timedMatch(_ regex: NSRegularExpression, in target: String) async throws -> Bool {
+        let once = ResumeOnce()
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
+            once.install(continuation)
+            let range = NSRange(location: 0, length: target.utf16.count)
+            DispatchQueue.global().async {
+                once.resume(.success(regex.firstMatch(in: target, range: range) != nil))
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(Self.matchBudgetMs)) {
+                once.resume(
+                    .failure(
+                        Abort(
+                            .badRequest,
+                            reason: "filter pattern exceeded its matching budget (podman uses the linear-time RE2 engine; a pathological backtracking pattern is rejected here)"
+                        )))
+            }
+        }
+    }
+
+    /// Resumes a continuation exactly once — whichever of the match or the
+    /// deadline gets there first.
+    private final class ResumeOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Bool, Error>?
+
+        func install(_ continuation: CheckedContinuation<Bool, Error>) {
+            lock.lock()
+            self.continuation = continuation
+            lock.unlock()
+        }
+
+        func resume(_ result: Result<Bool, Error>) {
+            lock.lock()
+            let continuation = self.continuation
+            self.continuation = nil
+            lock.unlock()
+            continuation?.resume(with: result)
+        }
     }
 
     /// Podman emits `Type: "secret"` events on create/remove

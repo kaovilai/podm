@@ -545,6 +545,50 @@ struct LibpodSecretsRouteTests {
         #expect(revealed?.payload == Data("precious".utf8), "a committed secret's payload must survive consecutive persist failures")
     }
 
+    @Test("the file driver's path option is only honored at its default location")
+    func pathDriverOptionValidated() async throws {
+        let dir = uniqueTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = SecretStore(storageDirectory: dir)
+        try await withSecretsApp(store: store) { app in
+            // The podman-default location for this store: accepted.
+            let filedriverPath = dir.appendingPathComponent("podm-secrets/filedriver").path
+            try await app.testing().test(
+                .POST,
+                "/v1.51/libpod/secrets/create?name=at-default&driver=file&driveropts=%7B%22path%22%3A%22\(filedriverPath.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!)%22%7D",
+                body: ByteBuffer(string: "x")
+            ) { res async in
+                #expect(res.status == .ok, "the default path must be accepted: \(res.body.string)")
+            }
+            // Anywhere else: rejected loudly instead of silently misplacing
+            // the payload (podman honors caller paths; podm has one store).
+            try await app.testing().test(
+                .POST,
+                "/v1.51/libpod/secrets/create?name=elsewhere&driver=file&driveropts=%7B%22path%22%3A%22%2Ftmp%2Felsewhere%22%7D",
+                body: ByteBuffer(string: "x")
+            ) { res async in
+                #expect(res.status == .badRequest)
+                #expect(res.body.string.contains("default storage location"))
+            }
+        }
+    }
+
+    @Test("a pathological filter pattern is rejected by the matching budget, not a hang")
+    func catastrophicRegexRejectedByBudget() async throws {
+        try await withSecretsApp { app in
+            // (a+)+b against a long run of a's is exponential in ICU's
+            // backtracking engine; podman is immune (Go regexp is RE2,
+            // linear time). The match runs under a 200ms deadline and the
+            // pattern is rejected as a client error.
+            _ = try await createSecret(app, name: String(repeating: "a", count: 40), payload: "x")
+            try await app.testing().test(.GET, "/v1.51/libpod/secrets/json?filters=%7B%22name%22%3A%5B%22(a%2B)%2Bb%22%5D%7D") {
+                res async in
+                #expect(res.status == .badRequest)
+                #expect(res.body.string.contains("matching budget"))
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     /// Boots a VaporTesting app with ONLY the libpod secrets collection
