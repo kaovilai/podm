@@ -60,10 +60,14 @@ if let docgenDir = options.docgen {
     // depends on real state.
     let docgenAppSupport = FileManager.default.temporaryDirectory
         .appendingPathComponent("podm-docgen-\(UUID().uuidString)", isDirectory: true)
+    // Error paths unwind normally and run this defer; the success path
+    // cannot rely on it — exit(0) below terminates without running Swift
+    // defer blocks, so it removes the directory explicitly first.
     defer { try? FileManager.default.removeItem(at: docgenAppSupport) }
     _ = try await RouteRegistry.bootstrap(docgenApp, appSupportDirectory: docgenAppSupport)
     try RouteDocGen.write(to: docgenDir, routes: docgenApp.regexRouter.registeredRoutes)
     try await docgenApp.asyncShutdown()
+    try? FileManager.default.removeItem(at: docgenAppSupport)
     exit(0)
 }
 
