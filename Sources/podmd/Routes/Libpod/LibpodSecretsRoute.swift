@@ -21,7 +21,9 @@ import Vapor
 ///     (`pkg/domain/utils/secrets_filters.go`).
 ///   - `GET    /libpod/secrets/{name}/json`   → compat.InspectSecret: libpod
 ///     dialect plain report; `showsecret=true` (libpod-only in podman) fills
-///     `SecretData` with the base64 payload — the ONLY path that reveals it.
+///     `SecretData` with the RAW payload string — the ONLY path that reveals
+///     it (podman's `secretToReportWithData` passes `string(data)` through
+///     unencoded).
 ///   - `GET    /libpod/secrets/{name}/exists` → libpod.SecretExists: 204 / 404.
 ///   - `DELETE /libpod/secrets/{name}`        → compat.RemoveSecret: 204 / 404.
 ///
@@ -54,8 +56,14 @@ extension LibpodSecretsRoute {
             // (cfg.Secrets.Driver fallback), not "unknown driver ''".
             let rawDriver = req.query[String.self, at: "driver"]
             let driver = rawDriver?.isEmpty == true ? nil : rawDriver
-            let labels = (try? Self.queryMap("labels", in: req.url.query)) ?? [:]
-            let driverOpts = (try? Self.queryMap("driveropts", in: req.url.query)) ?? [:]
+            // Malformed map params are a client error (400). This is a
+            // deliberate deviation: podman's own map converter
+            // (convertStringMap, pkg/api/handlers/decoder.go) LOGS and
+            // swallows json.Unmarshal failures, treating them as empty maps
+            // — but silently dropping labels a caller believes it set is
+            // worse than a 400.
+            let labels = try Self.queryMap("labels", in: req.url.query)
+            let driverOpts = try Self.queryMap("driveropts", in: req.url.query)
             // Tri-state flags read from the raw query string (Vapor materializes
             // absent Bools as false); podman truthiness per
             // LibpodImageRemoveRoute.queryFlag.
@@ -63,9 +71,14 @@ extension LibpodSecretsRoute {
             let ignore = LibpodImageRemoveRoute.queryFlag("ignore", in: req.url.query) ?? false
 
             // The secret payload: the streamed body, collected explicitly (a
-            // no-op when already collected). 512kB is podman's maxSecretSize,
-            // far under the daemon's 64mb body cap.
-            try await req.body.collect()
+            // no-op when already collected). RegexRouter bypasses Vapor's
+            // route-level collection, and a bare collect() caps at 16 KiB
+            // (Vapor's `1 << 14` default) — a valid secret up to podman's
+            // 512000-byte maxSecretSize would 413. Collect with the daemon's
+            // configured cap instead; the store enforces the real size limit
+            // (podman itself io.ReadAll's the body with no cap at all, so
+            // this stays strictly tighter).
+            _ = try await req.body.collect(max: req.application.routes.defaultMaxBodySize.value).get()
             let data = req.body.data.map { Data(buffer: $0) } ?? Data()
 
             do {
@@ -91,6 +104,12 @@ extension LibpodSecretsRoute {
                 throw Abort(.conflict, reason: "\(name): secret name in use")
             } catch SecretStore.StoreError.unsupportedDriver(let driver) {
                 throw Abort(.badRequest, reason: "unknown secrets driver \(driver): only the file driver is implemented")
+            } catch SecretStore.StoreError.persistFailed(let reason) {
+                // Podman maps store/persist failures to 500 too
+                // (utils.InternalServerError in both the libpod and compat
+                // create handlers) — a create that cannot be durably written
+                // must not answer 200 and vanish on restart.
+                throw Abort(.internalServerError, reason: "could not persist the secret store: \(reason)")
             }
         }
     }
@@ -108,19 +127,29 @@ extension LibpodSecretsRoute {
 
     /// `GET /libpod/secrets/{name}/json` — `showsecret=true` is the only reveal
     /// path (podman gates it on the request being libpod, which this route is).
+    /// Metadata and payload are fetched in ONE store hop so a concurrent
+    /// replace/remove cannot interleave between the two reads.
     static func inspectHandler(store: SecretStore) -> @Sendable (Request) async throws -> LibpodSecretInfoReport {
         { req in
             guard let name = req.parameters.get("name") else {
                 throw Abort(.badRequest, reason: "Missing secret name")
             }
-            guard let secret = await store.lookup(nameOrID: name) else {
+            let showSecret = LibpodImageRemoveRoute.queryFlag("showsecret", in: req.url.query) ?? false
+            guard let found = await store.inspect(nameOrID: name, showSecret: showSecret) else {
                 throw Abort(.notFound, reason: "no such secret")
             }
-            let showSecret = LibpodImageRemoveRoute.queryFlag("showsecret", in: req.url.query) ?? false
-            if showSecret, let payload = await store.payload(id: secret.id) {
-                return Self.report(secret, secretData: payload.base64EncodedString())
+            if let payload = found.payload {
+                // RAW payload, not base64: podman's secretToReportWithData
+                // passes string(data) straight through
+                // (pkg/domain/infra/abi/secrets.go) and the bindings decode
+                // SecretData as a plain string, so encoding here would make
+                // `podman secret inspect --showsecret` print ciphertext.
+                // String(decoding:as:) maps invalid UTF-8 to U+FFFD — the
+                // same thing Go's json.Marshal does to an invalid-UTF-8
+                // string.
+                return Self.report(found.secret, secretData: String(decoding: payload, as: UTF8.self))
             }
-            return Self.report(secret)
+            return Self.report(found.secret)
         }
     }
 
@@ -143,8 +172,14 @@ extension LibpodSecretsRoute {
             guard let name = req.parameters.get("name") else {
                 throw Abort(.badRequest, reason: "Missing secret name")
             }
-            guard let removed = await store.remove(nameOrID: name) else {
-                throw Abort(.notFound, reason: "no such secret")
+            let removed: StoredSecret
+            do {
+                guard let found = try await store.remove(nameOrID: name) else {
+                    throw Abort(.notFound, reason: "no such secret")
+                }
+                removed = found
+            } catch SecretStore.StoreError.persistFailed(let reason) {
+                throw Abort(.internalServerError, reason: "could not persist the secret store: \(reason)")
             }
             Self.broadcast(event: "remove", secret: removed, req: req)
             return Response(status: .noContent)
@@ -156,15 +191,23 @@ extension LibpodSecretsRoute {
 
 extension LibpodSecretsRoute {
     /// Decodes a map-valued query param the way podman's bindings client sends
-    /// it: `labels={"a":"b"}` (ToParams JSON-marshals maps into a plain string).
-    /// A present-but-unparseable value is a client error, not an empty map —
-    /// silently dropping labels a caller believes it set would be worse.
+    /// it: `labels={"a":"b"}` (ToParams JSON-marshals maps into a plain
+    /// string, QueryEscape'd). A present-but-unparseable value is a client
+    /// error, not an empty map — silently dropping labels a caller believes
+    /// it set would be worse (see the deviation note in `createHandler`).
     static func queryMap(_ name: String, in query: String?) throws -> [String: String] {
         guard let query, !query.isEmpty else { return [:] }
         for pair in query.split(separator: "&") {
             let parts = pair.split(separator: "=", maxSplits: 1)
             guard parts.first == Substring(name), let raw = parts.dropFirst().first else { continue }
-            guard let decoded = raw.removingPercentEncoding, !decoded.isEmpty else { return [:] }
+            // Form-encoding semantics (Go's url.ParseQuery / moby's
+            // httputils.ParseForm, which podman shares via net/http): a
+            // literal '+' in the raw query means SPACE — podman's bindings
+            // QueryEscape every space into one. Rewriting '+' to '%20'
+            // before percent-decoding keeps a client's '%2B' a literal '+',
+            // exactly like Vapor's own query parser.
+            let plusDecoded = raw.replacingOccurrences(of: "+", with: "%20")
+            guard let decoded = plusDecoded.removingPercentEncoding, !decoded.isEmpty else { return [:] }
             guard let map = try? JSONDecoder().decode([String: String].self, from: Data(decoded.utf8)) else {
                 throw Abort(.badRequest, reason: "invalid JSON in \(name) query parameter")
             }
@@ -278,7 +321,9 @@ struct LibpodSecretSpec: Content {
 }
 
 /// `entities.SecretInfoReport`. `SecretData` is `omitempty` in podman — only
-/// present on an inspect that passed `showsecret`, as base64.
+/// present on an inspect that passed `showsecret`, as the RAW payload string
+/// (podman serves `string(data)` unencoded; base64 here would garble
+/// `podman secret inspect --showsecret`).
 struct LibpodSecretInfoReport: Content {
     let ID: String
     let CreatedAt: String
