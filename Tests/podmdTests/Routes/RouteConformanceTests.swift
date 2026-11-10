@@ -111,6 +111,18 @@ struct RouteConformanceTests {
         "POST /libpod/volumes/prune",
     ]
 
+    /// Routes whose probes perform OUTBOUND NETWORK I/O against a real
+    /// registry even with dummy parameters (distribution inspect resolves the
+    /// reference over HTTPS, including registry token round trips). Their
+    /// latency is machine- and network-dependent: a probe that answers in
+    /// well under a second on CI's fast egress can exceed any fixed deadline
+    /// on a home network while the route is perfectly healthy. Dispatching
+    /// them makes the suite flaky rather than more sure — routing-phase
+    /// coverage and the reverse-registration assertion still guard them.
+    private static let networkBoundRoutes: Set<String> = [
+        "GET /distribution/{name:.*}/json"
+    ]
+
     @Test("every registered route answers; stub responses appear only in the manifest")
     func registeredSurfaceConforms() async throws {
         try await withApp(configure: { app in
@@ -149,9 +161,12 @@ struct RouteConformanceTests {
 
             // Phase 2 — DISPATCH, stub classification. Store-wide mutation
             // routes are excluded: a probe must never prune real data.
+            // Network-bound routes are excluded too: their latency depends on
+            // the machine's egress, not the route's health.
             for route in routes {
                 let key = "\(route.method) \(route.pattern)"
                 if Self.storeWideMutationRoutes.contains(key) { continue }
+                if Self.networkBoundRoutes.contains(key) { continue }
                 let path = dispatchPath(from: route.pattern)
                 let probe = StubProbe()
                 // The probe task races a deadline: a streaming route that
@@ -223,6 +238,12 @@ struct RouteConformanceTests {
             #expect(
                 missingStreamingRoutes.isEmpty,
                 "expected-streaming entries no longer registered (rename without updating the list?): \(missingStreamingRoutes.sorted().joined(separator: ", "))")
+
+            // Same reverse guard for the network-bound skip list.
+            let missingNetworkBoundRoutes = Self.networkBoundRoutes.subtracting(registeredKeys)
+            #expect(
+                missingNetworkBoundRoutes.isEmpty,
+                "network-bound skip list entries no longer registered (rename without updating the list?): \(missingNetworkBoundRoutes.sorted().joined(separator: ", "))")
         }
     }
 }
