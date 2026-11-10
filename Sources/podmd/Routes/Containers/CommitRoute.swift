@@ -202,8 +202,11 @@ struct CommitRoute: RouteCollection {
                 // single flattened layer.
                 req.logger.debug("commit: squash requested — the committed image is a single layer by construction")
             }
-            // `stream` (podman's streamed progress protocol) is ignored: the
-            // response is a single JSON object either way.
+            // `stream` (podman's streamed progress protocol) is a no-op for
+            // the Docker-compat dialect — the response is a single JSON
+            // object. The libpod twin (LibpodCommitRoute) re-frames it into
+            // podman's BuildResponse record stream when the client asks for
+            // it.
 
             guard let appleContainerAppSupportUrl = req.application.storage[AppleContainerAppSupportUrlKey.self] else {
                 throw Abort(.internalServerError, reason: "AppleContainerAppSupportUrl not configured")

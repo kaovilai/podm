@@ -191,12 +191,198 @@ struct DockerfileChangeApplierTests {
         #expect(config.workingDir == "/srv/app")
     }
 
-    @Test("an instruction this endpoint does not support (e.g. STOPSIGNAL) is rejected, not silently dropped")
+    @Test("a relative WORKDIR joins the threaded-in base, like moby's commit starting from the container's config")
+    func workdirRelativeJoinsBase() throws {
+        var config = SynthesizedImageConfig()
+        try DockerfileChangeApplier.apply(["WORKDIR logs"], to: &config, baseWorkingDir: "/srv")
+        #expect(config.workingDir == "/srv/logs")
+    }
+
+    @Test("a relative WORKDIR without a base anchors at / — moby's import runs BuildFromConfig on an empty config")
+    func workdirRelativeWithoutBaseAnchorsAtRoot() throws {
+        var config = SynthesizedImageConfig()
+        try DockerfileChangeApplier.apply(["WORKDIR logs"], to: &config)
+        #expect(config.workingDir == "/logs")
+    }
+
+    @Test("a relative WORKDIR chains onto the current directory set by an earlier instruction")
+    func workdirRelativeChains() throws {
+        var config = SynthesizedImageConfig()
+        try DockerfileChangeApplier.apply(["WORKDIR /srv", "WORKDIR logs", "WORKDIR more"], to: &config)
+        #expect(config.workingDir == "/srv/logs/more")
+    }
+
+    @Test("an absolute WORKDIR passes through cleaned, like moby's normalizeWorkdir/filepath.Clean")
+    func workdirAbsoluteIsCleaned() throws {
+        var config = SynthesizedImageConfig()
+        try DockerfileChangeApplier.apply(["WORKDIR //srv/./app/"], to: &config, baseWorkingDir: "/elsewhere")
+        #expect(config.workingDir == "/srv/app")
+    }
+
+    @Test("a relative WORKDIR cleans the joined result, resolving . and .. segments")
+    func workdirRelativeIsCleaned() throws {
+        var config = SynthesizedImageConfig()
+        try DockerfileChangeApplier.apply(["WORKDIR ../logs"], to: &config, baseWorkingDir: "/srv/app")
+        #expect(config.workingDir == "/srv/logs")
+    }
+
+    @Test("an instruction this endpoint does not model (e.g. ONBUILD) is rejected, not silently dropped")
     func unsupportedInstructionIsRejected() throws {
         var config = SynthesizedImageConfig()
         #expect(throws: DockerfileChangeError.self) {
-            try DockerfileChangeApplier.apply(["STOPSIGNAL SIGTERM"], to: &config)
+            try DockerfileChangeApplier.apply(["ONBUILD /bin/true"], to: &config)
         }
+    }
+
+    @Test("STOPSIGNAL sets the config's stop signal")
+    func stopSignalInstruction() throws {
+        var config = SynthesizedImageConfig()
+        try DockerfileChangeApplier.apply(["STOPSIGNAL SIGTERM"], to: &config)
+        #expect(config.stopSignal == "SIGTERM")
+    }
+
+    @Test("STOPSIGNAL accepts a numeric signal")
+    func stopSignalNumeric() throws {
+        var config = SynthesizedImageConfig()
+        try DockerfileChangeApplier.apply(["STOPSIGNAL 15"], to: &config)
+        #expect(config.stopSignal == "15")
+    }
+
+    @Test("an invalid STOPSIGNAL is rejected, like moby's signal.ParseSignal")
+    func stopSignalInvalidIsRejected() throws {
+        var config = SynthesizedImageConfig()
+        #expect(throws: DockerfileChangeError.self) {
+            try DockerfileChangeApplier.apply(["STOPSIGNAL NOTASIGNAL"], to: &config)
+        }
+    }
+
+    @Test("STOPSIGNAL takes exactly one argument")
+    func stopSignalExtraArgumentsRejected() throws {
+        var config = SynthesizedImageConfig()
+        #expect(throws: DockerfileChangeError.self) {
+            try DockerfileChangeApplier.apply(["STOPSIGNAL SIGTERM extra"], to: &config)
+        }
+    }
+
+    @Test("HEALTHCHECK with flags and a CMD exec form applies, durations in nanoseconds")
+    func healthcheckFlagsAndExecForm() throws {
+        var config = SynthesizedImageConfig()
+        try DockerfileChangeApplier.apply(
+            [
+                "HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --start-interval=2s --retries=3 CMD [\"curl\", \"-f\", \"http://localhost\"]"
+            ],
+            to: &config)
+        #expect(
+            config.healthcheck
+                == HealthcheckConfig(
+                    Test: ["CMD", "curl", "-f", "http://localhost"],
+                    Interval: 30_000_000_000,
+                    Timeout: 3_000_000_000,
+                    Retries: 3,
+                    StartPeriod: 5_000_000_000,
+                    StartInterval: 2_000_000_000))
+    }
+
+    @Test("HEALTHCHECK in shell form wraps the command as CMD-SHELL")
+    func healthcheckShellForm() throws {
+        var config = SynthesizedImageConfig()
+        try DockerfileChangeApplier.apply(
+            ["HEALTHCHECK --interval=1m30s CMD curl -f http://localhost || exit 1"], to: &config)
+        #expect(
+            config.healthcheck
+                == HealthcheckConfig(
+                    Test: ["CMD-SHELL", "curl -f http://localhost || exit 1"],
+                    Interval: 90_000_000_000,
+                    Timeout: nil,
+                    Retries: nil,
+                    StartPeriod: nil))
+    }
+
+    @Test("HEALTHCHECK NONE sets moby's disable marker")
+    func healthcheckNone() throws {
+        var config = SynthesizedImageConfig()
+        try DockerfileChangeApplier.apply(["HEALTHCHECK NONE"], to: &config)
+        #expect(
+            config.healthcheck
+                == HealthcheckConfig(
+                    Test: ["NONE"], Interval: nil, Timeout: nil, Retries: nil, StartPeriod: nil))
+    }
+
+    @Test("HEALTHCHECK NONE takes no arguments")
+    func healthcheckNoneTakesNoArguments() throws {
+        var config = SynthesizedImageConfig()
+        #expect(throws: DockerfileChangeError.self) {
+            try DockerfileChangeApplier.apply(["HEALTHCHECK NONE extra"], to: &config)
+        }
+    }
+
+    @Test("a HEALTHCHECK type other than CMD or NONE is rejected")
+    func healthcheckUnknownTypeRejected() throws {
+        var config = SynthesizedImageConfig()
+        #expect(throws: DockerfileChangeError.self) {
+            try DockerfileChangeApplier.apply(["HEALTHCHECK CMDX true"], to: &config)
+        }
+    }
+
+    @Test("a HEALTHCHECK with no command after CMD is rejected")
+    func healthcheckMissingCommandRejected() throws {
+        var config = SynthesizedImageConfig()
+        #expect(throws: DockerfileChangeError.self) {
+            try DockerfileChangeApplier.apply(["HEALTHCHECK CMD"], to: &config)
+        }
+    }
+
+    @Test("an unknown HEALTHCHECK flag is rejected")
+    func healthcheckUnknownFlagRejected() throws {
+        var config = SynthesizedImageConfig()
+        #expect(throws: DockerfileChangeError.self) {
+            try DockerfileChangeApplier.apply(["HEALTHCHECK --bogus=1 CMD true"], to: &config)
+        }
+    }
+
+    @Test("a HEALTHCHECK flag without a value is rejected, like buildkit's bflag")
+    func healthcheckFlagMissingValueRejected() throws {
+        var config = SynthesizedImageConfig()
+        #expect(throws: DockerfileChangeError.self) {
+            try DockerfileChangeApplier.apply(["HEALTHCHECK --interval 30s CMD true"], to: &config)
+        }
+    }
+
+    @Test("a bare -- delimiter ends HEALTHCHECK flag processing, like buildkit's bflag")
+    func healthcheckDoubleDashDelimiter() throws {
+        var config = SynthesizedImageConfig()
+        try DockerfileChangeApplier.apply(["HEALTHCHECK -- CMD true"], to: &config)
+        #expect(
+            config.healthcheck
+                == HealthcheckConfig(
+                    Test: ["CMD-SHELL", "true"], Interval: nil, Timeout: nil, Retries: nil, StartPeriod: nil))
+    }
+
+    @Test("a HEALTHCHECK duration below 1ms is rejected, like moby's minimumDuration")
+    func healthcheckSubMillisecondRejected() throws {
+        var config = SynthesizedImageConfig()
+        #expect(throws: DockerfileChangeError.self) {
+            try DockerfileChangeApplier.apply(["HEALTHCHECK --interval=500us CMD true"], to: &config)
+        }
+    }
+
+    @Test("a negative HEALTHCHECK retries count is rejected")
+    func healthcheckNegativeRetriesRejected() throws {
+        var config = SynthesizedImageConfig()
+        #expect(throws: DockerfileChangeError.self) {
+            try DockerfileChangeApplier.apply(["HEALTHCHECK --retries=-1 CMD true"], to: &config)
+        }
+    }
+
+    @Test("a HEALTHCHECK overriding a previous one replaces it wholesale at the applier level")
+    func healthcheckReplacesPrevious() throws {
+        var config = SynthesizedImageConfig()
+        try DockerfileChangeApplier.apply(
+            ["HEALTHCHECK --interval=30s CMD true", "HEALTHCHECK CMD false"], to: &config)
+        #expect(
+            config.healthcheck
+                == HealthcheckConfig(
+                    Test: ["CMD-SHELL", "false"], Interval: nil, Timeout: nil, Retries: nil, StartPeriod: nil))
     }
 
     @Test("a genuinely invalid instruction (no value) is rejected")

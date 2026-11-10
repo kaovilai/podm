@@ -52,7 +52,8 @@ struct CommitConfigOverrides {
 ///
 /// 1. start from the request body's `Config` (sparse; absent when the client
 ///    sent no body — moby then starts from the container's own config, which
-///    the fill step below reconstructs);
+///    is pre-seeded for the Entrypoint/Cmd pair and reconstructed by the
+///    fill step below for the rest);
 /// 2. apply the `--change` Dockerfile instructions on top (`BuildFromConfig`);
 /// 3. `merge()`: fill every still-unset field from the container, with the
 ///    parent image's config as the fallback for fields the snapshot cannot
@@ -94,6 +95,20 @@ enum ContainerCommitConfig {
     ) throws -> SynthesizedImageConfig {
         var config = SynthesizedImageConfig()
 
+        // moby's `if c.Config == nil { c.Config = container.Config }`: with
+        // no request body, BuildFromConfig starts from the CONTAINER's own
+        // config, so the --change instructions apply on top of the
+        // container's Entrypoint/Cmd pair. Pre-seeding the pair here is what
+        // makes an explicitly-emptied Cmd survive: `--change 'CMD []'` on a
+        // container with a nonempty entrypoint keeps Cmd empty, because the
+        // merge below gates the Cmd refill on the FINAL entrypoint state
+        // (moby's merge only fills Cmd while the entrypoint is empty).
+        if overrides == nil {
+            let split = snapshotProcessSplit(container, parent: parent)
+            config.entrypoint = split.entrypoint
+            config.cmd = split.cmd
+        }
+
         // 1. Request-body Config — sparse, unset fields fall through.
         if let overrides {
             config.user = overrides.user
@@ -109,8 +124,15 @@ enum ContainerCommitConfig {
         }
 
         // 2. --change Dockerfile instructions on top (moby BuildFromConfig
-        // mutates the same request config before merge runs).
-        try DockerfileChangeApplier.apply(changes, to: &config)
+        // mutates the same request config before merge runs). A RELATIVE
+        // WORKDIR resolves against the container's effective working
+        // directory — the snapshot's live one, falling back to the parent
+        // image's — because moby's BuildFromConfig starts from the
+        // container's config, whose WorkingDir is the join base
+        // (normalizeWorkdir). Absolute paths pass through untouched.
+        let snapshotWorkingDir = container.configuration.initProcess.workingDirectory
+        let effectiveWorkingDir = snapshotWorkingDir.isEmpty ? parent?.workingDir : snapshotWorkingDir
+        try DockerfileChangeApplier.apply(changes, to: &config, baseWorkingDir: effectiveWorkingDir)
 
         // EXPOSE/VOLUME inheritance: union the parent's raw-config keys with
         // whatever the body and --change set, so a no-change commit of an
@@ -173,9 +195,16 @@ enum ContainerCommitConfig {
         // Healthcheck: the container's effective healthcheck — the JSON label
         // the create route persisted (image HEALTHCHECK merged with the
         // create-time request), parsed exactly like ContainerInspectRoute
-        // parses it. No label → no healthcheck to carry.
+        // parses it. No label → no healthcheck to carry. A PARTIAL body or
+        // --change healthcheck merges FIELD-WISE over it (moby's merge fills
+        // every zero-valued field from the container's config): nil fields
+        // inherit, set fields replace. `Test: ["NONE"]` is moby's disable
+        // marker and replaces wholesale — a disabled healthcheck inherits
+        // nothing.
         if config.healthcheck == nil {
             config.healthcheck = snapshotHealthcheck(container)
+        } else if let carried = snapshotHealthcheck(container), config.healthcheck?.Test != ["NONE"] {
+            config.healthcheck = mergeHealthcheckFields(config.healthcheck!, over: carried)
         }
 
         // Labels: fill missing keys — the container's labels (restored to
@@ -255,6 +284,21 @@ enum ContainerCommitConfig {
         container.configuration.labels[HealthCheckManager.healthcheckLabel]
             .flatMap { Data($0.utf8) }
             .flatMap { try? JSONDecoder().decode(HealthcheckConfig.self, from: $0) }
+    }
+
+    /// moby's merge() healthcheck fill: each field the request left unset
+    /// (nil here, zero there) inherits the container's value; set fields
+    /// replace it.
+    private static func mergeHealthcheckFields(
+        _ requested: HealthcheckConfig, over carried: HealthcheckConfig
+    ) -> HealthcheckConfig {
+        HealthcheckConfig(
+            Test: requested.Test ?? carried.Test,
+            Interval: requested.Interval ?? carried.Interval,
+            Timeout: requested.Timeout ?? carried.Timeout,
+            Retries: requested.Retries ?? carried.Retries,
+            StartPeriod: requested.StartPeriod ?? carried.StartPeriod,
+            StartInterval: requested.StartInterval ?? carried.StartInterval)
     }
 
     private static func envKey(_ entry: String) -> String {

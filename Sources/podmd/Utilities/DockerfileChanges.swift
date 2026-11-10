@@ -32,13 +32,16 @@ struct SynthesizedImageConfig {
     var volumes: Set<String> = []
     var workingDir: String?
     var labels: [String: String] = [:]
-    /// `docker commit` only — moby's commit body `Config.StopSignal` /
-    /// `container.Config.StopSignal`. Serialized with Docker's PascalCase key
-    /// (`StopSignal`), the extension key the OCI image-config JSON carries it
-    /// under. Import never sets it.
+    /// moby's `container.Config.StopSignal` — settable by `docker commit`'s
+    /// body `Config.StopSignal` and by a `STOPSIGNAL` --change on both import
+    /// and commit (moby's `validCommitCommands` includes it for both).
+    /// Serialized with Docker's PascalCase key (`StopSignal`), the extension
+    /// key the OCI image-config JSON carries it under.
     var stopSignal: String?
-    /// `docker commit` only — moby's commit body `Config.Healthcheck` /
-    /// the container's effective healthcheck. Serialized as the config
+    /// moby's `container.Config.Healthcheck` — settable by `docker commit`'s
+    /// body `Config.Healthcheck`, the container's effective healthcheck, and
+    /// a `HEALTHCHECK` --change on both import and commit (moby's
+    /// `validCommitCommands` includes it for both). Serialized as the config
     /// object's `Healthcheck` (Test/Interval/Timeout/Retries/StartPeriod/
     /// StartInterval), matching the docker-shape `HealthcheckConfig` model.
     var healthcheck: HealthcheckConfig?
@@ -81,19 +84,37 @@ struct SynthesizedImageConfig {
     }
 }
 
-/// Applies `docker import --change` directives (one Dockerfile instruction per
-/// entry) to a `SynthesizedImageConfig`. Supports the instructions the
-/// import route offers: CMD, ENTRYPOINT, ENV, EXPOSE, LABEL, USER, VOLUME, WORKDIR.
-/// Anything else (ONBUILD, STOPSIGNAL, HEALTHCHECK, or a genuinely unknown
-/// instruction) is rejected rather than silently dropped.
+/// Applies `--change` directives (one Dockerfile instruction per entry) to a
+/// `SynthesizedImageConfig`, for both `docker import --change` and
+/// `docker commit --change` (moby runs both through `BuildFromConfig`, whose
+/// `validCommitCommands` set defines the grammar). Supports: CMD, ENTRYPOINT,
+/// ENV, EXPOSE, HEALTHCHECK, LABEL, STOPSIGNAL, USER, VOLUME, WORKDIR.
+/// ONBUILD is valid for moby's commit but is not modeled by the synthesized
+/// config, so it — and any genuinely unknown instruction — is rejected rather
+/// than silently dropped.
 enum DockerfileChangeApplier {
-    static func apply(_ changes: [String], to config: inout SynthesizedImageConfig) throws {
+    /// - Parameters:
+    ///   - baseWorkingDir: the directory a RELATIVE `WORKDIR` resolves
+    ///     against when the config does not already carry one — moby's
+    ///     `BuildFromConfig` starts from the container's config for commit
+    ///     (so its working directory is the base), and from an empty config
+    ///     for import (so the base is `/`). `nil` behaves like the import
+    ///     case: relative paths anchor at `/`.
+    static func apply(
+        _ changes: [String],
+        to config: inout SynthesizedImageConfig,
+        baseWorkingDir: String? = nil
+    ) throws {
         for change in changes {
-            try applyOne(change, to: &config)
+            try applyOne(change, to: &config, baseWorkingDir: baseWorkingDir)
         }
     }
 
-    private static func applyOne(_ change: String, to config: inout SynthesizedImageConfig) throws {
+    private static func applyOne(
+        _ change: String,
+        to config: inout SynthesizedImageConfig,
+        baseWorkingDir: String?
+    ) throws {
         let trimmed = change.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -112,12 +133,212 @@ enum DockerfileChangeApplier {
         case "ENV": try applyEnv(rest, to: &config)
         case "LABEL": try applyLabels(rest, to: &config)
         case "USER": config.user = rest
-        case "WORKDIR": config.workingDir = rest
+        case "WORKDIR":
+            config.workingDir = resolveWorkdir(
+                rest, current: (config.workingDir ?? "").isEmpty ? nil : config.workingDir, base: baseWorkingDir)
         case "EXPOSE": config.exposedPorts.formUnion(parsePorts(rest))
         case "VOLUME": config.volumes.formUnion(try parseVolumes(instruction: instruction, rest))
+        case "STOPSIGNAL": try applyStopSignal(rest, to: &config)
+        case "HEALTHCHECK": try applyHealthcheck(rest, to: &config)
         default:
             throw DockerfileChangeError.invalidInstruction(instruction)
         }
+    }
+
+    /// moby's `normalizeWorkdir`: an absolute path passes through cleaned; a
+    /// relative one joins onto the CURRENT working directory (the config's
+    /// own, else the threaded-in base), anchored at `/` — moby's
+    /// `filepath.Join(string(os.PathSeparator), current, requested)` always
+    /// produces an absolute, cleaned path.
+    private static func resolveWorkdir(_ requested: String, current: String?, base: String?) -> String {
+        if requested.hasPrefix("/") {
+            return cleanPath(requested)
+        }
+        let currentDir = current ?? base ?? ""
+        return cleanPath("/" + currentDir + "/" + requested)
+    }
+
+    /// Lexical POSIX path cleaning, Go's `path.Clean`: collapses duplicate
+    /// slashes, drops `.` segments, resolves `..` against the previous
+    /// segment (a leading `..` survives only on relative paths), and strips
+    /// trailing separators.
+    private static func cleanPath(_ path: String) -> String {
+        let absolute = path.hasPrefix("/")
+        var segments: [String] = []
+        for segment in path.split(separator: "/") {
+            switch segment {
+            case ".": continue
+            case "..":
+                if segments.last != nil, segments.last != ".." {
+                    segments.removeLast()
+                } else if !absolute {
+                    segments.append("..")
+                }
+            default:
+                segments.append(String(segment))
+            }
+        }
+        let joined = segments.joined(separator: "/")
+        if absolute { return "/" + joined }
+        return joined.isEmpty ? "." : joined
+    }
+
+    /// `STOPSIGNAL <signal>` — moby's dispatcher validates through
+    /// `signal.ParseSignal` before setting; exactly one argument.
+    private static func applyStopSignal(_ rest: String, to config: inout SynthesizedImageConfig) throws {
+        let tokens = try tokenize(rest, instruction: "STOPSIGNAL")
+        guard tokens.count == 1 else {
+            throw DockerfileChangeError.invalidValue(instruction: "STOPSIGNAL", value: rest)
+        }
+        guard DockerSignal.isValid(tokens[0]) else {
+            throw DockerfileChangeError.invalidValue(instruction: "STOPSIGNAL", value: tokens[0])
+        }
+        config.stopSignal = tokens[0]
+    }
+
+    /// `HEALTHCHECK [--interval=<dur>|--timeout=<dur>|--start-period=<dur>|
+    /// --start-interval=<dur>|--retries=<n>] CMD <command>` or
+    /// `HEALTHCHECK NONE`, with moby's dispatcher semantics: the exec form
+    /// (`CMD ["a","b"]`) produces `Test = ["CMD", "a", "b"]`, the shell form
+    /// `Test = ["CMD-SHELL", <command>]`, and `NONE` the disable marker
+    /// `Test = ["NONE"]`. Flags are the LEADING `--name=value` tokens (the
+    /// Dockerfile line parser hands them to the dispatcher separately, and
+    /// buildkit's bflag requires the `=`); durations use Go's
+    /// `time.ParseDuration` grammar and land in the config as nanoseconds,
+    /// with zero meaning unset.
+    private static func applyHealthcheck(_ rest: String, to config: inout SynthesizedImageConfig) throws {
+        let knownFlags: Set<String> = ["interval", "timeout", "start-period", "start-interval", "retries"]
+        var flags: [String: String] = [:]
+        var remainder: Substring? = Substring(rest)
+        while let current = remainder {
+            let (token, after) = splitFirstToken(current)
+            guard token.hasPrefix("--") else { break }
+            // The POSIX `--` delimiter ends flag processing (buildkit's
+            // bflag does the same), so `HEALTHCHECK -- CMD true` parses.
+            if token == "--" {
+                remainder = after
+                break
+            }
+            guard let equals = token.firstIndex(of: "="), equals > token.index(token.startIndex, offsetBy: 2) else {
+                throw DockerfileChangeError.invalidValue(instruction: "HEALTHCHECK", value: String(token))
+            }
+            let name = String(token[token.index(token.startIndex, offsetBy: 2)..<equals])
+            let value = String(token[token.index(after: equals)...])
+            guard knownFlags.contains(name) else {
+                throw DockerfileChangeError.invalidValue(instruction: "HEALTHCHECK", value: String(token))
+            }
+            guard flags[name] == nil else {
+                throw DockerfileChangeError.invalidValue(instruction: "HEALTHCHECK", value: String(token))
+            }
+            flags[name] = value
+            remainder = after
+        }
+
+        guard let typeRemainder = remainder else {
+            throw DockerfileChangeError.invalidValue(instruction: "HEALTHCHECK", value: rest)
+        }
+        let (typToken, afterTyp) = splitFirstToken(typeRemainder)
+        switch typToken.uppercased() {
+        case "NONE":
+            // moby: "HEALTHCHECK NONE takes no arguments" — the flags it may
+            // carry are dropped without being validated.
+            guard afterTyp == nil || afterTyp?.isEmpty == true else {
+                throw DockerfileChangeError.invalidValue(instruction: "HEALTHCHECK", value: "NONE \(afterTyp ?? "")")
+            }
+            config.healthcheck = HealthcheckConfig(
+                Test: ["NONE"], Interval: nil, Timeout: nil, Retries: nil, StartPeriod: nil)
+        case "CMD":
+            let command = afterTyp.map(String.init) ?? ""
+            guard !command.isEmpty else {
+                throw DockerfileChangeError.invalidValue(instruction: "HEALTHCHECK", value: rest)
+            }
+            let test: [String]
+            if command.hasPrefix("[") {
+                guard let data = command.data(using: .utf8),
+                    let array = try? JSONDecoder().decode([String].self, from: data)
+                else {
+                    throw DockerfileChangeError.invalidValue(instruction: "HEALTHCHECK", value: command)
+                }
+                test = ["CMD"] + array
+            } else {
+                test = ["CMD-SHELL", String(command)]
+            }
+            config.healthcheck = HealthcheckConfig(
+                Test: test,
+                Interval: try parseHealthcheckDuration(flags["interval"], flag: "interval"),
+                Timeout: try parseHealthcheckDuration(flags["timeout"], flag: "timeout"),
+                Retries: try parseHealthcheckRetries(flags["retries"]),
+                StartPeriod: try parseHealthcheckDuration(flags["start-period"], flag: "start-period"),
+                StartInterval: try parseHealthcheckDuration(flags["start-interval"], flag: "start-interval"))
+        default:
+            throw DockerfileChangeError.invalidValue(instruction: "HEALTHCHECK", value: String(typToken))
+        }
+    }
+
+    /// Go's `time.ParseDuration` (subset: no sign, the units Dockerfiles
+    /// use) → nanoseconds. Empty and zero durations parse as nil — moby's
+    /// `parseOptInterval` maps 0 to "unset", which the commit merge then
+    /// fills from the container's healthcheck. Non-zero durations below 1ms
+    /// are rejected, matching moby's `minimumDuration`.
+    private static func parseHealthcheckDuration(_ raw: String?, flag: String) throws -> Int? {
+        guard let raw, !raw.isEmpty else { return nil }
+        let units: [Substring: Int64] = [
+            "ns": 1, "us": 1_000, "µs": 1_000, "ms": 1_000_000,
+            "s": 1_000_000_000, "m": 60_000_000_000, "h": 3_600_000_000_000,
+        ]
+        var rest = Substring(raw)
+        var total: Double = 0
+        var parsedComponent = false
+        while !rest.isEmpty {
+            // Number: digits with an optional single '.' and fraction digits.
+            var numberEnd = rest.startIndex
+            var seenDot = false
+            while numberEnd < rest.endIndex {
+                let char = rest[numberEnd]
+                if char.isNumber {
+                    numberEnd = rest.index(after: numberEnd)
+                } else if char == "." && !seenDot {
+                    seenDot = true
+                    numberEnd = rest.index(after: numberEnd)
+                } else {
+                    break
+                }
+            }
+            let numberText = rest[..<numberEnd]
+            guard !numberText.isEmpty, numberText != ".", let value = Double(numberText) else {
+                throw DockerfileChangeError.invalidValue(instruction: "HEALTHCHECK", value: "\(flag)=\(raw)")
+            }
+            // Unit: everything up to the next number or dot.
+            var unitEnd = numberEnd
+            while unitEnd < rest.endIndex, !rest[unitEnd].isNumber, rest[unitEnd] != "." {
+                unitEnd = rest.index(after: unitEnd)
+            }
+            guard let unitNanos = units[rest[numberEnd..<unitEnd]] else {
+                throw DockerfileChangeError.invalidValue(instruction: "HEALTHCHECK", value: "\(flag)=\(raw)")
+            }
+            total += value * Double(unitNanos)
+            rest = rest[unitEnd...]
+            parsedComponent = true
+        }
+        guard parsedComponent, total >= 0, total <= Double(Int64.max) else {
+            throw DockerfileChangeError.invalidValue(instruction: "HEALTHCHECK", value: "\(flag)=\(raw)")
+        }
+        let nanoseconds = Int64(total)
+        if nanoseconds == 0 { return nil }
+        guard nanoseconds >= 1_000_000 else {
+            throw DockerfileChangeError.invalidValue(instruction: "HEALTHCHECK", value: "\(flag)=\(raw)")
+        }
+        return Int(nanoseconds)
+    }
+
+    /// `--retries=<n>`: a non-negative integer (moby: ParseInt base 10,
+    /// "cannot be negative").
+    private static func parseHealthcheckRetries(_ raw: String?) throws -> Int? {
+        guard let raw, !raw.isEmpty else { return nil }
+        guard let retries = Int(raw), retries >= 0 else {
+            throw DockerfileChangeError.invalidValue(instruction: "HEALTHCHECK", value: "retries=\(raw)")
+        }
+        return retries
     }
 
     /// CMD/ENTRYPOINT accept either JSON exec form (`["a", "b"]`) or shell form,

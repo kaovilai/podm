@@ -267,6 +267,84 @@ struct ContainerCommitConfigTests {
         }
     }
 
+    // MARK: - Relative WORKDIR resolution
+
+    @Test("a relative --change WORKDIR joins the container's working directory")
+    func relativeWorkdirJoinsContainerDir() throws {
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(workingDirectory: "/srv"),
+            parent: nil,
+            overrides: nil,
+            changes: ["WORKDIR logs"])
+
+        #expect(config.workingDir == "/srv/logs")
+    }
+
+    @Test("a relative --change WORKDIR falls back to the parent's working directory when the snapshot has none")
+    func relativeWorkdirFallsBackToParent() throws {
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(workingDirectory: ""),
+            parent: makeParent(workingDir: "/opt"),
+            overrides: nil,
+            changes: ["WORKDIR logs"])
+
+        #expect(config.workingDir == "/opt/logs")
+    }
+
+    @Test("an absolute --change WORKDIR passes through untouched")
+    func absoluteWorkdirPassesThrough() throws {
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(workingDirectory: "/srv"),
+            parent: nil,
+            overrides: nil,
+            changes: ["WORKDIR /opt"])
+
+        #expect(config.workingDir == "/opt")
+    }
+
+    @Test("a body WorkingDir is the join base for a relative --change WORKDIR, like moby's runConfig")
+    func bodyWorkdirIsJoinBase() throws {
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(workingDirectory: "/srv"),
+            parent: nil,
+            overrides: CommitConfigOverrides(workingDir: "/base"),
+            changes: ["WORKDIR logs"])
+
+        #expect(config.workingDir == "/base/logs")
+    }
+
+    // MARK: - CMD [] under a nonempty entrypoint
+
+    @Test("an explicitly-emptied --change CMD stays empty when the container has a nonempty entrypoint")
+    func emptiedCmdStaysEmptyUnderEntrypoint() throws {
+        // moby's merge only fills Cmd while the entrypoint is empty; with no
+        // body, BuildFromConfig starts from the container's own config, so
+        // `CMD []` under the container's ENTRYPOINT must survive as [].
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(),
+            parent: makeParent(),
+            overrides: nil,
+            changes: ["CMD []"])
+
+        #expect(config.entrypoint == ["/app"])
+        #expect(config.cmd == [])
+    }
+
+    @Test("an emptied --change CMD on an entrypoint-LESS container is refilled, matching moby's merge")
+    func emptiedCmdRefilledWithoutEntrypoint() throws {
+        // No parent entrypoint → the container's config pair is (nil, cmd);
+        // moby's merge sees an empty entrypoint and refills the emptied Cmd.
+        let parent = makeParent(entrypoint: nil, cmd: ["/app", "serve"])
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(executable: "/app", arguments: ["serve"]),
+            parent: parent,
+            overrides: nil,
+            changes: ["CMD []"])
+
+        #expect(config.entrypoint == nil)
+        #expect(config.cmd == ["/app", "serve"])
+    }
+
     // MARK: - Multi-element ENTRYPOINT split
 
     @Test("a multi-element parent ENTRYPOINT splits intact: [\"/bin/sh\",\"-c\"] + CMD [\"echo\"] stays two parts")
@@ -429,6 +507,85 @@ struct ContainerCommitConfigTests {
             changes: [])
 
         #expect(config.healthcheck == override)
+    }
+
+    @Test("a PARTIAL body Healthcheck merges field-wise: nil fields inherit, set fields replace")
+    func partialBodyHealthcheckMergesFieldWise() throws {
+        // moby's merge fills each zero-valued healthcheck field from the
+        // container's config, so a body carrying only Interval keeps the
+        // container's probe (Test) instead of discarding it.
+        let carried = HealthcheckConfig(
+            Test: ["CMD-SHELL", "curl -f http://localhost/ || exit 1"],
+            Interval: 30_000_000_000,
+            Timeout: 3_000_000_000,
+            Retries: 3,
+            StartPeriod: 10_000_000_000)
+        let partial = HealthcheckConfig(
+            Test: nil, Interval: 60_000_000_000, Timeout: nil, Retries: nil, StartPeriod: nil)
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(healthcheck: carried),
+            parent: nil,
+            overrides: CommitConfigOverrides(healthcheck: partial),
+            changes: [])
+
+        #expect(
+            config.healthcheck
+                == HealthcheckConfig(
+                    Test: ["CMD-SHELL", "curl -f http://localhost/ || exit 1"],
+                    Interval: 60_000_000_000,
+                    Timeout: 3_000_000_000,
+                    Retries: 3,
+                    StartPeriod: 10_000_000_000))
+    }
+
+    @Test("a body Healthcheck with Test NONE disables wholesale — nothing is inherited")
+    func bodyHealthcheckNoneDisablesWholesale() throws {
+        let carried = HealthcheckConfig(
+            Test: ["CMD", "true"], Interval: 30, Timeout: 5, Retries: 3, StartPeriod: 10)
+        let disable = HealthcheckConfig(
+            Test: ["NONE"], Interval: nil, Timeout: nil, Retries: nil, StartPeriod: nil)
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(healthcheck: carried),
+            parent: nil,
+            overrides: CommitConfigOverrides(healthcheck: disable),
+            changes: [])
+
+        #expect(config.healthcheck == disable)
+    }
+
+    @Test("a partial --change HEALTHCHECK merges field-wise over the container's, like moby's merge after BuildFromConfig")
+    func partialChangeHealthcheckMergesFieldWise() throws {
+        let carried = HealthcheckConfig(
+            Test: ["CMD-SHELL", "old probe"],
+            Interval: 30_000_000_000,
+            Timeout: 3_000_000_000,
+            Retries: 3,
+            StartPeriod: nil)
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(healthcheck: carried),
+            parent: nil,
+            overrides: nil,
+            changes: ["HEALTHCHECK --retries=5 CMD [\"new-probe\"]"])
+
+        #expect(
+            config.healthcheck
+                == HealthcheckConfig(
+                    Test: ["CMD", "new-probe"],
+                    Interval: 30_000_000_000,
+                    Timeout: 3_000_000_000,
+                    Retries: 5,
+                    StartPeriod: nil))
+    }
+
+    @Test("a --change STOPSIGNAL wins over the container's and the parent's")
+    func changeStopSignalOverrides() throws {
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(stopSignal: "SIGQUIT"),
+            parent: nil,
+            overrides: nil,
+            changes: ["STOPSIGNAL SIGUSR2"])
+
+        #expect(config.stopSignal == "SIGUSR2")
     }
 
     @Test("a container with no healthcheck label commits without one")

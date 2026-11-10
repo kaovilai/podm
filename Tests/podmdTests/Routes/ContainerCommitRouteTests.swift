@@ -574,6 +574,39 @@ struct ContainerCommitRouteTests {
         }
     }
 
+    @Test("libpod stream=false keeps the plain IDResponse body")
+    func libpodStreamFalseKeepsPlainBody() async throws {
+        let snapshot = try makeContainerSnapshot(
+            nativeId: "web", ip: "192.168.65.2", network: "bridge", labels: [:], status: .stopped)
+
+        try await withCommitApp(snapshot: snapshot, libpod: true) { app in
+            try await app.testing().test(.POST, "/v1.51/libpod/commit?container=web&stream=false") { res async throws in
+                #expect(res.status == .ok)
+                #expect(try res.content.decode(RESTCommitIDResponse.self).Id == Self.committedDigest)
+            }
+        }
+    }
+
+    @Test("libpod stream=true answers a single newline-terminated BuildResponse record carrying the bare hex ID")
+    func libpodStreamTrueAnswersBuildResponseRecord() async throws {
+        let snapshot = try makeContainerSnapshot(
+            nativeId: "web", ip: "192.168.65.2", network: "bridge", labels: [:], status: .stopped)
+
+        try await withCommitApp(snapshot: snapshot, libpod: true) { app in
+            try await app.testing().test(.POST, "/v1.51/libpod/commit?container=web&stream=true") { res async throws in
+                #expect(res.status == .ok)
+                // podman's handler sets the streaming content type before the
+                // first record goes out.
+                #expect(res.headers.first(name: .contentType) == "application/json")
+                // One images.BuildResponse record, newline-terminated the way
+                // Go's json.Encoder does; the ID rides in `stream` as bare hex
+                // (the fixture digest sha256:cafebabe → cafebabe) because
+                // podman's client regex requires twelve leading hex chars.
+                #expect(res.body.string == "{\"stream\":\"cafebabe\"}\n")
+            }
+        }
+    }
+
     // MARK: - Event
 
     @Test("a commit broadcasts a container 'commit' event with comment, imageID and imageRef")
