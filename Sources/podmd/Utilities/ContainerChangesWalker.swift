@@ -172,14 +172,22 @@ enum ContainerChangesWalker {
         let isSymlink: Bool
         let size: Int64
         let mtime: UInt32
+        /// ext4 stores timestamp epoch/nsec extension bits in a sibling
+        /// `*_extra` field — compared as a pair with the base seconds so a
+        /// divergence anywhere in the encoded timestamp is a divergence.
+        let mtimeExtra: UInt32
         /// Inode change time: bumped by any metadata/data write and NOT
         /// settable through utimes() — the archive API can preserve mtime,
         /// but a rewritten file still bumps ctime, so same-size/same-mtime
         /// content rewrites stay detectable without hashing every file.
         let ctime: UInt32
+        let ctimeExtra: UInt32
         let mode: UInt16
-        let uid: UInt16
-        let gid: UInt16
+        /// Full 32-bit ids: ext4 splits uid/gid into low 16 bits plus the
+        /// osd2 high bits — a change from 1 to 65537 is a REAL ownership
+        /// change and must not compare equal.
+        let uid: UInt32
+        let gid: UInt32
 
         init(inode: EXT4.Inode) {
             typeTag = inode.mode & 0xF000
@@ -187,10 +195,12 @@ enum ContainerChangesWalker {
             isSymlink = inode.isSymlink
             size = inode.size
             mtime = inode.mtime
+            mtimeExtra = inode.mtimeExtra
             ctime = inode.ctime
+            ctimeExtra = inode.ctimeExtra
             mode = inode.mode
-            uid = inode.uid
-            gid = inode.gid
+            uid = UInt32(inode.uid) | (UInt32(inode.uidHigh) << 16)
+            gid = UInt32(inode.gid) | (UInt32(inode.gidHigh) << 16)
         }
 
         /// Metadata equality for content-bearing entries: everything a
@@ -291,7 +301,9 @@ enum ContainerChangesWalker {
                         // Different sizes mean different contents — no hash
                         // needed (also avoids reading both files in vain).
                         changes.append(ContainerFileChange(path: childPath, kind: .modified))
-                    } else if b.mtime != c.mtime || b.ctime != c.ctime {
+                    } else if (b.mtime, b.mtimeExtra) != (c.mtime, c.mtimeExtra)
+                        || (b.ctime, b.ctimeExtra) != (c.ctime, c.ctimeExtra)
+                    {
                         // Same size, but a timestamp moved. mtime alone can be
                         // rewritten without touching the bytes (rootfs-creation
                         // timestamp churn) — hash to confirm. ctime cannot be
@@ -352,9 +364,27 @@ enum ContainerChangesWalker {
         return baseDigest != currentDigest
     }
 
+    /// Hash chunk size for the streamed content comparison — bounds the
+    /// per-file memory so a same-size multi-gigabyte file with a diverged
+    /// timestamp hashes in 1 MiB windows instead of materializing whole.
+    private static let hashChunkBytes = 1 << 20
+
     private static func contentDigest(_ reader: EXT4.EXT4Reader, at path: String) -> String? {
-        guard let data = try? reader.readFile(at: FilePath(path)) else { return nil }
-        return SHA256.hash(data: data).compactMap { String(format: "%02x", $0) }.joined()
+        var hasher = SHA256()
+        let chunk = UnsafeMutableRawBufferPointer.allocate(byteCount: hashChunkBytes, alignment: 64)
+        defer { chunk.deallocate() }
+        var offset: UInt64 = 0
+        do {
+            while true {
+                let read = try reader.readFile(at: FilePath(path), into: chunk, offset: offset)
+                if read == 0 { break }
+                hasher.update(data: Data(bytes: chunk.baseAddress!, count: read))
+                offset += UInt64(read)
+            }
+        } catch {
+            return nil
+        }
+        return hasher.finalize().compactMap { String(format: "%02x", $0) }.joined()
     }
 
     private static func symlinkTarget(_ reader: EXT4.EXT4Reader, at path: String) -> String? {
