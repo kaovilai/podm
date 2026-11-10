@@ -99,18 +99,27 @@ actor SecretStore {
     /// — the next persist would overwrite the only copy of unreadable data.
     /// Set once at init; cleared by fixing the files and restarting.
     private let quarantineBlocked: Bool
+    /// The data-flush primitive used before publishing a swap: F_FULLFSYNC
+    /// (reaches past the drive cache; plain fsync does not). Instance-scoped
+    /// so tests can fault-inject flush failures Foundation cannot produce.
+    private let fullSync: @Sendable (Int32) -> Int32
 
     /// Loads (or initializes) the store under `storageDirectory`. Missing
     /// files are not an error — the store simply starts empty and writes both
     /// files on first mutation. Corrupt files are logged and treated as empty
     /// (same posture as `RestartPolicyOverrideStore`): a hand-mangled store
     /// loses its secrets rather than taking the daemon down.
-    init(storageDirectory: URL, logger: Logger = Logger(label: "podm.secrets")) {
+    /// `flushSync` overrides the pre-swap data-flush primitive (tests only).
+    init(
+        storageDirectory: URL, logger: Logger = Logger(label: "podm.secrets"),
+        flushSync: (@Sendable (Int32) -> Int32)? = nil
+    ) {
         let dir = storageDirectory.appendingPathComponent("podm-secrets", isDirectory: true)
         let filedriverDir = dir.appendingPathComponent("filedriver", isDirectory: true)
         metadataURL = dir.appendingPathComponent("secrets.json")
         payloadURL = filedriverDir.appendingPathComponent("secretsdata.json")
         log = logger
+        fullSync = flushSync ?? { fd in fcntl(fd, F_FULLFSYNC, 0) }
 
         // Restrictive permissions from the start: 0700 dirs (readable/traversable
         // only by the daemon's user), so payloads can never be world-readable
@@ -558,9 +567,9 @@ actor SecretStore {
             do {
                 switch write {
                 case .payload(let payloads):
-                    try Self.writeJSON(payloads, to: payloadURL, log: log)
+                    try Self.writeJSON(payloads, to: payloadURL, log: log, fullSync: fullSync)
                 case .metadata(let secrets):
-                    try Self.writeJSON(secrets, to: metadataURL, log: log)
+                    try Self.writeJSON(secrets, to: metadataURL, log: log, fullSync: fullSync)
                 }
             } catch {
                 throw StoreError.persistFailed(reason: "\(error)", writeIndex: index)
@@ -585,16 +594,23 @@ actor SecretStore {
     /// never surface as an error, see below). The data therefore cannot be
     /// ordered behind the rename that publishes it, which is what keeps
     /// metadata from referencing a payload that never reached the disk
-    /// (persist's ordering invariant). The residual risk is the platform's
-    /// own flush semantics — no stronger primitive is available on macOS.
-    /// Callers' rollback logic cannot tell a failed write from a committed
+    /// (persist's ordering invariant). Guarantee boundary: a FAILED data
+    /// flush before the swap throws (pre-commit); a failed DIRECTORY flush
+    /// after it is logged and later writes proceed — after such a failure
+    /// the power-loss ordering is best-effort until the next successful
+    /// flush, an availability-over-paranoia trade for a local daemon. The
+    /// residual risk is the platform's own flush semantics — no stronger
+    /// primitive is available on macOS. Callers' rollback logic cannot
+    /// tell a failed write from a committed
     /// one, and rolling back after a committed metadata write would let a
     /// later mutation discard payloads the on-disk metadata still
     /// references. `replaceItemAt` (verified empirically) preserves the
     /// DESTINATION's mode, not the temp's — the destination is guaranteed
     /// owner-only by init's tightening — so the post-swap mode re-assertion
     /// is belt-and-braces and only logs.
-    private static func writeJSON<T: Encodable>(_ value: T, to url: URL, log: Logger) throws {
+    private static func writeJSON<T: Encodable>(
+        _ value: T, to url: URL, log: Logger, fullSync: @Sendable (Int32) -> Int32
+    ) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(value)
@@ -613,13 +629,18 @@ actor SecretStore {
         // persist the metadata rename while the payload data is still in
         // cache, and a power loss would leave metadata referencing payloads
         // that never landed. F_FULLFSYNC reaches past the drive cache where
-        // plain fsync (already done by synchronize()) does not; if it is
-        // unsupported on this filesystem the fsync stands as the floor.
+        // plain fsync (already done by synchronize()) does not. An
+        // UNSUPPORTED flush (ENOTSUP/EINVAL — not every filesystem
+        // implements it) falls back to the fsync above; any OTHER failure
+        // is a real flush failure, is pre-commit, and THROWS: the swap must
+        // not publish data that was never flushed.
         do {
             let handle = try FileHandle(forWritingTo: temp)
             defer { try? handle.close() }
             try handle.synchronize()
-            _ = fcntl(handle.fileDescriptor, F_FULLFSYNC, 0)
+            if fullSync(handle.fileDescriptor) != 0, errno != ENOTSUP, errno != EINVAL {
+                throw CocoaError(.fileWriteUnknown)
+            }
         } catch {
             try? FileManager.default.removeItem(at: temp)
             throw error
@@ -637,7 +658,11 @@ actor SecretStore {
         // Durability, part 2 (post-commit, best-effort and LOGGED — see the
         // failure ordering contract): flush the directory entry so the
         // publishing rename itself reaches the disk. Never throws: the swap
-        // already committed.
+        // already committed. A failure does NOT block later writes — the
+        // state is committed and consistent; refusing service over a
+        // transient flush failure would be worse for a local daemon. The
+        // operator gets the warning (and the guarantee is best-effort until
+        // the next successful flush, per the doc comment).
         let directory = url.deletingLastPathComponent()
         let dirFD = open(directory.path, O_RDONLY)
         if dirFD >= 0 {

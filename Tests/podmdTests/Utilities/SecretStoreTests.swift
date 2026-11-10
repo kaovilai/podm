@@ -494,6 +494,36 @@ struct SecretStoreTests {
         #expect(FileManager.default.fileExists(atPath: backup.path), "quarantine backups hold recoverable data")
     }
 
+    @Test("a failed data flush before the swap is a pre-commit failure (rollback, retryable)")
+    func dataFlushFailureIsPreCommitFailure() async throws {
+        let dir = uniqueTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // Fault-injected F_FULLFSYNC: fails with a real I/O errno (not the
+        // benign ENOTSUP/EINVAL fallback), so the flush failure is a real
+        // pre-commit error — the swap must not publish unflushed data.
+        let store = SecretStore(
+            storageDirectory: dir,
+            flushSync: { _ in
+                errno = EIO
+                return -1
+            })
+        await #expect(throws: SecretStore.StoreError.self) {
+            _ = try await store.create(
+                name: "unflushed", data: Data("x".utf8), driver: nil,
+                labels: [:], driverOptions: [:], replace: false, ignore: false
+            )
+        }
+        // Pre-commit failure: rolled back, fully retryable.
+        #expect(await store.lookup(nameOrID: "unflushed") == nil)
+        // The store itself stays usable — the failure is per-write.
+        let healthy = SecretStore(storageDirectory: dir)
+        _ = try await healthy.create(
+            name: "after", data: Data("x".utf8), driver: nil,
+            labels: [:], driverOptions: [:], replace: false, ignore: false
+        )
+        #expect(await healthy.lookup(nameOrID: "after") != nil)
+    }
+
     private func uniqueTempDir() -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
