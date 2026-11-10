@@ -23,6 +23,10 @@ import VaporTesting
 /// stub.
 @Suite("Route conformance — the registered surface answers, stubs only per manifest")
 struct RouteConformanceTests {
+    // The deliberate-stub manifest (routes + reasons) lives in
+    // Sources/podmd/Utilities/RouteSupportManifest.swift so `podmd --docgen`
+    // renders the same decision record into the README section and the
+    // GitHub Pages site that this test enforces.
     /// Routes that deliberately answer with a not-implemented/not-supported
     /// stub. Every entry is a product decision:
     /// - pause/unpause: Apple container has no pause primitive.
@@ -34,60 +38,9 @@ struct RouteConformanceTests {
     ///
     /// Adding an entry requires a reason here; implementing a route requires
     /// REMOVING its entry (the reverse assertion fails otherwise).
-    private static let deliberateStubRoutes: Set<String> = [
-        // container-scoped gaps (docker dialect + libpod twins)
-        "POST /commit",
-        "GET /containers/{id}/changes",
-        "POST /containers/{id}/pause",
-        "POST /containers/{id}/rename",
-        "POST /containers/{id}/unpause",
-        "POST /libpod/commit",
-        "GET /libpod/containers/{id}/changes",
-        "POST /libpod/containers/{id}/pause",
-        "POST /libpod/containers/{id}/rename",
-        "POST /libpod/containers/{id}/unpause",
-        // buildx session channel
-        "GET /session",
-        // swarm compatibility surface (single-node: not supported)
-        "GET /configs",
-        "GET /configs/{id}",
-        "POST /configs/{id}/update",
-        "POST /configs/create",
-        "GET /nodes",
-        "GET /nodes/{id}",
-        "POST /nodes/{id}/update",
-        "GET /secrets",
-        "GET /secrets/{id}",
-        "POST /secrets/{id}/update",
-        "POST /secrets/create",
-        "GET /services",
-        "GET /services/{id}",
-        "GET /services/{id}/logs",
-        "POST /services/{id}/update",
-        "POST /services/create",
-        "GET /swarm",
-        "POST /swarm/init",
-        "POST /swarm/join",
-        "POST /swarm/leave",
-        "POST /swarm/unlock",
-        "GET /swarm/unlockkey",
-        "POST /swarm/update",
-        "GET /tasks",
-        "GET /tasks/{id}",
-        "GET /tasks/{id}/logs",
-        // plugin system compatibility surface
-        "GET /plugins",
-        "GET /plugins/{name}",
-        "POST /plugins/{name}/disable",
-        "POST /plugins/{name}/enable",
-        "GET /plugins/{name}/json",
-        "POST /plugins/{name}/push",
-        "POST /plugins/{name}/set",
-        "POST /plugins/{name}/upgrade",
-        "POST /plugins/create",
-        "GET /plugins/privileges",
-        "POST /plugins/pull",
-    ]
+    private static var deliberateStubRoutes: Set<String> {
+        RouteSupportManifest.stubKeys
+    }
 
     /// What a probe learned about one route.
     private enum ProbeOutcome: Sendable {

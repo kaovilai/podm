@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright © 2026 the podm authors.
 #
-# NOTE: the podm repository is currently private, so this formula is
-# aspirational/ready — it only becomes installable (e.g. via a tap:
-# `brew install kaovilai/podm/podm`) once the repository is public and the
-# first release tag exists.
+# Ready and waiting for the first tagged release: the release pipeline
+# publishes this formula to the kaovilai/homebrew-tap repository, after which
+# `brew install kaovilai/tap/podm` works. The URL/sha256 below are updated
+# automatically at release time.
 
 class Podm < Formula
   desc "Run the stock podman/docker CLIs natively on macOS over Apple containerization"

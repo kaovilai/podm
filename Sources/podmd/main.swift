@@ -28,6 +28,13 @@ struct CLIOptions: ParsableArguments {
             "Upstream DNS resolver for names the embedded DNS server cannot answer locally: IPv4 literal with optional :port (default 1.1.1.1:53). Env fallback: PODM_DNS_UPSTREAM"
     )
     var dnsUpstream: String?
+
+    @ArgumentParser.Option(
+        name: .long,
+        help:
+            "Generate route-coverage documentation (route-coverage.md + index.html) into the given directory and exit — CI uses this to keep the README section and the GitHub Pages site in sync with the registered surface."
+    )
+    var docgen: String?
 }
 
 // Parse CLI before starting the app
@@ -35,6 +42,18 @@ let options = CLIOptions.parseOrExit()
 
 if options.version {
     print("podm: \(getBuildVersion()) (git commit: \(getBuildGitCommit()))")
+    exit(0)
+}
+
+// Documentation generation mode: boot the production route registry (no
+// server, no instance lock), render the support surface, exit. Used by CI.
+if let docgenDir = options.docgen {
+    var docgenEnv = try Environment(name: "docgen", arguments: ["podm"])
+    try LoggingSystem.bootstrap(from: &docgenEnv)
+    let docgenApp = try await Application.make(docgenEnv)
+    _ = try await RouteRegistry.bootstrap(docgenApp)
+    try RouteDocGen.write(to: docgenDir, routes: docgenApp.regexRouter.registeredRoutes)
+    try await docgenApp.asyncShutdown()
     exit(0)
 }
 
