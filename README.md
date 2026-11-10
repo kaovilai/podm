@@ -317,7 +317,7 @@ gives you; the point is nothing above it stays resident.
      overwritten on the next run. Regenerate locally with:
      swift build && .build/debug/podmd --docgen /tmp/podm-docs -->
 
-178 routes registered (136 supported, 42 deliberately not
+183 routes registered (141 supported, 42 deliberately not
 implemented — every gap carries its reason and its tracking context in
 [RouteSupportManifest.swift](Sources/podmd/Utilities/RouteSupportManifest.swift)).
 Full, searchable version: **[podm route coverage site](https://github.tig.pw/podm/)**.
@@ -494,6 +494,11 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `POST` | `/libpod/networks/{name}/connect` | libpod |  |
 | ✅ | `POST` | `/libpod/networks/{name}/disconnect` | libpod |  |
 | ✅ | `GET` | `/libpod/networks/{name}/exists` | libpod |  |
+| ✅ | `POST` | `/libpod/secrets/create` | libpod |  |
+| ✅ | `GET` | `/libpod/secrets/json` | libpod |  |
+| ✅ | `DELETE` | `/libpod/secrets/{name}` | libpod |  |
+| ✅ | `GET` | `/libpod/secrets/{name}/exists` | libpod |  |
+| ✅ | `GET` | `/libpod/secrets/{name}/json` | libpod |  |
 | ✅ | `GET` | `/libpod/system/df` | libpod |  |
 | ✅ | `GET` | `/libpod/version` | libpod |  |
 | ✅ | `POST` | `/libpod/volumes/create` | libpod |  |
