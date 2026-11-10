@@ -125,12 +125,22 @@ enum ContainerChangesWalker {
         if let platform {
             // The container's own platform decides — only matching children
             // are candidates, and a mismatched snapshot is never a fallback.
+            // Variant matches when both sides specify one (an arm64/v8
+            // container must not take a v7 snapshot); an omitted variant on
+            // either side stays compatible.
             let matching = childDigests.filter { child in
                 let childPlatform =
                     manifests
                     .first { ($0["digest"] as? String) == child.digest }?["platform"] as? [String: Any]
-                return (childPlatform?["os"] as? String) == platform.os
-                    && (childPlatform?["architecture"] as? String) == platform.architecture
+                guard (childPlatform?["os"] as? String) == platform.os,
+                    (childPlatform?["architecture"] as? String) == platform.architecture
+                else { return false }
+                if let requestedVariant = platform.variant,
+                    let childVariant = childPlatform?["variant"] as? String
+                {
+                    return requestedVariant == childVariant
+                }
+                return true
             }
             candidates.append(contentsOf: matching.map(\.digest))
         } else {
