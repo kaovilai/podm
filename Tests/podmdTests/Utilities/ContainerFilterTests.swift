@@ -255,6 +255,48 @@ struct ContainerFilterTests {
             containers, filters: ["status": ["running"], "label": ["env=prod"]])
         #expect(result.map(\.id) == ["a"])
     }
+
+    // MARK: - name / before / since with rename overrides
+
+    @Test("name filter matches the effective (renamed) name and keeps the native id matchable")
+    func nameFilterMatchesEffectiveNames() throws {
+        let containers = [
+            try makeSnapshot(id: "web", status: .running),
+            try makeSnapshot(id: "db", status: .running),
+        ]
+        let effective = ["web": "api", "db": "db"]
+        let byOverride = ClientContainerService.applyFilters(
+            containers, filters: ["name": ["api"]], effectiveNames: effective)
+        #expect(byOverride.map(\.id) == ["web"])
+        // The native id stays resolvable even when an override shadows it —
+        // renaming cannot free it (documented podm constraint).
+        let byNative = ClientContainerService.applyFilters(
+            containers, filters: ["name": ["web"]], effectiveNames: effective)
+        #expect(byNative.map(\.id) == ["web"])
+        let byUnrenamed = ClientContainerService.applyFilters(
+            containers, filters: ["name": ["db"]], effectiveNames: effective)
+        #expect(byUnrenamed.map(\.id) == ["db"])
+    }
+
+    @Test("before/since resolve their reference container by the effective name")
+    func beforeSinceResolveEffectiveNames() throws {
+        // No on-disk bundle exists in unit tests, so the creation date comes
+        // from the legacy creation-timestamp label — deterministic ordering.
+        let older = try makeSnapshot(
+            id: "web", status: .running,
+            labels: [AppleContainerTimestampResolver.legacyCreationTimestampLabel: "1000"])
+        let newer = try makeSnapshot(
+            id: "db", status: .running,
+            labels: [AppleContainerTimestampResolver.legacyCreationTimestampLabel: "2000"])
+        // before=<renamed newer> keeps the older container.
+        let before = ClientContainerService.applyFilters(
+            [older, newer], filters: ["before": ["api"]], allContainers: [older, newer], effectiveNames: ["db": "api"])
+        #expect(before.map(\.id) == ["web"])
+        // since=<renamed older> keeps the newer container.
+        let since = ClientContainerService.applyFilters(
+            [older, newer], filters: ["since": ["api"]], allContainers: [older, newer], effectiveNames: ["web": "api"])
+        #expect(since.map(\.id) == ["db"])
+    }
 }
 
 // MARK: - Helpers
@@ -286,4 +328,5 @@ private func makeAttachment(network: String) throws -> ContainerResource.Attachm
         ipv4Address: try CIDRv4("192.168.1.2/24"),
         ipv4Gateway: try IPv4Address("192.168.1.1"),
         ipv6Address: nil, macAddress: nil)
+
 }

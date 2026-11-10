@@ -185,6 +185,7 @@ struct ClientContainerService: ClientContainerProtocol {
                         if let beforeContainer = referencePool.first(where: {
                             $0.id == beforeId || $0.id.hasPrefix(beforeId)
                                 || DockerContainerID.hexId(for: $0).hasPrefix(beforeId)
+                                || effectiveNames[$0.id] == beforeId
                         }) {
                             if let beforeTimestamp = AppleContainerTimestampResolver.containerCreationDate(beforeContainer),
                                 let containerTimestamp = AppleContainerTimestampResolver.containerCreationDate(container)
@@ -202,6 +203,7 @@ struct ClientContainerService: ClientContainerProtocol {
                         if let sinceContainer = referencePool.first(where: {
                             $0.id == sinceId || $0.id.hasPrefix(sinceId)
                                 || DockerContainerID.hexId(for: $0).hasPrefix(sinceId)
+                                || effectiveNames[$0.id] == sinceId
                         }) {
                             if let sinceTimestamp = AppleContainerTimestampResolver.containerCreationDate(sinceContainer),
                                 let containerTimestamp = AppleContainerTimestampResolver.containerCreationDate(container)
@@ -268,8 +270,13 @@ struct ClientContainerService: ClientContainerProtocol {
             // name — Apple's store knows nothing about it, so match it here
             // before hex-prefix resolution (`docker stop <newname>`).
             let overrides = await ContainerNameOverrideStore.shared.snapshot()
+            // Compare against the sanitized reference as well: rename stores
+            // the SANITIZED name (a >63-char request is truncated), so the
+            // raw reference would never match what sanitize() stored.
+            let sanitizedReference = ContainerNameUtility.sanitize(id)
             if let byRename = allContainers.first(where: {
-                overrides[DockerContainerID.hexId(for: $0)] == id
+                let recorded = overrides[DockerContainerID.hexId(for: $0)]
+                return recorded == id || recorded == sanitizedReference
             }) {
                 return byRename
             }

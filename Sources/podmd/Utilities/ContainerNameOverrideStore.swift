@@ -45,6 +45,28 @@ actor ContainerNameOverrideStore {
         persist()
     }
 
+    /// True when `name` is held as some container's effective (renamed) name —
+    /// consulted by container CREATE so a new native container cannot steal a
+    /// renamed container's name (the Apple store only rejects native-id
+    /// duplicates and knows nothing about overrides).
+    func isTaken(name: String) -> Bool {
+        overrides.values.contains(name)
+    }
+
+    /// Atomically claims `name` for `hexId`: fails when any container already
+    /// holds `name` as its effective name, or when `name` is in `reserved`
+    /// (native ids, Docker hex ids, and any other names the caller collected).
+    /// One non-suspending actor operation — the check and the set cannot
+    /// interleave with a concurrent rename, so two racing renames to the same
+    /// name cannot both succeed (the loser gets false and answers 409).
+    func claim(hexId: String, name: String, reserved: Set<String>) -> Bool {
+        if reserved.contains(name) { return false }
+        if overrides.values.contains(name) { return false }
+        overrides[hexId] = name
+        persist()
+        return true
+    }
+
     /// A copy of every recorded override (hexId → name) for batch lookups —
     /// one actor hop instead of one per container.
     func snapshot() -> [String: String] {

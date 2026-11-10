@@ -144,6 +144,13 @@ extension ContainerCreateRoute {
             guard ManagedContainer.nameValid(id) else {
                 throw Abort(.badRequest, reason: "invalid container name: \(id)")
             }
+            // A renamed container holds this name as its effective name; the
+            // Apple store only rejects native-id duplicates and knows nothing
+            // about overrides, so a create would silently shadow the rename
+            // (getContainer would resolve this container instead).
+            if await ContainerNameOverrideStore.shared.isTaken(name: id) {
+                throw Abort(.conflict, reason: "name is already in use: \(id)")
+            }
 
             // Validate the requested platform only if provided
             var requestedPlatform = try Platform(from: containerPlatform)

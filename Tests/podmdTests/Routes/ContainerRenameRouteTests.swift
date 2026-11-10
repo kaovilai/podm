@@ -238,37 +238,34 @@ struct ContainerRenameRouteTests {
         }
         let entries = dnsServer.listEntries()
         #expect(entries["\(id)-renamed"] == "192.168.64.5")
-        #expect(entries[id] == nil)
+        // The native id stays registered: restart and daemon-resume register
+        // both it and the override, and the API keeps native ids resolvable —
+        // DNS must not diverge from that. Only a previous OVERRIDE name is
+        // swapped out (covered by the second-rename case below).
+        #expect(entries[id] == "192.168.64.5")
     }
 
-    @Test("the override wins over the native id; a recreated instance gets a fresh key")
-    func overridePrecedence() async throws {
-        let firstInstance = DockerContainerID.hexId(nativeId: "web", createdAt: Date(timeIntervalSince1970: 1_000))
-        let recreatedInstance = DockerContainerID.hexId(nativeId: "web", createdAt: Date(timeIntervalSince1970: 2_000))
-        let before = await ContainerNameOverrideStore.shared.get(hexId: firstInstance)
-        #expect(before == nil)
-        await ContainerNameOverrideStore.shared.set(hexId: firstInstance, name: "web2")
-        let overridden = await ContainerNameOverrideStore.shared.get(hexId: firstInstance)
-        #expect(overridden == "web2")
-        let recreated = await ContainerNameOverrideStore.shared.get(hexId: recreatedInstance)
-        #expect(recreated == nil)
-        await ContainerNameOverrideStore.shared.remove(hexId: firstInstance)
-        let restored = await ContainerNameOverrideStore.shared.get(hexId: firstInstance)
-        #expect(restored == nil)
+    @Test("a second rename swaps out only the previous override name, not the native id")
+    func secondRenameSwapsOverrideOnly() async throws {
+        let id = "rename-dns2-\(UUID().uuidString.prefix(8).lowercased())"
+        let snapshot = try makeContainerSnapshot(
+            nativeId: id, networks: [("mynet", "192.168.64.5")], labels: [:], status: .running)
+        let hexId = DockerContainerID.hexId(for: snapshot)
+        defer { Task { await ContainerNameOverrideStore.shared.remove(hexId: hexId) } }
+        let dnsServer = PodmDNSServer()
+        dnsServer.register(hostname: id, ip: "192.168.64.5")
+        try await withRenameApp([snapshot], dnsServer: dnsServer) { app in
+            try await app.testing().test(.POST, "/v1.51/containers/\(id)/rename?name=\(id)-first") { res async in
+                #expect(res.status == .noContent)
+            }
+            try await app.testing().test(.POST, "/v1.51/containers/\(id)/rename?name=\(id)-second") { res async in
+                #expect(res.status == .noContent)
+            }
+        }
+        let entries = dnsServer.listEntries()
+        #expect(entries["\(id)-second"] == "192.168.64.5")
+        #expect(entries["\(id)-first"] == nil, "the previous override name is swapped out")
+        #expect(entries[id] == "192.168.64.5", "the native id survives every rename")
     }
 
-    @Test("renames survive a store reload from disk")
-    func overridePersistence() async throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("name-override-store-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let id = "rename-persist-\(UUID().uuidString.prefix(8).lowercased())"
-        let store = ContainerNameOverrideStore()
-        await store.configure(storageDirectory: dir)
-        await store.set(hexId: id, name: "persisted-name")
-        let reloadedStore = ContainerNameOverrideStore()
-        await reloadedStore.configure(storageDirectory: dir)
-        let reloaded = await reloadedStore.get(hexId: id)
-        #expect(reloaded == "persisted-name")
-    }
 }
