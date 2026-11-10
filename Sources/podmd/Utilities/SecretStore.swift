@@ -576,19 +576,24 @@ actor SecretStore {
     /// umask (typically 0644), leaving a world-readable window.
     ///
     /// Failure ordering contract: this function only THROWS before the data
-    /// swap commits (temp creation, fsync, replace/move). Once the swap has
-    /// landed the file's new contents are durable — the temp is fsynced
-    /// BEFORE the swap and the containing directory after, so a power loss
-    /// cannot persist the publishing rename ahead of the data it publishes
-    /// (that would break persist's ordering invariant: metadata referencing
-    /// a payload that never reached the disk). A post-commit failure must
-    /// not surface as an error — the callers' rollback logic cannot tell a
-    /// failed write from a committed one, and rolling back after a
-    /// committed metadata write would let a later mutation discard payloads
-    /// the on-disk metadata still references. `replaceItemAt` (verified
-    /// empirically) preserves the DESTINATION's mode, not the temp's — the
-    /// destination is guaranteed owner-only by init's tightening — so the
-    /// post-swap mode re-assertion is belt-and-braces and only logs.
+    /// swap commits (temp creation, sync, replace/move). Once the swap has
+    /// landed the file's new contents survive a process crash outright.
+    /// Across a POWER LOSS what holds is the ordering: the temp's data is
+    /// flushed BEFORE the swap (fsync upgraded to F_FULLFSYNC — on macOS a
+    /// plain fsync only reaches the drive's cache) and the containing
+    /// directory after (best-effort and LOGGED — a post-commit failure must
+    /// never surface as an error, see below). The data therefore cannot be
+    /// ordered behind the rename that publishes it, which is what keeps
+    /// metadata from referencing a payload that never reached the disk
+    /// (persist's ordering invariant). The residual risk is the platform's
+    /// own flush semantics — no stronger primitive is available on macOS.
+    /// Callers' rollback logic cannot tell a failed write from a committed
+    /// one, and rolling back after a committed metadata write would let a
+    /// later mutation discard payloads the on-disk metadata still
+    /// references. `replaceItemAt` (verified empirically) preserves the
+    /// DESTINATION's mode, not the temp's — the destination is guaranteed
+    /// owner-only by init's tightening — so the post-swap mode re-assertion
+    /// is belt-and-braces and only logs.
     private static func writeJSON<T: Encodable>(_ value: T, to url: URL, log: Logger) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -607,11 +612,14 @@ actor SecretStore {
         // not ordered against data writes, so without this the OS could
         // persist the metadata rename while the payload data is still in
         // cache, and a power loss would leave metadata referencing payloads
-        // that never landed.
+        // that never landed. F_FULLFSYNC reaches past the drive cache where
+        // plain fsync (already done by synchronize()) does not; if it is
+        // unsupported on this filesystem the fsync stands as the floor.
         do {
             let handle = try FileHandle(forWritingTo: temp)
             defer { try? handle.close() }
             try handle.synchronize()
+            _ = fcntl(handle.fileDescriptor, F_FULLFSYNC, 0)
         } catch {
             try? FileManager.default.removeItem(at: temp)
             throw error
@@ -626,13 +634,24 @@ actor SecretStore {
             try? FileManager.default.removeItem(at: temp)
             throw error
         }
-        // Durability, part 2 (post-commit, best-effort only — see the
+        // Durability, part 2 (post-commit, best-effort and LOGGED — see the
         // failure ordering contract): flush the directory entry so the
-        // publishing rename itself survives a power loss.
-        let dirFD = open(url.deletingLastPathComponent().path, O_RDONLY)
+        // publishing rename itself reaches the disk. Never throws: the swap
+        // already committed.
+        let directory = url.deletingLastPathComponent()
+        let dirFD = open(directory.path, O_RDONLY)
         if dirFD >= 0 {
-            _ = fsync(dirFD)
+            let synced = fcntl(dirFD, F_FULLFSYNC, 0) == 0 || fsync(dirFD) == 0
             close(dirFD)
+            if !synced {
+                log.warning(
+                    "store directory \(directory.path) could not be synced after committing \(url.lastPathComponent) — the rename may not survive a power loss"
+                )
+            }
+        } else {
+            log.warning(
+                "could not open store directory \(directory.path) for syncing after committing \(url.lastPathComponent) — the rename may not survive a power loss"
+            )
         }
         // A same-directory swap may leave the temp behind holding the old
         // data; either way it must not linger.
