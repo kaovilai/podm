@@ -35,8 +35,9 @@ struct StoredSecret: Codable, Sendable, Equatable {
 /// An actor because route handlers hit it concurrently; persistence rewrites
 /// both files atomically per mutation under a strict write ORDER (payload
 /// superset first, metadata second, payload trim last — see `persist`) so a
-/// crash between renames can only ever leave orphan payload entries, never
-/// metadata referencing payloads that aren't there.
+/// process crash between renames can only ever leave orphan payload entries,
+/// never metadata referencing payloads that aren't there. (Across a power
+/// loss that invariant is best-effort — see writeJSON's durability notes.)
 ///
 /// Semantics follow `go.podman.io/common/pkg/secrets` (SecretsManager.Store /
 /// Delete / Lookup): names are validated (1–253 UTF-8 bytes, no `,` `/` `=`
@@ -548,11 +549,14 @@ actor SecretStore {
     ///
     /// Ordering invariant — why the payload file always lands first as a
     /// SUPERSET of the IDs the incoming metadata references, and is only
-    /// trimmed after that metadata has landed: a crash between renames must
-    /// only ever leave ORPHAN payload entries (unreferenced garbage, pruned
-    /// by `load`), never metadata referencing a payload that is not on disk
-    /// (a secret that inspects fine but whose --showsecret data is gone —
-    /// corruption). Hence per mutation:
+    /// trimmed after that metadata has landed: a PROCESS CRASH between
+    /// renames must only ever leave ORPHAN payload entries (unreferenced
+    /// garbage, pruned by `load`), never metadata referencing a payload
+    /// that is not on disk (a secret that inspects fine but whose
+    /// --showsecret data is gone — corruption). (Across a POWER LOSS this
+    /// invariant is best-effort: it relies on writeJSON's flush ordering,
+    /// which is only as strong as the filesystem's flush semantics — see
+    /// writeJSON's durability notes.) Hence per mutation:
     ///
     ///   - create (new secret): payload(final) → metadata(final)
     ///   - remove: metadata(final) → payload(final)
@@ -587,20 +591,24 @@ actor SecretStore {
     /// Failure ordering contract: this function only THROWS before the data
     /// swap commits (temp creation, sync, replace/move). Once the swap has
     /// landed the file's new contents survive a process crash outright.
-    /// Across a POWER LOSS what holds is the ordering: the temp's data is
-    /// flushed BEFORE the swap (fsync upgraded to F_FULLFSYNC — on macOS a
-    /// plain fsync only reaches the drive's cache) and the containing
-    /// directory after (best-effort and LOGGED — a post-commit failure must
-    /// never surface as an error, see below). The data therefore cannot be
-    /// ordered behind the rename that publishes it, which is what keeps
-    /// metadata from referencing a payload that never reached the disk
-    /// (persist's ordering invariant). Guarantee boundary: a FAILED data
-    /// flush before the swap throws (pre-commit); a failed DIRECTORY flush
-    /// after it is logged and later writes proceed — after such a failure
-    /// the power-loss ordering is best-effort until the next successful
-    /// flush, an availability-over-paranoia trade for a local daemon. The
-    /// residual risk is the platform's own flush semantics — no stronger
-    /// primitive is available on macOS. Callers' rollback logic cannot
+    /// Across a POWER LOSS the ordering is BEST-EFFORT, and reads as
+    /// follows while every flush succeeds: the temp's data is flushed
+    /// BEFORE the swap (fsync upgraded to F_FULLFSYNC — on macOS a plain
+    /// fsync only reaches the drive's cache) and the containing directory
+    /// after (post-commit, logged on failure, never thrown). The data
+    /// therefore cannot be ordered behind the rename that publishes it,
+    /// which is what keeps metadata from referencing a payload that never
+    /// reached the disk (persist's ordering invariant). Guarantee boundary:
+    /// a FAILED data flush before the swap throws (pre-commit); a failed
+    /// DIRECTORY flush after it is logged and later writes proceed — the
+    /// affected rename's durability stays unestablished (later flushes of
+    /// other files or the other directory do not repair it), an
+    /// availability-over-paranoia trade for a local daemon. When
+    /// F_FULLFSYNC is unsupported on the filesystem (ENOTSUP/EINVAL) the
+    /// fallback is plain fsync, which per Apple's documentation may still
+    /// leave the data in the drive cache — best-effort. The residual risk
+    /// is the platform's own flush semantics — no stronger primitive is
+    /// available on macOS. Callers' rollback logic cannot
     /// tell a failed write from a committed
     /// one, and rolling back after a committed metadata write would let a
     /// later mutation discard payloads the on-disk metadata still
@@ -661,8 +669,9 @@ actor SecretStore {
         // already committed. A failure does NOT block later writes — the
         // state is committed and consistent; refusing service over a
         // transient flush failure would be worse for a local daemon. The
-        // operator gets the warning (and the guarantee is best-effort until
-        // the next successful flush, per the doc comment).
+        // operator gets the warning (the affected rename's durability stays
+        // unestablished — later flushes do not repair it, per the doc
+        // comment).
         let directory = url.deletingLastPathComponent()
         let dirFD = open(directory.path, O_RDONLY)
         if dirFD >= 0 {
