@@ -489,4 +489,13 @@ struct DockerfileChangeApplierTests {
         #expect(config.healthcheck?.Interval == nil)
         #expect(config.healthcheck?.Test == ["CMD", "true"])
     }
+
+    @Test("a trailing unitless zero after a component is garbage, not a fresh zero")
+    func trailingZeroIsRejected() throws {
+        var config = SynthesizedImageConfig()
+        #expect(throws: DockerfileChangeError.self) {
+            try DockerfileChangeApplier.apply(
+                ["HEALTHCHECK --interval=5s0 CMD [\"true\"]"], to: &config)
+        }
+    }
 }

@@ -328,8 +328,11 @@ enum DockerfileChangeApplier {
             }
             // Go's time.ParseDuration accepts a bare "0" with no unit
             // (only nonzero values require one); mirror that so
-            // `--interval=0` means unset rather than invalid.
-            if numberEnd == rest.endIndex, rest == "0" {
+            // `--interval=0` means unset rather than invalid. FIRST
+            // component only — after e.g. "5s" a trailing "0" is garbage
+            // Go rejects, not a fresh zero that may silently discard the
+            // accumulated duration.
+            if !parsedComponent, numberEnd == rest.endIndex, rest == "0" {
                 return nil
             }
             let numberText = rest[..<numberEnd]
