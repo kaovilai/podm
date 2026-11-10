@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import Darwin
 import Foundation
 import Logging
 
@@ -575,8 +576,12 @@ actor SecretStore {
     /// umask (typically 0644), leaving a world-readable window.
     ///
     /// Failure ordering contract: this function only THROWS before the data
-    /// swap commits (temp creation, replace/move). Once the swap has landed
-    /// the file's new contents are durable, and a post-commit failure must
+    /// swap commits (temp creation, fsync, replace/move). Once the swap has
+    /// landed the file's new contents are durable — the temp is fsynced
+    /// BEFORE the swap and the containing directory after, so a power loss
+    /// cannot persist the publishing rename ahead of the data it publishes
+    /// (that would break persist's ordering invariant: metadata referencing
+    /// a payload that never reached the disk). A post-commit failure must
     /// not surface as an error — the callers' rollback logic cannot tell a
     /// failed write from a committed one, and rolling back after a
     /// committed metadata write would let a later mutation discard payloads
@@ -597,6 +602,20 @@ actor SecretStore {
         else {
             throw CocoaError(.fileWriteUnknown)
         }
+        // Durability, part 1 (pre-commit, may throw): flush the data to the
+        // disk BEFORE the rename that publishes it — renames are atomic but
+        // not ordered against data writes, so without this the OS could
+        // persist the metadata rename while the payload data is still in
+        // cache, and a power loss would leave metadata referencing payloads
+        // that never landed.
+        do {
+            let handle = try FileHandle(forWritingTo: temp)
+            defer { try? handle.close() }
+            try handle.synchronize()
+        } catch {
+            try? FileManager.default.removeItem(at: temp)
+            throw error
+        }
         do {
             if FileManager.default.fileExists(atPath: url.path) {
                 _ = try FileManager.default.replaceItemAt(url, withItemAt: temp)
@@ -606,6 +625,14 @@ actor SecretStore {
         } catch {
             try? FileManager.default.removeItem(at: temp)
             throw error
+        }
+        // Durability, part 2 (post-commit, best-effort only — see the
+        // failure ordering contract): flush the directory entry so the
+        // publishing rename itself survives a power loss.
+        let dirFD = open(url.deletingLastPathComponent().path, O_RDONLY)
+        if dirFD >= 0 {
+            _ = fsync(dirFD)
+            close(dirFD)
         }
         // A same-directory swap may leave the temp behind holding the old
         // data; either way it must not linger.

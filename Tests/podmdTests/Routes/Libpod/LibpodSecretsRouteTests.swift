@@ -465,6 +465,7 @@ struct LibpodSecretsRouteTests {
             // first, so the very first write fails mid-sequence.
             let secretsDir = dir.appendingPathComponent("podm-secrets", isDirectory: true)
             try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: secretsDir.path)
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: secretsDir.path) }
             try await app.testing().test(.DELETE, "/v1.51/libpod/secrets/stuck") { res async in
                 #expect(res.status == .internalServerError)
                 #expect(res.body.string.contains("could not persist"))
@@ -499,6 +500,7 @@ struct LibpodSecretsRouteTests {
             // into a 404.
             let filedriverDir = dir.appendingPathComponent("podm-secrets/filedriver", isDirectory: true)
             try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: filedriverDir.path)
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: filedriverDir.path) }
             try await app.testing().test(.DELETE, "/v1.51/libpod/secrets/committed-gone") { res async in
                 #expect(res.status == .noContent)
             }
@@ -521,6 +523,7 @@ struct LibpodSecretsRouteTests {
             // (the exact window where a lost secret could slip through).
             let secretsDir = dir.appendingPathComponent("podm-secrets", isDirectory: true)
             try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: secretsDir.path)
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: secretsDir.path) }
             // Failed delete…
             try await app.testing().test(.DELETE, "/v1.51/libpod/secrets/committed") { res async in
                 #expect(res.status == .internalServerError)
