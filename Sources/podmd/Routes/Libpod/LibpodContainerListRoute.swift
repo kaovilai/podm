@@ -3,6 +3,15 @@ import Vapor
 
 struct LibpodContainerListRoute: RouteCollection {
     let client: ClientContainerProtocol
+    let diskUsageProvider: ContainerDiskUsageProviding
+
+    init(
+        client: ClientContainerProtocol,
+        diskUsageProvider: ContainerDiskUsageProviding = ContainerClientDiskUsageProvider()
+    ) {
+        self.client = client
+        self.diskUsageProvider = diskUsageProvider
+    }
 
     func boot(routes: RoutesBuilder) throws {
         try routes.registerVersionedRoute(.GET, pattern: "/libpod/containers/json") { req in
@@ -13,7 +22,10 @@ struct LibpodContainerListRoute: RouteCollection {
             // status from StartedAt/ExitedAt/ExitCode rather than trusting the
             // Docker Status string. Missing podman-only fields are fine (they
             // decode to zero values); wrong-typed ones are hard decode errors.
-            let summaries = try await ContainerListRoute.handler(client: client)(req)
+            // The size provider rides along so `?size=1`/`podman ps -s` can be
+            // stubbed in tests without touching the real Apple container client.
+            let summaries = try await ContainerListRoute.handler(
+                client: client, diskUsageProvider: diskUsageProvider)(req)
             return summaries.map(LibpodListContainer.from)
         }
     }
@@ -27,6 +39,14 @@ struct LibpodPortMapping: Content {
     let host_port: Int
     let range: Int
     let `protocol`: String
+}
+
+/// podman's `define.ContainerSize` (pkg/ps/define/types.go): JSON keys are
+/// lower-camel, plain int64s (no way to express "unknown" — 0 is podman's
+/// zero value for it).
+struct LibpodContainerSize: Content {
+    let rootFsSize: Int64
+    let rwSize: Int64
 }
 
 /// podman's `entities.ListContainer` (pkg/domain/entities/types/container_ps.go):
@@ -56,12 +76,30 @@ struct LibpodListContainer: Content {
     let Pid: Int
     let IsInfra: Bool
     let Pod: String
+    /// `podman ps -s` / ?size=1: podman's ListContainer carries sizes as a
+    /// nested `Size *define.ContainerSize` object (not SizeRw/SizeRootFs).
+    /// Nil when the request didn't ask for sizes.
+    let Size: LibpodContainerSize?
 
     static func from(_ s: RESTContainerSummary) -> LibpodListContainer {
         // podman's Created is time.Time: RFC3339. Zero time for unknown.
         let createdRFC3339 = ISO8601DateFormatter().string(
             from: Date(timeIntervalSince1970: TimeInterval(s.Created)))
         let exited = s.State == "exited"
+        // Apple's one aggregate figure is reported as SizeRootFs on the Docker
+        // summary (see ContainerListRoute); map it to podman's RootFsSize and
+        // leave RwSize at podman's zero value rather than duplicating it —
+        // `podman ps -s` then shows "0B (virtual N)" instead of a fabricated
+        // rw layer size. Both unknown (no ?size) → omit the whole object.
+        let size: LibpodContainerSize?
+        if s.SizeRootFs == nil && s.SizeRw == nil {
+            size = nil
+        } else {
+            size = LibpodContainerSize(
+                rootFsSize: s.SizeRootFs ?? 0,
+                rwSize: s.SizeRw ?? 0
+            )
+        }
         return LibpodListContainer(
             Id: s.Id,
             Names: s.Names,
@@ -82,7 +120,8 @@ struct LibpodListContainer: Content {
             StartedAt: s.StartedAtUnix ?? 0,
             Pid: 0,
             IsInfra: false,
-            Pod: ""
+            Pod: "",
+            Size: size
         )
     }
 }
