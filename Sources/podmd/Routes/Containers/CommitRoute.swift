@@ -157,13 +157,23 @@ struct CommitRoute: RouteCollection {
             if let bodyData = try await req.body.collect(max: req.application.routes.defaultMaxBodySize.value).get(),
                 bodyData.readableBytes > 0
             {
-                let restConfig: RESTCommitConfig
-                do {
-                    restConfig = try JSONDecoder().decode(RESTCommitConfig.self, from: Data(buffer: bodyData))
-                } catch {
-                    throw Abort(.badRequest, reason: "invalid commit config body: \(error.localizedDescription)")
+                // docker CLI v20.10.7 sends a literal JSON `null` for a nil
+                // Config — that is "no body" semantically (moby's
+                // CheckForJSON yields an empty config there), not a 400.
+                let trimmed =
+                    String(data: Data(buffer: bodyData), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if trimmed == "null" {
+                    overrides = nil
+                } else {
+                    let restConfig: RESTCommitConfig
+                    do {
+                        restConfig = try JSONDecoder().decode(RESTCommitConfig.self, from: Data(buffer: bodyData))
+                    } catch {
+                        throw Abort(.badRequest, reason: "invalid commit config body: \(error.localizedDescription)")
+                    }
+                    overrides = restConfig.overrides()
                 }
-                overrides = restConfig.overrides()
             } else {
                 overrides = nil
             }

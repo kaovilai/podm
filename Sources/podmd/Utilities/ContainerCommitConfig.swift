@@ -124,15 +124,21 @@ enum ContainerCommitConfig {
         }
 
         // 2. --change Dockerfile instructions on top (moby BuildFromConfig
-        // mutates the same request config before merge runs). A RELATIVE
-        // WORKDIR resolves against the container's effective working
-        // directory — the snapshot's live one, falling back to the parent
-        // image's — because moby's BuildFromConfig starts from the
-        // container's config, whose WorkingDir is the join base
-        // (normalizeWorkdir). Absolute paths pass through untouched.
+        // mutates the same request config before merge runs). The join base
+        // for a RELATIVE WORKDIR follows moby's `if c.Config == nil {
+        // c.Config = container.Config }`: with NO request body,
+        // BuildFromConfig starts from the container's own config, so its
+        // WorkingDir — the snapshot's live one, falling back to the parent
+        // image's — is the base (normalizeWorkdir). With a body present,
+        // however sparse, BuildFromConfig starts from the BODY's config,
+        // whose WorkingDir is unset (unless the body set one, in which case
+        // `config.workingDir` already carries it and the base is never
+        // consulted), so a relative path anchors at `/`. Absolute paths pass
+        // through untouched either way.
         let snapshotWorkingDir = container.configuration.initProcess.workingDirectory
         let effectiveWorkingDir = snapshotWorkingDir.isEmpty ? parent?.workingDir : snapshotWorkingDir
-        try DockerfileChangeApplier.apply(changes, to: &config, baseWorkingDir: effectiveWorkingDir)
+        try DockerfileChangeApplier.apply(
+            changes, to: &config, baseWorkingDir: overrides == nil ? effectiveWorkingDir : nil)
 
         // EXPOSE/VOLUME inheritance: union the parent's raw-config keys with
         // whatever the body and --change set, so a no-change commit of an
@@ -210,7 +216,11 @@ enum ContainerCommitConfig {
         // Labels: fill missing keys — the container's labels (restored to
         // their original keys) first, then the parent image's.
         for (key, value) in LabelNormalization.restore(container.configuration.labels)
-        where config.labels[key] == nil {
+        where config.labels[key] == nil && !key.hasPrefix("podm.") {
+            // podm.* labels are daemon-internal metadata (healthcheck
+            // config, restart-policy override, DNS roles) — never part of
+            // the image the user is committing, and a stale copy could
+            // disagree with the committed Healthcheck/StopSignal fields.
             config.labels[key] = value
         }
         for (key, value) in parent?.labels ?? [:]

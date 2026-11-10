@@ -643,6 +643,29 @@ struct ContainerCommitRouteTests {
         #expect(event?.Actor.Attributes["imageID"] == Self.committedDigest)
         #expect(event?.Actor.Attributes["imageRef"] == "example/app:v2")
     }
+
+    @Test("a literal JSON null body is treated as no Config (docker CLI v20.10.7)")
+    func nullBodyIsNoConfig() async throws {
+        let snapshot = try makeContainerSnapshot(
+            nativeId: "web", ip: "192.168.65.2", network: "bridge", labels: [:], status: .stopped)
+        let imageClient = FakeCommitImageClient(
+            result: .success((nil, Self.committedDigest)))
+
+        try await withCommitApp(snapshot: snapshot, imageClient: imageClient) { app in
+            try await app.testing().test(
+                .POST, "/v1.51/commit?container=web&repo=null-body",
+                beforeRequest: { req in
+                    // Literal `null`, exactly what docker CLI v20.10.7 sends
+                    // for a nil Config — must be "no body", not a 400.
+                    req.headers.replaceOrAdd(name: .contentType, value: "application/json")
+                    req.body = ByteBuffer(string: "null")
+                }
+            ) { res async throws in
+                #expect(res.status == .created)
+                #expect(try res.content.decode(RESTCommitIDResponse.self).Id == Self.committedDigest)
+            }
+        }
+    }
 }
 
 private struct ErrorBody: Vapor.Content { let reason: String }

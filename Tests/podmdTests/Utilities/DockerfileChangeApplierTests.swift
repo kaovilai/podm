@@ -27,6 +27,50 @@ struct DockerfileChangeApplierTests {
         #expect(config.entrypoint == ["/app"])
     }
 
+    @Test("an ENTRYPOINT clears a Cmd the config already carried, like moby's dispatchEntrypoint")
+    func entrypointClearsPreSeededCmd() throws {
+        // moby's dispatchEntrypoint: `if !d.state.cmdSet { runConfig.Cmd = nil }`.
+        // BuildFromConfig's state starts fresh, so a pre-seeded Cmd (from the
+        // container in a body-less commit, or from the request body) is never
+        // cmdSet and gets cleared.
+        var config = SynthesizedImageConfig()
+        config.cmd = ["serve", "--verbose"]
+        try DockerfileChangeApplier.apply(["ENTRYPOINT [\"/new\"]"], to: &config)
+        #expect(config.entrypoint == ["/new"])
+        #expect(config.cmd == nil)
+    }
+
+    @Test("a shell-form ENTRYPOINT clears a pre-seeded Cmd too")
+    func shellEntrypointClearsPreSeededCmd() throws {
+        var config = SynthesizedImageConfig()
+        config.cmd = ["serve"]
+        try DockerfileChangeApplier.apply(["ENTRYPOINT /new"], to: &config)
+        #expect(config.entrypoint == ["/bin/sh", "-c", "/new"])
+        #expect(config.cmd == nil)
+    }
+
+    @Test("a Cmd set by a prior CMD change survives a later ENTRYPOINT, like moby's cmdSet")
+    func cmdChangeProtectsCmdFromEntrypoint() throws {
+        // moby's dispatchCmd sets d.state.cmdSet for a non-empty command, which
+        // dispatchEntrypoint then honors by keeping runConfig.Cmd.
+        var config = SynthesizedImageConfig()
+        config.cmd = ["serve", "--verbose"]
+        try DockerfileChangeApplier.apply(["CMD [\"override\"]", "ENTRYPOINT [\"/new\"]"], to: &config)
+        #expect(config.entrypoint == ["/new"])
+        #expect(config.cmd == ["override"])
+    }
+
+    @Test("an emptied CMD [] does not mark Cmd as set, so a later ENTRYPOINT clears it")
+    func emptiedCmdDoesNotProtectCmdFromEntrypoint() throws {
+        // moby's dispatchCmd: `if len(c.ShellDependantCmdLine.CmdLine) != 0 {
+        // d.state.cmdSet = true }` — an empty exec form leaves cmdSet false.
+        var config = SynthesizedImageConfig()
+        config.cmd = ["serve", "--verbose"]
+        try DockerfileChangeApplier.apply(["CMD []", "ENTRYPOINT [\"/new\"]"], to: &config)
+        #expect(config.entrypoint == ["/new"])
+        #expect(config.cmd == nil)
+    }
+
     @Test("multiple ENV pairs on one line are all applied")
     func envMultiplePairs() throws {
         var config = SynthesizedImageConfig()
@@ -366,6 +410,42 @@ struct DockerfileChangeApplierTests {
         }
     }
 
+    @Test("a HEALTHCHECK duration of exactly Int64.max nanoseconds is rejected, not trapped")
+    func healthcheckDurationAtInt64MaxRejected() throws {
+        // 9223372036854775807ns parses to the Double 2^63 (Double(Int64.max)
+        // rounds up), which a `<= Double(Int64.max)` bound admits and then
+        // traps on in Int64(total). The strict `<` must reject it with a 400.
+        var config = SynthesizedImageConfig()
+        #expect(throws: DockerfileChangeError.self) {
+            try DockerfileChangeApplier.apply(["HEALTHCHECK --interval=9223372036854775807ns CMD true"], to: &config)
+        }
+    }
+
+    @Test("a HEALTHCHECK duration one nanosecond above Int64.max is rejected")
+    func healthcheckDurationAboveInt64MaxRejected() throws {
+        var config = SynthesizedImageConfig()
+        #expect(throws: DockerfileChangeError.self) {
+            try DockerfileChangeApplier.apply(["HEALTHCHECK --interval=9223372036854775808ns CMD true"], to: &config)
+        }
+    }
+
+    @Test("a huge second-based HEALTHCHECK duration is rejected")
+    func healthcheckHugeSecondDurationRejected() throws {
+        var config = SynthesizedImageConfig()
+        #expect(throws: DockerfileChangeError.self) {
+            try DockerfileChangeApplier.apply(["HEALTHCHECK --timeout=9223372036854775807s CMD true"], to: &config)
+        }
+    }
+
+    @Test("the largest HEALTHCHECK duration below the Double rounding cliff is accepted")
+    func healthcheckDurationJustBelowCliffAccepted() throws {
+        // 2^63 - 2^10 ns is the largest Double below 2^63 and a valid Int64 —
+        // it must still parse, proving the strict bound does not over-reject.
+        var config = SynthesizedImageConfig()
+        try DockerfileChangeApplier.apply(["HEALTHCHECK --interval=9223372036854774784ns CMD true"], to: &config)
+        #expect(config.healthcheck?.Interval == 9_223_372_036_854_774_784)
+    }
+
     @Test("a negative HEALTHCHECK retries count is rejected")
     func healthcheckNegativeRetriesRejected() throws {
         var config = SynthesizedImageConfig()
@@ -399,5 +479,14 @@ struct DockerfileChangeApplierTests {
         try DockerfileChangeApplier.apply(["  "], to: &config)
         #expect(config.cmd == nil)
         #expect(config.env.isEmpty)
+    }
+
+    @Test("a bare 0 duration parses as unset (Go ParseDuration parity)")
+    func bareZeroDuration() throws {
+        var config = SynthesizedImageConfig()
+        try DockerfileChangeApplier.apply(
+            ["HEALTHCHECK --interval=0 CMD [\"true\"]"], to: &config)
+        #expect(config.healthcheck?.Interval == nil)
+        #expect(config.healthcheck?.Test == ["CMD", "true"])
     }
 }

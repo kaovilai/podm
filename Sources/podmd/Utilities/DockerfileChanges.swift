@@ -96,24 +96,33 @@ enum DockerfileChangeApplier {
     /// - Parameters:
     ///   - baseWorkingDir: the directory a RELATIVE `WORKDIR` resolves
     ///     against when the config does not already carry one — moby's
-    ///     `BuildFromConfig` starts from the container's config for commit
-    ///     (so its working directory is the base), and from an empty config
-    ///     for import (so the base is `/`). `nil` behaves like the import
-    ///     case: relative paths anchor at `/`.
+    ///     `BuildFromConfig` starts from whatever config the caller seeded:
+    ///     the container's config for a BODY-LESS commit (so its working
+    ///     directory is the base) or the request body's config for a commit
+    ///     with a body and an empty config for import (so the base is `/`).
+    ///     `nil` behaves like the import/sparse-body case: relative paths
+    ///     anchor at `/`.
     static func apply(
         _ changes: [String],
         to config: inout SynthesizedImageConfig,
         baseWorkingDir: String? = nil
     ) throws {
+        // moby's `d.state.cmdSet` — set by `dispatchCmd` for a non-empty
+        // command, consulted by `dispatchEntrypoint`'s Cmd-clearing below.
+        // `BuildFromConfig` starts a FRESH state, so a Cmd the config carried
+        // before the changes (pre-seeded from the container by a body-less
+        // commit, or set by the request body) never counts as cmdSet.
+        var cmdSetByChange = false
         for change in changes {
-            try applyOne(change, to: &config, baseWorkingDir: baseWorkingDir)
+            try applyOne(change, to: &config, baseWorkingDir: baseWorkingDir, cmdSetByChange: &cmdSetByChange)
         }
     }
 
     private static func applyOne(
         _ change: String,
         to config: inout SynthesizedImageConfig,
-        baseWorkingDir: String?
+        baseWorkingDir: String?,
+        cmdSetByChange: inout Bool
     ) throws {
         let trimmed = change.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -128,8 +137,21 @@ enum DockerfileChangeApplier {
         }
 
         switch instruction {
-        case "CMD": config.cmd = try parseExecOrShellForm(instruction: instruction, rest)
-        case "ENTRYPOINT": config.entrypoint = try parseExecOrShellForm(instruction: instruction, rest)
+        case "CMD":
+            let cmd = try parseExecOrShellForm(instruction: instruction, rest)
+            config.cmd = cmd
+            // moby's dispatchCmd: `if len(c.ShellDependantCmdLine.CmdLine) != 0
+            // { d.state.cmdSet = true }` — only a NON-EMPTY command marks Cmd
+            // as set; `CMD []` does not.
+            if !cmd.isEmpty { cmdSetByChange = true }
+        case "ENTRYPOINT":
+            config.entrypoint = try parseExecOrShellForm(instruction: instruction, rest)
+            // moby's dispatchEntrypoint: `if !d.state.cmdSet {
+            // runConfig.Cmd = nil }` — an ENTRYPOINT clears whatever Cmd the
+            // config carried (pre-seeded from the container by a body-less
+            // commit, or set by the request body) unless a prior CMD change
+            // set it.
+            if !cmdSetByChange { config.cmd = nil }
         case "ENV": try applyEnv(rest, to: &config)
         case "LABEL": try applyLabels(rest, to: &config)
         case "USER": config.user = rest
@@ -304,6 +326,12 @@ enum DockerfileChangeApplier {
                     break
                 }
             }
+            // Go's time.ParseDuration accepts a bare "0" with no unit
+            // (only nonzero values require one); mirror that so
+            // `--interval=0` means unset rather than invalid.
+            if numberEnd == rest.endIndex, rest == "0" {
+                return nil
+            }
             let numberText = rest[..<numberEnd]
             guard !numberText.isEmpty, numberText != ".", let value = Double(numberText) else {
                 throw DockerfileChangeError.invalidValue(instruction: "HEALTHCHECK", value: "\(flag)=\(raw)")
@@ -320,7 +348,14 @@ enum DockerfileChangeApplier {
             rest = rest[unitEnd...]
             parsedComponent = true
         }
-        guard parsedComponent, total >= 0, total <= Double(Int64.max) else {
+        // `Double(Int64.max)` rounds UP to exactly 2^63, so a `<=` bound would
+        // ADMIT totals that round to 2^63 (e.g. 9223372036854775807ns) and
+        // the `Int64(total)` below would trap. The strict `<` rejects 2^63
+        // and every Double above it; the largest Double below 2^63 is
+        // 2^63 - 2^10, itself a valid Int64, so the conversion can never
+        // trap. Infinite totals (absurdly long digit strings multiply out to
+        // +inf) fail this guard too.
+        guard parsedComponent, total >= 0, total < Double(Int64.max) else {
             throw DockerfileChangeError.invalidValue(instruction: "HEALTHCHECK", value: "\(flag)=\(raw)")
         }
         let nanoseconds = Int64(total)

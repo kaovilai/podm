@@ -313,6 +313,22 @@ struct ContainerCommitConfigTests {
         #expect(config.workingDir == "/base/logs")
     }
 
+    @Test("a SPARSE body makes a relative --change WORKDIR anchor at /, like moby's BuildFromConfig")
+    func sparseBodyWorkdirAnchorsAtRoot() throws {
+        // moby's commit: `if c.Config == nil { c.Config = container.Config }`
+        // — only a body-less commit starts BuildFromConfig from the
+        // container's config. A sparse body (labels only, no WorkingDir)
+        // starts from the BODY's config, whose working dir is unset, so
+        // `WORKDIR logs` resolves against `/` — NOT the container's /srv.
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(workingDirectory: "/srv"),
+            parent: nil,
+            overrides: CommitConfigOverrides(labels: ["x": "y"]),
+            changes: ["WORKDIR logs"])
+
+        #expect(config.workingDir == "/logs")
+    }
+
     // MARK: - CMD [] under a nonempty entrypoint
 
     @Test("an explicitly-emptied --change CMD stays empty when the container has a nonempty entrypoint")
@@ -343,6 +359,66 @@ struct ContainerCommitConfigTests {
 
         #expect(config.entrypoint == nil)
         #expect(config.cmd == ["/app", "serve"])
+    }
+
+    // MARK: - ENTRYPOINT change vs the pre-seeded Cmd
+
+    @Test("an ENTRYPOINT --change clears the pre-seeded Cmd, like moby's dispatchEntrypoint")
+    func entrypointChangeClearsPreSeededCmd() throws {
+        // moby's dispatchEntrypoint: `if !d.state.cmdSet { runConfig.Cmd = nil }`.
+        // BuildFromConfig's state starts fresh, so the Cmd pre-seeded from the
+        // container (no request body) is NOT cmdSet and is cleared — then
+        // merge cannot refill it either, because the entrypoint is nonempty.
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(),
+            parent: makeParent(),
+            overrides: nil,
+            changes: ["ENTRYPOINT [\"/new\"]"])
+
+        #expect(config.entrypoint == ["/new"])
+        #expect(config.cmd == nil)
+    }
+
+    @Test("a CMD --change before an ENTRYPOINT --change keeps the Cmd, like moby's cmdSet")
+    func cmdChangeBeforeEntrypointKeepsCmd() throws {
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(),
+            parent: makeParent(),
+            overrides: nil,
+            changes: ["CMD [\"override\"]", "ENTRYPOINT [\"/new\"]"])
+
+        #expect(config.entrypoint == ["/new"])
+        #expect(config.cmd == ["override"])
+    }
+
+    @Test("an ENTRYPOINT --change clears a body Cmd too — moby's cmdSet only tracks CMD instructions")
+    func entrypointChangeClearsBodyCmd() throws {
+        // The request body's Cmd is part of the runConfig BuildFromConfig
+        // starts from, not a CMD instruction, so dispatchEntrypoint clears it.
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(),
+            parent: makeParent(),
+            overrides: CommitConfigOverrides(cmd: ["from-body"]),
+            changes: ["ENTRYPOINT [\"/new\"]"])
+
+        #expect(config.entrypoint == ["/new"])
+        #expect(config.cmd == nil)
+    }
+
+    @Test("an emptied ENTRYPOINT [] clears the Cmd, which moby's merge then refills from the container")
+    func emptiedEntrypointClearsThenMergeRefillsCmd() throws {
+        // dispatchEntrypoint clears the pre-seeded Cmd; merge sees an empty
+        // (explicitly-emptied, non-nil) entrypoint, refills the Cmd from the
+        // container's config, and leaves the entrypoint emptied — the
+        // nil-vs-empty distinction moby's merge makes.
+        let config = try ContainerCommitConfig.make(
+            container: try makeSnapshot(),
+            parent: makeParent(),
+            overrides: nil,
+            changes: ["ENTRYPOINT []"])
+
+        #expect(config.entrypoint == [])
+        #expect(config.cmd == ["serve", "--verbose"])
     }
 
     // MARK: - Multi-element ENTRYPOINT split
@@ -612,5 +688,19 @@ struct ContainerCommitConfigTests {
         #expect(healthcheckDict["Timeout"] as? Int == 5)
         #expect(healthcheckDict["Retries"] as? Int == 3)
         #expect(healthcheckDict["StartPeriod"] as? Int == 10)
+    }
+
+    @Test("podm-internal labels never leak into the committed image")
+    func podmInternalLabelsExcluded() throws {
+        let container = try makeSnapshot(labels: [
+            "podm.healthcheck": "{\"Test\":[\"CMD\",\"true\"]}",
+            "podm.restart-policy": "{\"Name\":\"always\"}",
+            "com.example.owner": "keep-me",
+        ])
+        let config = try ContainerCommitConfig.make(
+            container: container, parent: nil, overrides: nil, changes: [])
+        #expect(config.labels["com.example.owner"] == "keep-me")
+        #expect(config.labels["podm.healthcheck"] == nil)
+        #expect(config.labels["podm.restart-policy"] == nil)
     }
 }
