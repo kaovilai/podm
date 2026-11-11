@@ -155,6 +155,25 @@ struct BuildDockerfileQueryParamTests {
                 == "/tmp/ctx123/sub/dir/Containerfile")
     }
 
+    /// Issue #52: real podman AND docker clients send `t` as a repeated
+    /// query key, once per tag (`podman build -t a -t b .` arrives as
+    /// `?t=a&t=b`); Vapor's decoder keeps only the last value of a repeated
+    /// scalar key, silently dropping every tag but one.
+    @Test("Every repeated t value is collected — multi-tag builds tag them all")
+    func repeatedTagQueryValues() {
+        #expect(
+            BuildRoute.parseAllTagQueryValues(from: "t=foo%3Aa&t=foo%3Ab") == ["foo:a", "foo:b"])
+        #expect(BuildRoute.parseAllTagQueryValues(from: "t=foo%3Aa") == ["foo:a"])
+        #expect(BuildRoute.parseAllTagQueryValues(from: nil) == [])
+        #expect(BuildRoute.parseAllTagQueryValues(from: "") == [])
+        // `t=` present but empty (podman's no-tag form) means untagged, not
+        // "tagged as the empty string".
+        #expect(BuildRoute.parseAllTagQueryValues(from: "t=&t=foo%3Aa") == ["foo:a"])
+        #expect(BuildRoute.parseAllTagQueryValues(from: "t=") == [])
+        // Other keys never leak in.
+        #expect(BuildRoute.parseAllTagQueryValues(from: "platform=linux%2Farm64&t=foo") == ["foo"])
+    }
+
     @Test("An empty scalar dockerfile value falls back to the default Dockerfile name, matching an omitted param")
     func emptyScalarFallsBackToDefault() throws {
         #expect(try BuildRoute.parseDockerfileQueryParam("") == "Dockerfile")

@@ -30,6 +30,8 @@ protocol ClientManifestServiceProtocol: Sendable {
     @discardableResult
     func mergeAndTag(name: String, images: [String], logger: Logger) async throws -> String
     @discardableResult
+    func retag(from: String, to: String) async throws -> String
+    @discardableResult
     func add(name: String, images: [String], logger: Logger) async throws -> String
     @discardableResult
     func removeDigest(name: String, digest: String) async throws -> String
@@ -181,6 +183,18 @@ struct ClientManifestService: ClientManifestServiceProtocol {
             }
         }
         return try await writeIndexAndTag(name: name, manifests: manifests)
+    }
+
+    /// Writes the SOURCE index's exact content (manifests AND annotations)
+    /// under a new name — a true retag, so every name points at the same
+    /// index digest. Unlike re-running mergeAndTag per name (which carries
+    /// each DESTINATION's pre-existing annotations and can produce a
+    /// different index for a tag that already existed with different
+    /// annotations), the bytes are identical by construction.
+    @discardableResult
+    func retag(from: String, to: String) async throws -> String {
+        let source = try await inspect(name: from)
+        return try await writeIndexAndTag(name: to, manifests: source.manifests, annotations: source.annotations)
     }
 
     /// `podman manifest add <name> <image>` / the "update" operation of `PUT /libpod/manifests/{name}`.
