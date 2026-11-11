@@ -317,7 +317,7 @@ gives you; the point is nothing above it stays resident.
      overwritten on the next run. Regenerate locally with:
      swift build && .build/debug/podmd --docgen /tmp/podm-docs -->
 
-185 routes registered (149 supported, 36 deliberately not
+185 routes registered (151 supported, 34 deliberately not
 implemented — every gap carries its reason and its tracking context in
 [RouteSupportManifest.swift](Sources/podmd/Utilities/RouteSupportManifest.swift)).
 Full, searchable version: **[podm route coverage site](https://github.tig.pw/podm/)**.
@@ -334,6 +334,7 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `POST` | `/configs/create` | docker |  |
 | ✅ | `DELETE` | `/configs/{id}` | docker |  |
 | ✅ | `GET` | `/configs/{id}` | docker |  |
+| ✅ | `POST` | `/configs/{id}/update` | docker |  |
 | ✅ | `POST` | `/containers/create` | docker |  |
 | ✅ | `GET` | `/containers/json` | docker |  |
 | ✅ | `POST` | `/containers/prune` | docker |  |
@@ -385,37 +386,38 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `GET` | `/networks/{id}` | docker |  |
 | ✅ | `POST` | `/networks/{id}/connect` | docker |  |
 | ✅ | `POST` | `/networks/{id}/disconnect` | docker |  |
-| 🚫 | `GET` | `/nodes` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `GET` | `/nodes/{id}` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `POST` | `/nodes/{id}/update` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `GET` | `/plugins` | docker | The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility. |
-| 🚫 | `POST` | `/plugins/create` | docker | The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility. |
-| 🚫 | `GET` | `/plugins/privileges` | docker | The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility. |
-| 🚫 | `POST` | `/plugins/pull` | docker | The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility. |
-| 🚫 | `GET` | `/plugins/{name}` | docker | The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility. |
-| 🚫 | `POST` | `/plugins/{name}/disable` | docker | The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility. |
-| 🚫 | `POST` | `/plugins/{name}/enable` | docker | The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility. |
-| 🚫 | `GET` | `/plugins/{name}/json` | docker | The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility. |
-| 🚫 | `POST` | `/plugins/{name}/push` | docker | The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility. |
-| 🚫 | `POST` | `/plugins/{name}/set` | docker | The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility. |
-| 🚫 | `POST` | `/plugins/{name}/upgrade` | docker | The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility. |
+| 🚫 | `GET` | `/nodes` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
+| 🚫 | `GET` | `/nodes/{id}` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
+| 🚫 | `POST` | `/nodes/{id}/update` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
+| 🚫 | `GET` | `/plugins` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
+| 🚫 | `POST` | `/plugins/create` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
+| 🚫 | `GET` | `/plugins/privileges` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
+| 🚫 | `POST` | `/plugins/pull` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
+| 🚫 | `GET` | `/plugins/{name}` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
+| 🚫 | `POST` | `/plugins/{name}/disable` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
+| 🚫 | `POST` | `/plugins/{name}/enable` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
+| 🚫 | `GET` | `/plugins/{name}/json` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
+| 🚫 | `POST` | `/plugins/{name}/push` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
+| 🚫 | `POST` | `/plugins/{name}/set` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
+| 🚫 | `POST` | `/plugins/{name}/upgrade` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
 | ✅ | `GET` | `/secrets` | docker |  |
 | ✅ | `POST` | `/secrets/create` | docker |  |
 | ✅ | `DELETE` | `/secrets/{id}` | docker |  |
 | ✅ | `GET` | `/secrets/{id}` | docker |  |
-| 🚫 | `GET` | `/services` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `POST` | `/services/create` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `GET` | `/services/{id}` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `GET` | `/services/{id}/logs` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `POST` | `/services/{id}/update` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
+| ✅ | `POST` | `/secrets/{id}/update` | docker |  |
+| 🚫 | `GET` | `/services` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
+| 🚫 | `POST` | `/services/create` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
+| 🚫 | `GET` | `/services/{id}` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
+| 🚫 | `GET` | `/services/{id}/logs` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
+| 🚫 | `POST` | `/services/{id}/update` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
 | 🚫 | `GET` | `/session` | docker | dockerd's buildx session channel is not supported; the route answers not-supported for CLI compatibility. |
-| 🚫 | `GET` | `/swarm` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `POST` | `/swarm/init` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `POST` | `/swarm/join` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `POST` | `/swarm/leave` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `POST` | `/swarm/unlock` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `GET` | `/swarm/unlockkey` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `POST` | `/swarm/update` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
+| 🚫 | `GET` | `/swarm` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
+| 🚫 | `POST` | `/swarm/init` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
+| 🚫 | `POST` | `/swarm/join` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
+| 🚫 | `POST` | `/swarm/leave` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
+| 🚫 | `POST` | `/swarm/unlock` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
+| 🚫 | `GET` | `/swarm/unlockkey` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
+| 🚫 | `POST` | `/swarm/update` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
 | ✅ | `GET` | `/system/df` | docker |  |
 | 🚫 | `GET` | `/tasks` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
 | 🚫 | `GET` | `/tasks/{id}` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
