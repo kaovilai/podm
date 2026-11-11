@@ -41,7 +41,13 @@ struct ContainerRenameRoute: RouteCollection {
             while trimmed.hasPrefix("/") { trimmed.removeFirst() }
             let newName = ContainerNameUtility.sanitize(trimmed)
             guard ManagedContainer.nameValid(newName) else {
-                throw Abort(.badRequest, reason: "invalid container name: \(requestedName)")
+                // moby's reserveName (daemon/names.go): "Invalid container
+                // name (%s), only %s are allowed" with the restricted charset.
+                throw Abort(
+                    .badRequest,
+                    reason:
+                        "Invalid container name (\(requestedName)), only [a-zA-Z0-9][a-zA-Z0-9_.-] are allowed"
+                )
             }
             let hexId = DockerContainerID.hexId(for: container)
             // The RAW override feeds the claim's compare-and-swap: a concurrent
@@ -69,6 +75,13 @@ struct ContainerRenameRoute: RouteCollection {
             // both pass — the loser gets false and answers 409.
             let others = try await client.list(showAll: true, filters: [:])
             var reserved = Set<String>()
+            // Reserved name → the owning container's Docker hex id, so the 409
+            // can quote the conflict the way moby does (daemon/errors.go
+            // nameConflictError: "Conflict. The container name %q is already
+            // in use by container %q. You have to remove (or rename) that
+            // container to be able to reuse that name.").
+            var conflictOwners: [String: String] = [:]
+            let recordedOverrides = await ContainerNameOverrideStore.shared.snapshot()
             for other in others where other.id != container.id {
                 reserved.insert(other.id)
                 let otherHexId = DockerContainerID.hexId(for: other)
@@ -78,11 +91,41 @@ struct ContainerRenameRoute: RouteCollection {
                 // that container's id in lookups (sanitizedReference).
                 reserved.insert(otherHexId)
                 reserved.insert(ContainerNameUtility.sanitize(otherHexId))
+                conflictOwners[other.id] = otherHexId
+                conflictOwners[otherHexId] = otherHexId
+                conflictOwners[ContainerNameUtility.sanitize(otherHexId)] = otherHexId
+                // The other container's effective (possibly renamed) name is
+                // reserved by the claim itself (overrides.values) — mapped
+                // here so the conflict message can name its owner.
+                if let otherOverride = recordedOverrides[otherHexId] {
+                    conflictOwners[otherOverride] = otherHexId
+                }
             }
-            guard
-                await ContainerNameOverrideStore.shared.claim(
-                    hexId: hexId, name: newName, expectedOverride: currentOverride, reserved: reserved)
-            else {
+            let claimOutcome = await ContainerNameOverrideStore.shared.claim(
+                hexId: hexId, name: newName, expectedOverride: currentOverride, reserved: reserved)
+            guard case .claimed = claimOutcome else {
+                // moby wraps the conflict (daemon/rename.go): "Error when
+                // allocating new name: %w". The owner comes ATOMICALLY from
+                // the rejected claim when the actor saw a live override —
+                // a pre-claim owner snapshot can race a concurrent winner
+                // (two renames to a free name both see no owner; the loser
+                // must still quote the winner's id).
+                let atomicOwner: String?
+                if case .conflict(let owner) = claimOutcome { atomicOwner = owner } else { atomicOwner = nil }
+                // The fallback mapping is built from the container list —
+                // valid for native/hex ids (they never move) and for owners
+                // that held the name before this request started.
+                if let ownerId = atomicOwner ?? conflictOwners[newName] {
+                    throw Abort(
+                        .conflict,
+                        reason:
+                            "Error when allocating new name: Conflict. The container name \"/\(newName)\" is already in use by container \"\(ownerId)\". You have to remove (or rename) that container to be able to reuse that name."
+                    )
+                }
+                // No moby analog quotes this case (an in-flight create
+                // reservation, or a lost compare-and-swap against this same
+                // container) — keep podm's plain form rather than a hybrid
+                // that half-quotes moby's wrapper.
                 throw Abort(
                     .conflict,
                     reason:
@@ -134,7 +177,11 @@ struct ContainerRenameRoute: RouteCollection {
                         image: container.configuration.image.reference,
                         name: newName,
                         labels: LabelNormalization.restore(container.configuration.labels),
-                        extraAttributes: ["old_name": currentName]
+                        // moby's rename event carries the old name under the
+                        // "oldName" attribute key (daemon/rename.go
+                        // LogContainerEventWithAttributes), WITH the name
+                        // registry's leading slash: "/web", not "web".
+                        extraAttributes: ["oldName": "/" + currentName]
                     ))
             }
             // moby answers 204 No Content on a successful rename.
