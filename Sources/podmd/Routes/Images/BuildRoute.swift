@@ -102,6 +102,19 @@ extension BuildRoute {
         tag?.isEmpty == false ? tag! : fallback
     }
 
+    /// Real podman AND docker clients send `t` as the SAME query key repeated
+    /// once per tag (`podman build -t a -t b .` arrives as `?t=a&t=b` — podman
+    /// `pkg/bindings/images/build.go` `params.Add("t", Output)` plus one `t`
+    /// per AdditionalTags; the docker CLI sets `query["t"] = options.Tags`).
+    /// Vapor's decoder keeps only the LAST value of a repeated scalar key, so
+    /// `RESTBuildQuery.t` alone silently drops every tag but one — the exact
+    /// failure `parseAllPlatformQueryValues` fixed for `platform` (issue #52).
+    /// Empty values mean "no tag" (see `resolvedTargetImageName`) and are
+    /// dropped here so the caller's fallback applies.
+    static func parseAllTagQueryValues(from queryString: String?) -> [String] {
+        allQueryValues(named: "t", from: queryString).filter { !$0.isEmpty }
+    }
+
     /// Parses the `dockerfile` query parameter.
     ///
     /// Docker-compat clients send a plain path (e.g. `Dockerfile`). Real podman
@@ -214,7 +227,10 @@ extension BuildRoute {
 
             // Extract values with Docker-compliant defaults
             let dockerfile = try BuildRoute.parseDockerfileQueryParam(query.dockerfile!, logger: req.logger)
-            let targetImageName = BuildRoute.resolvedTargetImageName(query.t, fallback: UUID().uuidString.lowercased())
+            // EVERY requested tag, not just the last repeated-key value (issue #52):
+            // the first names the build's primary output; the rest are tagged too.
+            let allTags = BuildRoute.parseAllTagQueryValues(from: req.url.query)
+            let targetImageName = allTags.first ?? UUID().uuidString.lowercased()
             let quiet = query.q!
             let noCache = query.nocache!
             let pull = query.pull.map { ["1", "true", "yes", "on"].contains($0.lowercased()) } ?? false
@@ -380,6 +396,7 @@ extension BuildRoute {
                             dockerfile: dockerfile,
                             contextDir: contextDir,
                             targetImageName: targetImageName,
+                            allTags: allTags,
                             buildArgs: buildArgs,
                             labels: labels,
                             noCache: noCache,
@@ -458,6 +475,7 @@ extension BuildRoute {
         dockerfile: String,
         contextDir: String,
         targetImageName: String,
+        allTags: [String],
         buildArgs: [String],
         labels: [String],
         noCache: Bool,
@@ -474,8 +492,14 @@ extension BuildRoute {
         logger: Logger
     ) async throws {
 
-        // Helper function to send Docker API compliant streaming messages
+        // Helper function to send Docker API compliant streaming messages.
+        // PROGRESS output only: in quiet mode (-q) the contract is that the
+        // response is just the image ID (docker's CLI takes its quiet output
+        // verbatim as the ID; podman's daemon suppresses step output when
+        // Quiet is set) — so every step/progress/success line is suppressed
+        // and only the ungated ID/aux senders below still write (issue #53).
         @Sendable func sendStreamMessage(_ message: String) {
+            if quiet { return }
             // Preserve the original message with its formatting
             let streamResponse: [String: Any] = ["stream": message + "\n"]
             if let jsonData = try? JSONSerialization.data(withJSONObject: streamResponse),
@@ -486,6 +510,24 @@ extension BuildRoute {
                 // Log write failures for debugging but don't crash
                 result.whenFailure { error in
                     logger.debug("BuildRoute: Write failed - \(error)")
+                }
+            }
+        }
+
+        /// An ungated raw JSON line (aux metadata) — never suppressed by
+        /// quiet mode. The docker CLI's classic builder captures the image ID
+        /// for --iidfile ONLY from the aux callback and errors "Server did
+        /// not provide an image ID" when a successful build sends none
+        /// (issue #53); podman clients ignore unknown message types.
+        func sendAuxImageID(_ digest: String) {
+            let id = digest.hasPrefix("sha256:") ? digest : "sha256:" + digest
+            let auxResponse: [String: Any] = ["aux": ["ID": id]]
+            if let jsonData = try? JSONSerialization.data(withJSONObject: auxResponse),
+                let jsonString = String(data: jsonData, encoding: .utf8)
+            {
+                let result = writer.write(.buffer(ByteBuffer(string: jsonString + "\n")))
+                result.whenFailure { error in
+                    logger.debug("BuildRoute: aux write failed - \(error)")
                 }
             }
         }
@@ -549,7 +591,8 @@ extension BuildRoute {
             let result = try await runSingleBuild(
                 dockerfile: dockerfile, dockerfileData: dockerfileData, contextDir: contextDir,
                 buildArgs: buildArgs, labels: labels, noCache: noCache, pull: pull, target: target,
-                platforms: platforms, qemu: !qemuPlatforms.isEmpty, tags: [imageName], quiet: quiet,
+                platforms: platforms, qemu: !qemuPlatforms.isEmpty,
+                tags: allTags.isEmpty ? [imageName] : allTags, quiet: quiet,
                 builderExportPath: builderExportPath, buildIDSuffix: "single",
                 builderClient: builderClient, systemConfig: systemConfig,
                 sendStreamMessage: sendStreamMessage, logger: logger
@@ -604,6 +647,12 @@ extension BuildRoute {
                 sendStreamMessage(" ---> Merging split builds into \(imageName)")
                 do {
                     builtDigest = try await manifestClient.mergeAndTag(name: imageName, images: [rosetta.reference, qemu.reference], logger: logger)
+                    // Every ADDITIONAL requested tag gets the same merged
+                    // manifest (issue #52) — mergeAndTag is create-or-update
+                    // per name, so repeating it per tag is idempotent.
+                    for extraTag in allTags.dropFirst() {
+                        _ = try await manifestClient.mergeAndTag(name: extraTag, images: [rosetta.reference, qemu.reference], logger: logger)
+                    }
                 } catch {
                     // Both halves succeeded and are still tagged — clean up regardless of
                     // whether the merge itself succeeded, or these scratch tags leak forever.
@@ -651,10 +700,30 @@ extension BuildRoute {
         // the bare image ID as its own stream line for exactly this reason;
         // mirror that here so the client recognizes success.
         let bareID = builtDigest.hasPrefix("sha256:") ? String(builtDigest.dropFirst("sha256:".count)) : builtDigest
-        sendStreamMessage(bareID)
 
-        // Send success message in Docker API format
+        // The docker CLI's classic builder captures the image ID for
+        // --iidfile ONLY from the aux message (issue #53); podman clients
+        // ignore unknown message types. Sent UNGATED — quiet mode must
+        // still carry it.
+        sendAuxImageID(builtDigest)
+
+        // Real podman clients (pkg/bindings/images/build.go) only treat a clean
+        // stream EOF as success if they've already seen a "stream" line whose
+        // content starts with 12+ raw hex chars (`iidRegex`) — otherwise EOF is
+        // reported as `Error: decoding stream: EOF` even though the build (and
+        // this response) genuinely succeeded. Real buildah/podman builds emit
+        // the bare image ID as its own stream line for exactly this reason;
+        // mirror that here so the client recognizes success. Written directly
+        // (not via sendStreamMessage) so quiet mode cannot suppress it: in
+        // quiet mode this line IS the contracted output.
+        writer.write(.buffer(ByteBuffer(string: "{\"stream\":\"" + bareID + "\\n\"}\n")))
+
+        // Send success message in Docker API format (progress — suppressed
+        // in quiet mode), one line per requested tag like the real daemons.
         sendStreamMessage("Successfully built \(imageName)")
+        for tag in allTags.dropFirst() {
+            sendStreamMessage("Successfully tagged \(tag)")
+        }
 
         _ = writer.write(.end)
     }
