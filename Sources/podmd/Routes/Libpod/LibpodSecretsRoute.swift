@@ -4,9 +4,9 @@ import Vapor
 import os
 
 /// Podman's LOCAL secret store family — `podman secret create/ls/inspect/rm/exists`
-/// over the bindings client. NOT the Docker swarm `/secrets` surface (that stays a
-/// deliberate stub): single-node podm has no swarm, but podman's own secret store
-/// is a purely local facility and maps 1:1 onto a file-backed store.
+/// over the bindings client. The Docker-dialect `/secrets` surface
+/// (`SecretsRoute`) shares the same store; this family stays the podman
+/// bindings dialect.
 ///
 /// Contract (verified against podman v5.4.0 — identical paths in v6, plus the
 /// `ignore` create flag added there; `pkg/api/server/register_secrets.go`):

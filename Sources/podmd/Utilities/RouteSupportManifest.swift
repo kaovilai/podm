@@ -59,17 +59,8 @@ enum RouteSupportManifest {
             method: "POST", pattern: "/nodes/{id}/update",
             reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
         DeliberateStub(
-            method: "GET", pattern: "/secrets",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
-        DeliberateStub(
-            method: "GET", pattern: "/secrets/{id}",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
-        DeliberateStub(
             method: "POST", pattern: "/secrets/{id}/update",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
-        DeliberateStub(
-            method: "POST", pattern: "/secrets/create",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "A local file-backed secret store cannot update in place (podman's compat route answers 501 too); the route exists for CLI compatibility."),
         DeliberateStub(
             method: "GET", pattern: "/services",
             reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
