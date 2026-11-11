@@ -18,20 +18,32 @@ enum RouteSupportManifest {
     /// Routes that deliberately answer with a not-implemented/not-supported
     /// stub. Every entry carries its reason; implementing a route means
     /// removing its entry here (the conformance test fails otherwise).
+    ///
+    /// Status codes follow the reference daemons (issue #33): the swarm
+    /// family answers moby's documented 503, upstream-blocked capabilities
+    /// answer 503, and knowingly-unimplemented operations answer 501.
     static let stubs: [DeliberateStub] = [
         // ── Container-scoped gaps (docker dialect + libpod twins) ────────────
         DeliberateStub(
             method: "POST", pattern: "/containers/{id}/pause",
-            reason: "Apple container has no pause primitive for a microVM."),
+            reason:
+                "Blocked upstream: apple/container exposes no pause XPC route; apple/containerization#366 removed the LinuxContainer/LinuxPod pause/resume API (suspected vended-vsock EBADF asserts), while the underlying VZ pause/resume VM primitives remain (apple/containerization#998)."
+        ),
         DeliberateStub(
             method: "POST", pattern: "/containers/{id}/unpause",
-            reason: "Apple container has no pause primitive for a microVM."),
+            reason:
+                "Blocked upstream: apple/container exposes no pause XPC route; apple/containerization#366 removed the LinuxContainer/LinuxPod pause/resume API (suspected vended-vsock EBADF asserts), while the underlying VZ pause/resume VM primitives remain (apple/containerization#998)."
+        ),
         DeliberateStub(
             method: "POST", pattern: "/libpod/containers/{id}/pause",
-            reason: "Apple container has no pause primitive for a microVM."),
+            reason:
+                "Blocked upstream: apple/container exposes no pause XPC route; apple/containerization#366 removed the LinuxContainer/LinuxPod pause/resume API (suspected vended-vsock EBADF asserts), while the underlying VZ pause/resume VM primitives remain (apple/containerization#998)."
+        ),
         DeliberateStub(
             method: "POST", pattern: "/libpod/containers/{id}/unpause",
-            reason: "Apple container has no pause primitive for a microVM."),
+            reason:
+                "Blocked upstream: apple/container exposes no pause XPC route; apple/containerization#366 removed the LinuxContainer/LinuxPod pause/resume API (suspected vended-vsock EBADF asserts), while the underlying VZ pause/resume VM primitives remain (apple/containerization#998)."
+        ),
         // ── buildx session channel ───────────────────────────────────────────
         DeliberateStub(
             method: "GET", pattern: "/session",
@@ -40,99 +52,93 @@ enum RouteSupportManifest {
         // (The GET/POST/DELETE /configs routes are live over the local
         // ConfigStore — see ConfigsRoute.)
         DeliberateStub(
-            method: "POST", pattern: "/configs/{id}/update",
-            reason: "A local file-backed config store cannot update in place; the route exists for CLI compatibility."),
-        DeliberateStub(
             method: "GET", pattern: "/nodes",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "GET", pattern: "/nodes/{id}",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "POST", pattern: "/nodes/{id}/update",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
-        DeliberateStub(
-            method: "POST", pattern: "/secrets/{id}/update",
-            reason: "A local file-backed secret store cannot update in place (podman's compat route answers 501 too); the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "GET", pattern: "/services",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "GET", pattern: "/services/{id}",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "GET", pattern: "/services/{id}/logs",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "POST", pattern: "/services/{id}/update",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "POST", pattern: "/services/create",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "GET", pattern: "/swarm",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "POST", pattern: "/swarm/init",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "POST", pattern: "/swarm/join",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "POST", pattern: "/swarm/leave",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "POST", pattern: "/swarm/unlock",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "GET", pattern: "/swarm/unlockkey",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "POST", pattern: "/swarm/update",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "GET", pattern: "/tasks",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "GET", pattern: "/tasks/{id}",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
             method: "GET", pattern: "/tasks/{id}/logs",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         // ── Plugin system compatibility surface ──────────────────────────────
         DeliberateStub(
             method: "GET", pattern: "/plugins",
-            reason: "The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility."),
+            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
         DeliberateStub(
             method: "GET", pattern: "/plugins/{name}",
-            reason: "The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility."),
+            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
         DeliberateStub(
             method: "POST", pattern: "/plugins/{name}/disable",
-            reason: "The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility."),
+            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
         DeliberateStub(
             method: "POST", pattern: "/plugins/{name}/enable",
-            reason: "The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility."),
+            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
         DeliberateStub(
             method: "GET", pattern: "/plugins/{name}/json",
-            reason: "The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility."),
+            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
         DeliberateStub(
             method: "POST", pattern: "/plugins/{name}/push",
-            reason: "The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility."),
+            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
         DeliberateStub(
             method: "POST", pattern: "/plugins/{name}/set",
-            reason: "The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility."),
+            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
         DeliberateStub(
             method: "POST", pattern: "/plugins/{name}/upgrade",
-            reason: "The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility."),
+            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
         DeliberateStub(
             method: "POST", pattern: "/plugins/create",
-            reason: "The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility."),
+            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
         DeliberateStub(
             method: "GET", pattern: "/plugins/privileges",
-            reason: "The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility."),
+            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
         DeliberateStub(
             method: "POST", pattern: "/plugins/pull",
-            reason: "The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility."),
+            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
     ]
 
     static let stubKeys: Set<String> = Set(stubs.map(\.key))

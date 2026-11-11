@@ -52,20 +52,26 @@ struct RouteConformanceTests {
         case live
     }
 
-    /// Records the stub-signature of one response. Stub = HTTP 501, or a 500
-    /// carrying podm's not-implemented / not-supported marker strings (see
-    /// `NotImplemented.respond` and `AppleContainerNotSupported.respond`).
+    /// Records the stub-signature of one response. Stub = HTTP 501 or 503
+    /// AND a body carrying one of podm's stub marker strings (see
+    /// `DeliberateStubResponse.notImplemented` / `.notInSwarm` /
+    /// `.pauseUnavailable`). Live routes may legitimately answer 501 or 503
+    /// for request-specific errors (an unsupported wait condition, an
+    /// unreachable BuildKit builder) — the status alone must never classify
+    /// a route as a stub, and a stub's marker alone (on a 500) must not
+    /// either.
     private actor StubProbe {
         /// nil = no response was recorded (the request failed before the
         /// response closure ran) — never silently classified as live.
         private(set) var outcome: ProbeOutcome?
 
         func record(status: HTTPResponseStatus, body: String) {
-            let isStub =
-                status == .notImplemented
-                || body.localizedCaseInsensitiveContains("is not implemented by podm")
-                || body.localizedCaseInsensitiveContains("is not supported in apple container")
-            outcome = isStub ? .stub : .live
+            let stubStatus = status == .notImplemented || status == .serviceUnavailable
+            let stubMarker =
+                body.localizedCaseInsensitiveContains("is not implemented by podm")
+                || body.localizedCaseInsensitiveContains("not part of a swarm")
+                || body.localizedCaseInsensitiveContains("is not supported by podm")
+            outcome = (stubStatus && stubMarker) ? .stub : .live
         }
     }
 

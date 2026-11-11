@@ -6,6 +6,6 @@ struct SessionRoute: RouteCollection {
     }
 
     static func handler(_ req: Request) async throws -> Response {
-        AppleContainerNotSupported.respond("Interactive session")
+        DeliberateStubResponse.notImplemented("/session", req.method.rawValue)
     }
 }
