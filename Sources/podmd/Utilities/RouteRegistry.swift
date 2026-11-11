@@ -56,6 +56,9 @@ enum RouteRegistry {
         // podman's LOCAL secret store (libpod dialect) — file-backed under
         // app support, 0600 payloads; distinct from the swarm /secrets stubs.
         let secretStore = SecretStore(storageDirectory: appleContainerAppSupportUrl)
+        // docker-dialect config store — file-backed under app support, same
+        // hardening pattern as the secret store; distinct store and directory.
+        let configStore = ConfigStore(storageDirectory: appleContainerAppSupportUrl)
         let archiveClient = ClientArchiveService(appSupportPath: appleContainerAppSupportUrl)
         let builderClient = ClientBuilderService(appSupportURL: appleContainerAppSupportUrl, containerSystemConfig: systemConfig)
 
@@ -179,11 +182,9 @@ enum RouteRegistry {
         // over the same local SecretStore the libpod family uses) ---
         try app.register(collection: SecretsRoute(store: secretStore))
 
-        // --- swarm config routes ---
-        try app.register(collection: ConfigsCreateRoute())
-        try app.register(collection: ConfigsIdRoute())
-        try app.register(collection: ConfigsIdUpdateRoute())
-        try app.register(collection: ConfigsRoute())
+        // --- docker-dialect config routes (compat /configs, moby swarm
+        // shapes over a local ConfigStore) ---
+        try app.register(collection: ConfigsRoute(store: configStore))
 
         // --- session route ---
         try app.register(collection: SessionRoute())

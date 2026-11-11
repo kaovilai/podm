@@ -37,18 +37,11 @@ enum RouteSupportManifest {
             method: "GET", pattern: "/session",
             reason: "dockerd's buildx session channel is not supported; the route answers not-supported for CLI compatibility."),
         // ── Swarm compatibility surface (single-node: not supported) ─────────
-        DeliberateStub(
-            method: "GET", pattern: "/configs",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
-        DeliberateStub(
-            method: "GET", pattern: "/configs/{id}",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+        // (The GET/POST/DELETE /configs routes are live over the local
+        // ConfigStore — see ConfigsRoute.)
         DeliberateStub(
             method: "POST", pattern: "/configs/{id}/update",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
-        DeliberateStub(
-            method: "POST", pattern: "/configs/create",
-            reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
+            reason: "A local file-backed config store cannot update in place; the route exists for CLI compatibility."),
         DeliberateStub(
             method: "GET", pattern: "/nodes",
             reason: "Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility."),
