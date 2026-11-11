@@ -217,6 +217,47 @@ struct PluginStoreTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: storeDir.path)
     }
 
+    @Test("an untightenable metadata file blocks mutations — the file check feeds the same refusal")
+    func unsecurableMetadataFileBlocksMutations() async throws {
+        let dir = uniqueTempDir()
+        let storeDir = dir.appendingPathComponent("podm-plugins", isDirectory: true)
+        try FileManager.default.createDirectory(at: storeDir, withIntermediateDirectories: true)
+        let file = storeDir.appendingPathComponent("plugins.json")
+        try Data("[]".utf8).write(to: file)
+        // Group-readable AND mode-locked (user-immutable): inspection
+        // succeeds, but the chmod that strips the group bits fails — the
+        // store file stays world-readable, so persisting over it must be
+        // refused (the discarded tighten result used to let it through).
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file.path)
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: file.path)
+        defer {
+            try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: file.path)
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        let store = PluginStore(storageDirectory: dir)
+        // Reads keep working — the (valid) file still loads.
+        #expect(await store.list().isEmpty)
+        do {
+            _ = try await store.create(
+                name: "blocked/plugin:latest", config: makeConfig(),
+                settings: DockerPluginSettings(), pluginReference: "blocked/plugin:latest")
+            Issue.record("create must be refused while the store file cannot be secured")
+        } catch PluginStore.StoreError.quarantineBlocked {
+            // expected
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        // Lock released: a fresh instance tightens the file and works.
+        try FileManager.default.setAttributes([.immutable: false], ofItemAtPath: file.path)
+        let recovered = PluginStore(storageDirectory: dir)
+        _ = try await recovered.create(
+            name: "fresh/plugin:latest", config: makeConfig(),
+            settings: DockerPluginSettings(), pluginReference: "fresh/plugin:latest")
+        let perms = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as! Int
+        #expect(perms & 0o077 == 0, "the recovered instance tightened the file")
+    }
+
     @Test("a failed persist rolls back memory — the store never serves a plugin that would vanish on restart")
     func persistFailureRollsBack() async throws {
         let dir = uniqueTempDir()

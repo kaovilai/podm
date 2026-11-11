@@ -51,11 +51,13 @@ import Vapor
 ///   500s for unparseable refs/configs).
 /// - `GET /plugins` — moby's `[]*Plugin`; an empty store answers `[]`, which
 ///   is the trivially-correct answer that keeps `docker plugin ls` healthy.
-///   Filters: `enabled` (bool) and `capability` (a plugin is included only
-///   when EVERY one of its interface types' capabilities is in the filter's
-///   value set — moby's `continue next` loop). Unknown keys, malformed JSON,
-///   non-boolean `enabled` values are 400s (moby's `filter.Validate` /
-///   `GetBoolOrDefault` errors).
+///   Filters: `enabled` (moby's `filters.GetBoolOrDefault` — only the
+///   literals `1`/`true`/`0`/`false` count, the WHOLE value set is examined,
+///   and empty, unknown, or conflicting sets are errors) and `capability`
+///   (moby's `filters.Match` per interface type: exact OR unanchored-regex,
+///   EVERY type must match, and an empty value set is no restriction).
+///   Unknown keys, malformed JSON, invalid `enabled` values are 400s
+///   (moby's `filter.Validate` / `GetBoolOrDefault` errors).
 /// - `GET /plugins/{name}(/json)` — moby's resolution: full 64-hex ID first
 ///   (exact), then exact familiar name, then unambiguous ID prefix. 0
 ///   matches → 404 `plugin "<input>" not found`; ambiguous prefix → 400
@@ -207,19 +209,23 @@ extension PluginsRoute {
 extension PluginsRoute {
     /// The parsed `GET /plugins` filters — moby's two accepted keys
     /// (`plugin/backend_linux.go` `acceptedPluginFilterTags`). `enabled ==
-    /// nil` means the key was absent (no filtering); a PRESENT but empty
-    /// `enabled` value list is moby's `GetBoolOrDefault` default, false.
+    /// nil` means the key was absent (no filtering); `capabilities == nil`
+    /// means `capability` was absent. The capability value maps each filter
+    /// value to its map-form boolean flag (the array form sets every flag —
+    /// moby's `deprecatedArgs`), because moby's `filters.Match` reads the
+    /// flag for the exact-match fast path.
     struct PluginListFilters: Sendable, Equatable {
         var enabled: Bool?
-        var capabilities: [String]?
+        var capabilities: [String: Bool]?
     }
 
     /// Docker `filters` JSON, restricted to moby's PLUGIN filter keys:
-    /// `enabled` (bool) and `capability` (exact). Both the array form and
-    /// the map form are accepted — Go's `filters.FromJSON` decodes both, and
-    /// its map fallback retains EVERY key regardless of the boolean.
-    /// Malformed JSON, unknown keys, or non-string array values are CLIENT
-    /// errors (podm-wide deviation from moby's 500s).
+    /// `enabled` (bool) and `capability` (exact-or-regex). Both the array
+    /// form and the map form are accepted — Go's `filters.FromJSON` decodes
+    /// the map form directly (the booleans become the value flags) and falls
+    /// back to the legacy slice format for arrays (every flag set, moby's
+    /// `deprecatedArgs`). Malformed JSON, unknown keys, or non-string array
+    /// values are CLIENT errors (podm-wide deviation from moby's 500s).
     static func parseListFilters(_ filtersParam: String?) throws -> PluginListFilters {
         guard let filtersParam, !filtersParam.isEmpty else { return PluginListFilters() }
         guard let data = filtersParam.data(using: .utf8),
@@ -234,21 +240,22 @@ extension PluginsRoute {
             throw Abort(.badRequest, reason: "unrecognized filter key \(filterKeys.subtracting(allowedKeys).sorted().joined(separator: ", "))")
         }
 
-        var values: [String: [String]] = [:]
+        // moby's `filters.FromJSON` field map: value → flag.
+        var fields: [String: [String: Bool]] = [:]
         for (key, value) in decoded {
             if let arr = value as? [String] {
-                values[key] = arr
+                fields[key] = arr.reduce(into: [String: Bool]()) { $0[$1] = true }
             } else if let dict = value as? [String: Any] {
-                var entries: [String] = []
+                var entries: [String: Bool] = [:]
                 for (filterValue, flag) in dict {
                     guard flag is Bool else {
                         throw Abort(
                             .badRequest,
                             reason: "invalid filter value for \(key): expected a boolean")
                     }
-                    entries.append(filterValue)
+                    entries[filterValue] = flag as? Bool
                 }
-                values[key] = entries
+                fields[key] = entries
             } else {
                 throw Abort(
                     .badRequest,
@@ -257,41 +264,68 @@ extension PluginsRoute {
         }
 
         var filters = PluginListFilters()
-        // moby's `filters.GetBoolOrDefault("enabled", false)` — Go's
-        // `strconv.ParseBool` grammar; an invalid value is moby's
-        // "invalid filter value" error (a 500 there, a 400 here).
-        if let enabledValues = values["enabled"] {
-            filters.enabled = false
-            if let first = enabledValues.first {
-                switch first.lowercased() {
-                case "1", "t", "true": filters.enabled = true
-                case "0", "f", "false": filters.enabled = false
-                default:
-                    throw Abort(.badRequest, reason: "invalid filter value for enabled: expected a boolean")
-                }
+        // moby's `filters.GetBoolOrDefault` (`api/types/filters/parse.go`),
+        // verbatim semantics — NOT `strconv.ParseBool`: only the literals
+        // "0"/"false"/"1"/"true" count, the whole value set is examined
+        // through its flags, and an empty set, an unknown value, or a set
+        // carrying BOTH truthy and falsy values is moby's invalidFilter (a
+        // 500 there, a 400 here).
+        if let enabledField = fields["enabled"] {
+            if enabledField.isEmpty {
+                throw Abort(.badRequest, reason: "invalid filter 'enabled': no values")
             }
+            let isFalse = enabledField["0"] == true || enabledField["false"] == true
+            let isTrue = enabledField["1"] == true || enabledField["true"] == true
+            guard isFalse != isTrue else {
+                throw Abort(
+                    .badRequest,
+                    reason: "invalid filter 'enabled': conflicting or invalid boolean values")
+            }
+            filters.enabled = isTrue
         }
-        filters.capabilities = values["capability"]
+        filters.capabilities = fields["capability"]
         return filters
     }
 
-    /// moby `Manager.List`: `enabled` selects enabled-only/disabled-only;
-    /// `capability` includes a plugin only when EVERY one of its interface
-    /// types' capabilities is in the filter's value set (the `continue next`
-    /// loop — a plugin advertising a capability the filter did not list is
-    /// excluded; a plugin with NO types passes vacuously).
+    /// moby `Manager.List` (`plugin/backend_linux.go`), verbatim loop shape:
+    /// `enabled` selects enabled-only/disabled-only; `capability` includes a
+    /// plugin only when EVERY one of its interface types' capabilities
+    /// matches the filter (the `continue next` loop — a plugin advertising a
+    /// capability the filter did not match is excluded; a plugin with NO
+    /// types passes vacuously). An EMPTY capability value set is NO
+    /// restriction — moby's `filters.Match` short-circuits through
+    /// `ExactMatch`'s "no values set" clause.
     static func passesFilters(_ plugin: StoredPlugin, filters: PluginListFilters) -> Bool {
         if let wantEnabled = filters.enabled, plugin.enabled != wantEnabled {
             return false
         }
-        if let capabilities = filters.capabilities {
-            let wanted = Set(capabilities)
+        if let field = filters.capabilities, !field.isEmpty {
             let types = plugin.config.Interface?.Types ?? []
-            if !types.allSatisfy({ wanted.contains($0.Capability) }) {
+            // Compiled once per plugin — the local store is tiny; moby
+            // re-matches the regexes per plugin too.
+            let regexes = field.keys.compactMap { try? NSRegularExpression(pattern: $0) }
+            for type in types where !capabilityMatches(type.Capability, field: field, regexes: regexes) {
                 return false
             }
         }
         return true
+    }
+
+    /// moby `filters.Match`: an exact hit (by flag) OR an unanchored regex
+    /// hit — with the regex loop ignoring the flags, a moby quirk kept
+    /// verbatim. Patterns that fail to compile are skipped (Go continues on
+    /// regexp error). NSRegularExpression/ICU stands in for Go's RE2; the
+    /// metacharacter grammar agrees on everything a capability pattern
+    /// plausibly uses.
+    private static func capabilityMatches(
+        _ capability: String, field: [String: Bool], regexes: [NSRegularExpression]
+    ) -> Bool {
+        if field[capability] == true { return true }
+        return regexes.contains { regex in
+            regex.firstMatch(
+                in: capability, range: NSRange(capability.startIndex..<capability.endIndex, in: capability)
+            ) != nil
+        }
     }
 }
 

@@ -13,7 +13,10 @@ import Vapor
 /// and is never an error (and moby's own `validateConfig` is a no-op TODO —
 /// `plugin/backend_linux.go`). Swift's synthesized `Codable` would reject
 /// the same file, so every `init(from:)` below uses `decodeIfPresent` with
-/// Go zero-value defaults.
+/// Go zero-value defaults. Go's field matching is case-INSENSITIVE on top
+/// of that (encoding/json accepts `entrypoint` for `Entrypoint`), so the
+/// decoders look every field up through `PluginConfigKey` — see its
+/// comment.
 ///
 /// Encoding normalizes those zero values to the REPORT shape moby serves:
 /// missing strings become `""`, missing arrays become `[]` (DEVIATION: Go
@@ -70,11 +73,11 @@ struct DockerPluginSettings: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        Args = try c.decodeIfPresent([String].self, forKey: .Args) ?? []
-        Devices = try c.decodeIfPresent([DockerPluginDevice].self, forKey: .Devices) ?? []
-        Env = try c.decodeIfPresent([String].self, forKey: .Env) ?? []
-        Mounts = try c.decodeIfPresent([DockerPluginMount].self, forKey: .Mounts) ?? []
+        let c = try decoder.container(keyedBy: PluginConfigKey.self)
+        Args = try c.decodeIfPresent([String].self, ciKey: "Args") ?? []
+        Devices = try c.decodeIfPresent([DockerPluginDevice].self, ciKey: "Devices") ?? []
+        Env = try c.decodeIfPresent([String].self, ciKey: "Env") ?? []
+        Mounts = try c.decodeIfPresent([DockerPluginMount].self, ciKey: "Mounts") ?? []
     }
 
     /// moby `Plugin.InitEmptySettings` — the settings a freshly created
@@ -171,32 +174,68 @@ struct DockerPluginConfig: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        Args = try c.decodeIfPresent(DockerPluginConfigArgs.self, forKey: .Args)
-        Description = try c.decodeIfPresent(String.self, forKey: .Description) ?? ""
-        DockerVersion = try c.decodeIfPresentIfNotEmpty(String.self, forKey: .DockerVersion)
-        Documentation = try c.decodeIfPresent(String.self, forKey: .Documentation) ?? ""
-        Entrypoint = try c.decodeIfPresent([String].self, forKey: .Entrypoint) ?? []
-        Env = try c.decodeIfPresent([DockerPluginEnv].self, forKey: .Env)
-        Interface = try c.decodeIfPresent(DockerPluginConfigInterface.self, forKey: .Interface)
-        IpcHost = try c.decodeIfPresent(Bool.self, forKey: .IpcHost) ?? false
-        Linux = try c.decodeIfPresent(DockerPluginConfigLinux.self, forKey: .Linux)
-        Mounts = try c.decodeIfPresent([DockerPluginMount].self, forKey: .Mounts)
-        Network = try c.decodeIfPresent(DockerPluginConfigNetwork.self, forKey: .Network)
-        PidHost = try c.decodeIfPresent(Bool.self, forKey: .PidHost) ?? false
-        PropagatedMount = try c.decodeIfPresent(String.self, forKey: .PropagatedMount) ?? ""
-        User = try c.decodeIfPresent(DockerPluginConfigUser.self, forKey: .User)
-        WorkDir = try c.decodeIfPresent(String.self, forKey: .WorkDir) ?? ""
-        rootfs = try c.decodeIfPresent(DockerPluginConfigRootfs.self, forKey: .rootfs)
+        let c = try decoder.container(keyedBy: PluginConfigKey.self)
+        Args = try c.decodeIfPresent(DockerPluginConfigArgs.self, ciKey: "Args")
+        Description = try c.decodeString(ciKey: "Description")
+        DockerVersion = try c.decodeIfPresentIfNotEmpty(ciKey: "DockerVersion")
+        Documentation = try c.decodeString(ciKey: "Documentation")
+        Entrypoint = try c.decodeIfPresent([String].self, ciKey: "Entrypoint") ?? []
+        Env = try c.decodeIfPresent([DockerPluginEnv].self, ciKey: "Env")
+        Interface = try c.decodeIfPresent(DockerPluginConfigInterface.self, ciKey: "Interface")
+        IpcHost = try c.decodeIfPresent(Bool.self, ciKey: "IpcHost") ?? false
+        Linux = try c.decodeIfPresent(DockerPluginConfigLinux.self, ciKey: "Linux")
+        Mounts = try c.decodeIfPresent([DockerPluginMount].self, ciKey: "Mounts")
+        Network = try c.decodeIfPresent(DockerPluginConfigNetwork.self, ciKey: "Network")
+        PidHost = try c.decodeIfPresent(Bool.self, ciKey: "PidHost") ?? false
+        PropagatedMount = try c.decodeString(ciKey: "PropagatedMount")
+        User = try c.decodeIfPresent(DockerPluginConfigUser.self, ciKey: "User")
+        WorkDir = try c.decodeString(ciKey: "WorkDir")
+        rootfs = try c.decodeIfPresent(DockerPluginConfigRootfs.self, ciKey: "rootfs")
     }
 }
 
-extension KeyedDecodingContainer {
+// MARK: - Case-insensitive config keys
+
+/// A pass-through decoding key: the container's `allKeys` carry the
+/// payload's RAW key casing, and the helpers below look each field up by
+/// case-insensitive name — Go's `encoding/json` matches struct fields that
+/// way (exact case first, then case-folded), so a config.json written with
+/// lowercase keys (`entrypoint`, `interface`, `linux`) decodes in moby
+/// instead of silently dropping those fields to zero values. ENCODING is
+/// untouched: every type keeps its own `CodingKeys`, so the report keeps
+/// its capitalized output shape.
+struct PluginConfigKey: CodingKey {
+    let stringValue: String
+    var intValue: Int? { nil }
+    init(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { nil }
+}
+
+extension KeyedDecodingContainer where Key == PluginConfigKey {
+    /// The payload key matching `name` case-insensitively, if present.
+    private func payloadKey(named name: String) -> Key? {
+        let folded = name.lowercased()
+        return allKeys.first { $0.stringValue.lowercased() == folded }
+    }
+
+    /// `decodeIfPresent`: absent or `null` → nil; a present value of the
+    /// wrong JSON type still throws (moby fails the whole decode on a type
+    /// error — only missing fields become zero values).
+    func decodeIfPresent<T: Decodable>(_ type: T.Type, ciKey name: String) throws -> T? {
+        guard let key = payloadKey(named: name) else { return nil }
+        return try decodeIfPresent(type, forKey: key)
+    }
+
+    /// Go zero value `""` for an absent or null string.
+    func decodeString(ciKey name: String) throws -> String {
+        try decodeIfPresent(String.self, ciKey: name) ?? ""
+    }
+
     /// Decodes an optional string, treating `null`, absence, and the empty
     /// string all as nil — Go's `omitempty` marshaling cannot distinguish
     /// them, so podm keeps such fields absent instead of re-encoding "".
-    func decodeIfPresentIfNotEmpty(_ type: String.Type, forKey key: Key) throws -> String? {
-        guard let value = try decodeIfPresent(String.self, forKey: key) else { return nil }
+    func decodeIfPresentIfNotEmpty(ciKey name: String) throws -> String? {
+        guard let value = try decodeIfPresent(String.self, ciKey: name) else { return nil }
         return value.isEmpty ? nil : value
     }
 }
@@ -216,11 +255,11 @@ struct DockerPluginConfigArgs: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        Description = try c.decodeIfPresent(String.self, forKey: .Description) ?? ""
-        Name = try c.decodeIfPresent(String.self, forKey: .Name) ?? ""
-        Settable = try c.decodeIfPresent([String].self, forKey: .Settable) ?? []
-        Value = try c.decodeIfPresent([String].self, forKey: .Value) ?? []
+        let c = try decoder.container(keyedBy: PluginConfigKey.self)
+        Description = try c.decodeString(ciKey: "Description")
+        Name = try c.decodeString(ciKey: "Name")
+        Settable = try c.decodeIfPresent([String].self, ciKey: "Settable") ?? []
+        Value = try c.decodeIfPresent([String].self, ciKey: "Value") ?? []
     }
 }
 
@@ -237,10 +276,10 @@ struct DockerPluginConfigInterface: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        ProtocolScheme = try c.decodeIfPresentIfNotEmpty(String.self, forKey: .ProtocolScheme)
-        Socket = try c.decodeIfPresent(String.self, forKey: .Socket) ?? ""
-        Types = try c.decodeIfPresent([DockerPluginInterfaceType].self, forKey: .Types) ?? []
+        let c = try decoder.container(keyedBy: PluginConfigKey.self)
+        ProtocolScheme = try c.decodeIfPresentIfNotEmpty(ciKey: "ProtocolScheme")
+        Socket = try c.decodeString(ciKey: "Socket")
+        Types = try c.decodeIfPresent([DockerPluginInterfaceType].self, ciKey: "Types") ?? []
     }
 }
 
@@ -257,10 +296,10 @@ struct DockerPluginConfigLinux: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        AllowAllDevices = try c.decodeIfPresent(Bool.self, forKey: .AllowAllDevices) ?? false
-        Capabilities = try c.decodeIfPresent([String].self, forKey: .Capabilities) ?? []
-        Devices = try c.decodeIfPresent([DockerPluginDevice].self, forKey: .Devices) ?? []
+        let c = try decoder.container(keyedBy: PluginConfigKey.self)
+        AllowAllDevices = try c.decodeIfPresent(Bool.self, ciKey: "AllowAllDevices") ?? false
+        Capabilities = try c.decodeIfPresent([String].self, ciKey: "Capabilities") ?? []
+        Devices = try c.decodeIfPresent([DockerPluginDevice].self, ciKey: "Devices") ?? []
     }
 }
 
@@ -278,7 +317,12 @@ struct DockerPluginConfigNetwork: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
-        networkType = (try? decoder.container(keyedBy: CodingKeys.self).decodeIfPresent(String.self, forKey: .networkType)) ?? ""
+        // No `try?`: a mistyped Type ({"Network":{"Type":123}}) or a
+        // non-object Network ({"Network":"host"}) fails the decode like
+        // moby's json.Unmarshal; only an absent or null `Type` is the Go
+        // zero value "".
+        let c = try decoder.container(keyedBy: PluginConfigKey.self)
+        networkType = try c.decodeString(ciKey: "Type")
     }
 }
 
@@ -297,9 +341,9 @@ struct DockerPluginConfigUser: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        GID = try c.decodeIfPresent(UInt32.self, forKey: .GID) ?? 0
-        UID = try c.decodeIfPresent(UInt32.self, forKey: .UID) ?? 0
+        let c = try decoder.container(keyedBy: PluginConfigKey.self)
+        GID = try c.decodeIfPresent(UInt32.self, ciKey: "GID") ?? 0
+        UID = try c.decodeIfPresent(UInt32.self, ciKey: "UID") ?? 0
     }
 
     /// Go omits zero-valued GID/UID (omitempty) — an all-zero user encodes
@@ -324,9 +368,9 @@ struct DockerPluginConfigRootfs: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        diff_ids = try c.decodeIfPresent([String].self, forKey: .diff_ids) ?? []
-        type = try c.decodeIfPresentIfNotEmpty(String.self, forKey: .type)
+        let c = try decoder.container(keyedBy: PluginConfigKey.self)
+        diff_ids = try c.decodeIfPresent([String].self, ciKey: "diff_ids") ?? []
+        type = try c.decodeIfPresentIfNotEmpty(ciKey: "type")
     }
 }
 
@@ -351,6 +395,17 @@ struct DockerPluginInterfaceType: Codable, Sendable, Equatable, Hashable {
 
     init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
+        // The empty string leaves the capability span start (prefixIndex+1,
+        // byte 1) past the string end — the slice below would TRAP and take
+        // podmd down on an uploaded or registry config (moby's Go
+        // unmarshaler panics here too; its net/http recovers panics per
+        // request, Swift does not). Reject it as a decoding error.
+        guard !raw.isEmpty else {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "\"\" is not a plugin interface type"))
+        }
         let bytes = Array(raw.utf8)
         var prefixIndex = 0
         var versionIndex = bytes.count
@@ -395,11 +450,11 @@ struct DockerPluginEnv: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        Description = try c.decodeIfPresent(String.self, forKey: .Description) ?? ""
-        Name = try c.decodeIfPresent(String.self, forKey: .Name) ?? ""
-        Settable = try c.decodeIfPresent([String].self, forKey: .Settable) ?? []
-        Value = try c.decodeIfPresent(String.self, forKey: .Value)
+        let c = try decoder.container(keyedBy: PluginConfigKey.self)
+        Description = try c.decodeString(ciKey: "Description")
+        Name = try c.decodeString(ciKey: "Name")
+        Settable = try c.decodeIfPresent([String].self, ciKey: "Settable") ?? []
+        Value = try c.decodeIfPresent(String.self, ciKey: "Value")
     }
 }
 
@@ -418,11 +473,11 @@ struct DockerPluginDevice: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        Description = try c.decodeIfPresent(String.self, forKey: .Description) ?? ""
-        Name = try c.decodeIfPresent(String.self, forKey: .Name) ?? ""
-        Path = try c.decodeIfPresent(String.self, forKey: .Path)
-        Settable = try c.decodeIfPresent([String].self, forKey: .Settable) ?? []
+        let c = try decoder.container(keyedBy: PluginConfigKey.self)
+        Description = try c.decodeString(ciKey: "Description")
+        Name = try c.decodeString(ciKey: "Name")
+        Path = try c.decodeIfPresent(String.self, ciKey: "Path")
+        Settable = try c.decodeIfPresent([String].self, ciKey: "Settable") ?? []
     }
 }
 
@@ -456,14 +511,14 @@ struct DockerPluginMount: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        Description = try c.decodeIfPresent(String.self, forKey: .Description) ?? ""
-        Destination = try c.decodeIfPresent(String.self, forKey: .Destination) ?? ""
-        Name = try c.decodeIfPresent(String.self, forKey: .Name) ?? ""
-        Options = try c.decodeIfPresent([String].self, forKey: .Options) ?? []
-        Settable = try c.decodeIfPresent([String].self, forKey: .Settable) ?? []
-        Source = try c.decodeIfPresent(String.self, forKey: .Source)
-        mountType = try c.decodeIfPresent(String.self, forKey: .mountType) ?? ""
+        let c = try decoder.container(keyedBy: PluginConfigKey.self)
+        Description = try c.decodeString(ciKey: "Description")
+        Destination = try c.decodeString(ciKey: "Destination")
+        Name = try c.decodeString(ciKey: "Name")
+        Options = try c.decodeIfPresent([String].self, ciKey: "Options") ?? []
+        Settable = try c.decodeIfPresent([String].self, ciKey: "Settable") ?? []
+        Source = try c.decodeIfPresent(String.self, ciKey: "Source")
+        mountType = try c.decodeString(ciKey: "Type")
     }
 }
 

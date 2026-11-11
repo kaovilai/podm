@@ -121,9 +121,15 @@ actor PluginStore {
         } else if !Self.tightenPermissions(of: dir, fm: fm, log: log) {
             permissionsUnsecured = true
         }
-        // Same for a store file that predates the 0600 discipline.
-        if fm.fileExists(atPath: metadataURL.path) {
-            Self.tightenPermissions(of: metadataURL, fm: fm, log: log)
+        // Same for a store file that predates the 0600 discipline — and the
+        // result feeds the SAME refusal as the directory check: a file that
+        // cannot be inspected or tightened leaves the store unsecured, so
+        // mutations are refused rather than persisting over data another
+        // local user can read (like ConfigStore/SecretStore).
+        if fm.fileExists(atPath: metadataURL.path),
+            !Self.tightenPermissions(of: metadataURL, fm: fm, log: log)
+        {
+            permissionsUnsecured = true
         }
 
         let loaded = Self.load(metadataURL: metadataURL, log: log)

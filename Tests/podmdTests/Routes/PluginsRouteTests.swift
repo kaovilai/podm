@@ -170,6 +170,56 @@ struct PluginsRouteTests {
         }
     }
 
+    @Test("list filters, moby's GetBoolOrDefault: whole value set, literals only, empty is invalid")
+    func listFiltersEnabledSemantics() async throws {
+        try await withPluginsApp { app in
+            try await createPlugin(app, name: "a/plugin")
+            try await createPlugin(app, name: "b/plugin")
+
+            // GetBoolOrDefault examines the WHOLE value set — conflicting
+            // truth values are invalid, not first-value-wins — and only the
+            // literals "1"/"true"/"0"/"false" count (no strconv.ParseBool
+            // grammar, no case folding). An empty set is invalid too.
+            for bad in [
+                #"{"enabled":["true","false"]}"#,
+                #"{"enabled":["1","0"]}"#,
+                #"{"enabled":["t"]}"#,
+                #"{"enabled":["TRUE"]}"#,
+                #"{"enabled":[]}"#,
+                #"{"enabled":{}}"#,
+                #"{"enabled":{"true":false}}"#,
+            ] {
+                try await app.testing().test(.GET, "/v1.51/plugins?filters=\(encodeQuery(bad))") { res async in
+                    #expect(res.status == .badRequest, "filter \(bad) should be a 400, got \(res.status)")
+                }
+            }
+            // The map form's flags are honored: flagging "false" out leaves
+            // only "true", so this asks for enabled-only (none exist).
+            try await expectCount(app, filters: #"{"enabled":{"true":true,"false":false}}"#, count: 0)
+        }
+    }
+
+    @Test("list filters, moby's filters.Match: exact-or-regex, empty set is no restriction")
+    func listFiltersCapabilitySemantics() async throws {
+        try await withPluginsApp { app in
+            try await createPlugin(app, name: "a/plugin")
+            try await createPlugin(app, name: "b/plugin")
+
+            // Match tries the exact value, then each value as an UNANCHORED
+            // regex — "volume.*" and the substring "driver" both include the
+            // volumedriver plugin.
+            try await expectCount(app, filters: #"{"capability":["volume.*"]}"#, count: 2)
+            try await expectCount(app, filters: #"{"capability":["driver"]}"#, count: 2)
+            // An EMPTY value set is no restriction (not exclude-all).
+            try await expectCount(app, filters: #"{"capability":[]}"#, count: 2)
+            try await expectCount(app, filters: #"{"capability":{}}"#, count: 2)
+            // A regex that matches nothing excludes; an INVALID regex is
+            // skipped, so only the valid pattern counts.
+            try await expectCount(app, filters: #"{"capability":["^network"]}"#, count: 0)
+            try await expectCount(app, filters: #"{"capability":["[","volumedriver"]}"#, count: 2)
+        }
+    }
+
     // MARK: - Create
 
     @Test("create name rules: moby's familiar-name normalization and its rejections")
@@ -274,6 +324,59 @@ struct PluginsRouteTests {
         try await withPluginsApp(store: reopened) { app in
             try await app.testing().test(.GET, "/v1.51/plugins/persist/plugin/json") { res async in
                 #expect(res.status == .ok, "the plugin survived the store re-instantiation")
+            }
+        }
+    }
+
+    @Test("config value errors are 400s, never a crash: empty interface type, mistyped network")
+    func configTypeErrors() async throws {
+        try await withPluginsApp { app in
+            // The empty interface type used to TRAP podmd (an out-of-bounds
+            // slice); the mistyped Network values used to decode silently
+            // as an empty network type.
+            for bad in [
+                #"{"Interface":{"Types":[""]}}"#,
+                #"{"Network":{"Type":123}}"#,
+                #"{"Network":"host"}"#,
+            ] {
+                try await app.testing().test(
+                    .POST, "/v1.51/plugins/create?name=bad/values",
+                    headers: ["Content-Type": "application/x-tar"],
+                    body: ByteBuffer(data: sampleTar(configJSON: Data(bad.utf8)))
+                ) { res async in
+                    #expect(res.status == .badRequest, "\(bad): expected a 400, got \(res.status)")
+                    #expect(res.body.string.contains("failed to parse config"))
+                }
+            }
+            // podmd survived the malformed configs.
+            try await expectCount(app, filters: nil, count: 0)
+        }
+    }
+
+    @Test("a lowercase config.json decodes like Go's case-insensitive json.Unmarshal")
+    func lowercaseConfigRoundTrip() async throws {
+        try await withPluginsApp { app in
+            try await app.testing().test(
+                .POST, "/v1.51/plugins/create?name=lower/case",
+                headers: ["Content-Type": "application/x-tar"],
+                body: ByteBuffer(data: sampleTar(configJSON: lowercaseConfigJSON()))
+            ) { res async in
+                #expect(res.status == .noContent, "lowercase config create failed: \(res.body.string)")
+            }
+            try await app.testing().test(.GET, "/v1.51/plugins/lower/case/json") { res async throws in
+                #expect(res.status == .ok)
+                let report = try JSONDecoder().decode(DockerPlugin.self, from: Data(buffer: res.body))
+                // The case-insensitively decoded data re-encodes under the
+                // REPORT's capitalized keys — nothing was dropped.
+                #expect(report.Config.Description == "a lowercase-keyed plugin")
+                #expect(report.Config.Entrypoint == ["/bin/plugin"])
+                #expect(
+                    report.Config.Interface?.Types
+                        == [DockerPluginInterfaceType(Prefix: "docker", Capability: "volumedriver", Version: "1.0")])
+                #expect(report.Config.Linux?.Capabilities == ["CAP_SYS_ADMIN"])
+                #expect(report.Config.Network?.networkType == "host")
+                #expect(report.Config.User?.UID == 1000)
+                #expect(report.Settings.Env == ["DEBUG=0"], "emptySettings reads the decoded env")
             }
         }
     }
@@ -461,6 +564,35 @@ private func uniqueTempDir() -> URL {
     return dir
 }
 
+/// The same fixture shape as the suite's `sampleConfigJSON` with EVERY key
+/// lowercased — Go's json.Unmarshal accepts this for the capitalized struct
+/// fields, so podm's config decoders must too.
+private func lowercaseConfigJSON() -> Data {
+    let mount: [String: Any] = [
+        "description": "data mount", "destination": "/data", "name": "data",
+        "options": ["rbind"], "settable": [], "source": "/srv/data", "type": "bind",
+    ]
+    let config: [String: Any] = [
+        "description": "a lowercase-keyed plugin",
+        "documentation": "https://example.com/docs",
+        "entrypoint": ["/bin/plugin"],
+        "interface": [
+            "types": ["docker.volumedriver/1.0"], "socket": "plugin.sock",
+        ],
+        "network": ["type": "host"],
+        "linux": ["allowalldevices": false, "capabilities": ["CAP_SYS_ADMIN"], "devices": []],
+        "mounts": [mount],
+        "env": [["name": "DEBUG", "description": "debug", "settable": [], "value": "0"]],
+        "args": ["name": "args", "description": "arguments", "settable": [], "value": []],
+        "ipchost": false,
+        "pidhost": false,
+        "propagatedmount": "",
+        "workdir": "/work",
+        "user": ["uid": 1000, "gid": 1000],
+    ]
+    return try! JSONSerialization.data(withJSONObject: config)
+}
+
 // MARK: - Unit tests
 
 /// moby's `computePrivileges` (`plugin/backend_linux.go`), order and
@@ -562,4 +694,54 @@ func pluginConfigLenientDecodeUnit() throws {
     #expect(config.IpcHost == false)
     #expect(config.Network == nil)
     #expect(config.rootfs == nil)
+}
+
+/// Go's json.Unmarshal matches struct fields case-insensitively — a
+/// lowercase config must decode identically (and feed privileges).
+@Test("plugin config decode is case-insensitive like Go, and privileges survive it")
+func pluginConfigCaseInsensitiveUnit() throws {
+    let config = try JSONDecoder().decode(DockerPluginConfig.self, from: lowercaseConfigJSON())
+    #expect(config.Description == "a lowercase-keyed plugin")
+    #expect(config.Entrypoint == ["/bin/plugin"])
+    #expect(
+        config.Interface?.Types
+            == [DockerPluginInterfaceType(Prefix: "docker", Capability: "volumedriver", Version: "1.0")])
+    #expect(config.Linux?.Capabilities == ["CAP_SYS_ADMIN"])
+    #expect(config.Network?.networkType == "host")
+    #expect(config.User?.UID == 1000)
+    // The privilege computation sees the same inputs as for the capitalized
+    // form: network=host, the mount source, and the capabilities.
+    let privileges = RegistryPluginPrivilegesProvider.computePrivileges(from: config)
+    #expect(privileges.map(\.Name) == ["network", "mount", "capabilities"])
+    #expect(privileges[0].Value == ["host"])
+    #expect(privileges[1].Value == ["/srv/data"])
+    #expect(privileges[2].Value == ["CAP_SYS_ADMIN"])
+}
+
+/// The interface-type string coder rejects the empty string with a decoding
+/// error — its span arithmetic would otherwise index out of bounds and trap
+/// the daemon (finding: `{"Interface":{"Types":[""]}}`).
+@Test("plugin interface type: the empty string is a decoding error, not a crash")
+func pluginInterfaceTypeEmptyStringUnit() throws {
+    #expect(throws: DecodingError.self) {
+        _ = try JSONDecoder().decode(
+            [DockerPluginInterfaceType].self, from: Data(#"[""]"#.utf8))
+    }
+}
+
+/// The config's Network decoder propagates type errors like the other
+/// config decoders — only an absent or null `Type` is the Go zero value "".
+@Test("plugin config network: type errors propagate, absent/null Type stays the zero value")
+func pluginConfigNetworkTypeErrorsUnit() throws {
+    for bad in [
+        Data(#"{"Network":{"Type":123}}"#.utf8),
+        Data(#"{"Network":"host"}"#.utf8),
+    ] {
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(DockerPluginConfig.self, from: bad)
+        }
+    }
+    let nullType = try JSONDecoder().decode(
+        DockerPluginConfig.self, from: Data(#"{"Network":{"Type":null}}"#.utf8))
+    #expect(nullType.Network?.networkType == "")
 }
