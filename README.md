@@ -293,6 +293,13 @@ libpod API layer and multi-arch build support, then rebranded and extended. See
 [NOTICE](NOTICE) for attribution of socktainer and Apple code; the license stays
 Apache-2.0.
 
+Podm spun out because socktainer's PRs could not get reviews — this repo needed
+a place to move at its own pace. Everything here is Apache-2.0: if upstream would like
+any of it — the Docker Engine API routes, the libpod dialect work, the stores,
+the conformance/docgen harness, or the extensive test suite — take it. A cherry
+or a rebase beats a rewrite; the git history is clean and every commit is
+signed off.
+
 **Does kind / testcontainers / docker-py work?**
 Unverified, and in places genuinely hard: anything needing true host-privileged
 behavior (kind, k3s-in-container) only gets all-caps *inside the guest VM*, which is
