@@ -11,6 +11,14 @@ import VaporTesting
 @Suite("Compose DNS — service name registration")
 struct ComposeDNSTests {
 
+    /// Routes the SHARED journal (the one these routes use) at a test-owned
+    /// directory before any route test runs — this suite drives lifecycle
+    /// routes that reset and delete journal files. See
+    /// `SharedJournalTestIsolation`.
+    init() async {
+        await SharedJournalTestIsolation.shared.install()
+    }
+
     // MARK: - Start route registers compose DNS aliases
 
     @Test("Start registers service and service.project aliases when compose labels present")

@@ -15,6 +15,14 @@ import VaporTesting
 @Suite("ContainerDeleteRoute — restart-state cleanup")
 struct ContainerDeleteRestartStateTests {
 
+    /// Routes the SHARED journal (the one these routes use) at a test-owned
+    /// directory before any route test runs — this suite drives lifecycle
+    /// routes that reset and delete journal files. See
+    /// `SharedJournalTestIsolation`.
+    init() async {
+        await SharedJournalTestIsolation.shared.install()
+    }
+
     @Test("Deleting a container clears its ContainerRestartState entry")
     func deleteClearsRestartState() async throws {
         let nativeId = "delete-restart-state-ctr"

@@ -16,6 +16,14 @@ import VaporTesting
 @Suite("ContainerAttachWSRoute — parameter validation")
 struct ContainerAttachWSRouteTests {
 
+    /// Routes the SHARED journal (the one these routes use) at a test-owned
+    /// directory before any route test runs — this suite drives lifecycle
+    /// routes that reset and delete journal files. See
+    /// `SharedJournalTestIsolation`.
+    init() async {
+        await SharedJournalTestIsolation.shared.install()
+    }
+
     @Test("Unknown container returns 404")
     func unknownContainerReturns404() async throws {
         try await withWSRouteApp(client: NullContainerMock()) { app in

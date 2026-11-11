@@ -289,6 +289,13 @@ actor HealthCheckManager {
             guard isActive(id: containerId) else { return }
 
             let probeStartNs = await clock()
+            // A stop() or restart while the clock call was suspended leaves
+            // this loop stale: without this guard it would fire runCheck
+            // against the stopped or restarted container — a probe the new
+            // incarnation's state must never see (its result could not be
+            // applied anyway, but the probe itself runs against the wrong
+            // container).
+            guard !Task.isCancelled, generations[containerId] == generation else { return }
             let start = Date()
             let exitCode = await runCheck(containerId: containerId, config: config, timeoutNs: timeoutNs)
             let end = Date()

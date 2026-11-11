@@ -11,6 +11,18 @@ import VaporTesting
 @Suite("ContainerStartRoute — event label forwarding")
 struct ContainerStartEventLabelTests {
 
+    /// Routes the SHARED journal (the one these routes use) at a test-owned
+    /// directory before any route test runs — this suite drives lifecycle
+    /// routes that reset and delete journal files. See
+    /// `SharedJournalTestIsolation`. Without this install, running THIS
+    /// suite alone would arm a fresh-boot follower and delete a matching
+    /// journal in the developer's real Application Support directory
+    /// (review round 8: the lifecycle suite's private installer did not
+    /// protect other route suites).
+    init() async {
+        await SharedJournalTestIsolation.shared.install()
+    }
+
     @Test("Start event Actor.Attributes carries container labels, image, and name")
     func startEventCarriesLabels() async throws {
         let hexId = "aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222"
@@ -49,6 +61,20 @@ struct ContainerStartEventLabelTests {
         #expect(attrs?["env"] == "prod")
         #expect(attrs?["image"] == "alpine:latest")
         #expect(attrs?["name"] == nativeId)
+    }
+
+    /// Review round 8: this suite's /start can activate a fresh boot on the
+    /// SHARED journal — the install in `init` must have routed it at a
+    /// test-owned directory BEFORE that, or a run of this suite alone
+    /// deletes journal files in the developer's real Application Support
+    /// root (the lifecycle suite's private installer does not order other
+    /// suites).
+    @Test("the shared journal is test-owned by the time this suite's routes run")
+    func sharedJournalIsTestOwnedWhenSuiteRunsAlone() async {
+        let current = await ContainerLogJournal.shared.currentStorageDirectory()
+        #expect(
+            !current.path.contains("Application Support"),
+            "this suite's /start resets journals on the SHARED journal — its init must install the test-owned directory first")
     }
 }
 

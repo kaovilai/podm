@@ -16,6 +16,14 @@ import VaporTesting
 @Suite("ContainerStartRoute — post-start setup on automatic restart")
 struct ContainerRestartPolicyPostStartTests {
 
+    /// Routes the SHARED journal (the one these routes use) at a test-owned
+    /// directory before any route test runs — this suite drives lifecycle
+    /// routes that reset and delete journal files. See
+    /// `SharedJournalTestIsolation`.
+    init() async {
+        await SharedJournalTestIsolation.shared.install()
+    }
+
     @Test("An automatic restart re-registers DNS with the container's new IP")
     func automaticRestartRefreshesDNS() async throws {
         let nativeId = "restart-dns-refresh-ctr"

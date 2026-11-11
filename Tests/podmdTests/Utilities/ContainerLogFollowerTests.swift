@@ -1467,4 +1467,252 @@ struct ContainerLogFollowerTests {
             return !armed
         }
     }
+
+    // MARK: - Boot-identity arming (review round 8)
+
+    /// Review round 8: a `/start` delayed past a `/restart` fetches the
+    /// RESTART's snapshot during post-start setup, so its fresh arm arrives
+    /// carrying the NEWER boot's `startedDate` — the older-boot guard cannot
+    /// reject it (it is not older). Without an identity-equality check the
+    /// delayed arm would cancel the restart's follower, reset the journal
+    /// and erase the timestamps that follower had already recorded.
+    @Test("a fresh arm carrying the already-armed boot's startedDate is a no-op, not a reset")
+    func freshArmForArmedBootIsANoOp() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("same-boot.log")
+        FileManager.default.createFile(atPath: logFile.path, contents: Data("restart boot\n".utf8))
+
+        let journal = ContainerLogJournal()
+        await journal.configure(storageDirectory: dir)
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        let boot = Date(timeIntervalSince1970: 2_000_000_000)
+
+        // The /restart boots and arms its follower over its boot's log stream.
+        await registry.arm(
+            nativeId: "same-boot-arm-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: true,
+            bootStartedAt: boot,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+        let journaled = await waitFor {
+            await journal.entries(nativeId: "same-boot-arm-ctr").count >= 1
+        }
+        #expect(journaled)
+        let recordedStamp = await journal.entries(nativeId: "same-boot-arm-ctr").first?.unixNano
+        #expect(recordedStamp != nil)
+
+        // The delayed /start finally arms — its post-start snapshot observed
+        // the RESTART's boot, so it arrives with that same startedDate and
+        // freshBoot true. It must be a no-op: the already-armed boot's
+        // follower and journal stay exactly as they are.
+        await registry.arm(
+            nativeId: "same-boot-arm-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: true,
+            bootStartedAt: boot,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+        try await Task.sleep(for: .milliseconds(300))
+        let entries = await journal.entries(nativeId: "same-boot-arm-ctr")
+        #expect(
+            entries.count == 1 && entries.first?.unixNano == recordedStamp,
+            "the redundant fresh arm must not reset the journal — a reset would re-read the log and restamp its line with the current time")
+
+        client.stopContainer()
+        _ = await waitFor {
+            let armed = await registry.isArmed(nativeId: "same-boot-arm-ctr")
+            return !armed
+        }
+    }
+
+    /// Review round 8: the attach paths arm right after bootstrap, before
+    /// Apple reports a start date, so the journal for the boot they
+    /// registered is unidentified; the `/start` that follows carries the
+    /// real startedDate as a resume arm. The registry's already-armed early
+    /// return must ADOPT that identity — and persist it — or a container
+    /// that later reboots while podmd is down can never prove the mismatch,
+    /// and the old journal lends its timestamps to identical startup lines.
+    @Test("a resume arm adopts and persists the startedDate the original arm lacked")
+    func resumeArmAdoptsMissingBootIdentity() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("identity.log")
+        FileManager.default.createFile(atPath: logFile.path, contents: Data("banner\n".utf8))
+
+        let journal = ContainerLogJournal()
+        await journal.configure(storageDirectory: dir)
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        let boot = Date(timeIntervalSince1970: 2_000_000_123)
+
+        // The attach bootstrap's arm: a fresh boot, no identity yet (Apple
+        // had not reported a start date).
+        await registry.arm(
+            nativeId: "identity-adopt-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: true,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+        let journaled = await waitFor {
+            await journal.entries(nativeId: "identity-adopt-ctr").count >= 1
+        }
+        #expect(journaled)
+
+        // The CLI's /start on the now-running container: a resume arm
+        // carrying the boot's real startedDate. The follower stays; the
+        // identity lands in the journal AND on disk.
+        await registry.arm(
+            nativeId: "identity-adopt-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: false,
+            bootStartedAt: boot,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+        let entries = await journal.entries(nativeId: "identity-adopt-ctr")
+        #expect(
+            entries.map(\.bytes) == [Data("banner\n".utf8)],
+            "adopting the identity must not reset or restamp the boot's journal")
+
+        // The identity reached the FILE, not just memory: a raw parse of the
+        // journal reads it back out of the version-4 header.
+        let raw = try? Data(contentsOf: dir.appendingPathComponent("podm-log-journals/identity-adopt-ctr.journal"))
+        #expect(raw != nil)
+        if let raw {
+            let (_, _, _, bootIdNano, salvaged) = ContainerLogJournal.parse(raw)
+            #expect(!salvaged)
+            #expect(bootIdNano == ContainerLogJournal.bootIdNano(from: boot))
+        }
+
+        // And it works: a later resume that sees a DIFFERENT identity (the
+        // container rebooted while no follower was armed) resets instead of
+        // adopting — impossible against an unidentified journal.
+        let reloaded = ContainerLogJournal()
+        await reloaded.configure(storageDirectory: dir)
+        await reloaded.resumeBoot(
+            nativeId: "identity-adopt-ctr", epoch: 99,
+            bootIdNano: ContainerLogJournal.bootIdNano(from: Date(timeIntervalSince1970: 2_000_000_999)))
+        #expect(
+            await reloaded.entries(nativeId: "identity-adopt-ctr").isEmpty,
+            "the persisted identity must prove the reboot and reset the stale journal")
+
+        client.stopContainer()
+        _ = await waitFor {
+            let armed = await registry.isArmed(nativeId: "identity-adopt-ctr")
+            return !armed
+        }
+    }
+
+    // MARK: - Transient log-stream open failures (review round 8)
+
+    /// Fails the first `failures` open attempts — the seam for the
+    /// transient-open-retry tests below.
+    private actor FlakyOpener {
+        private let failures: Int
+        private(set) var attempt = 0
+        init(failures: Int) { self.failures = failures }
+        private struct OpenFailed: Error {}
+        func open(_ body: () throws -> FileHandle) throws -> FileHandle {
+            attempt += 1
+            guard attempt > failures else { throw OpenFailed() }
+            return try body()
+        }
+    }
+
+    /// Review round 8: a transient failure opening the Apple log stream
+    /// used to end the follower for good — the registry reaped it, and
+    /// later output had no recorded timestamps until another lifecycle
+    /// request or a daemon restart. The open must be retried while the
+    /// epoch stays current and the container stays (or may still be)
+    /// running.
+    @Test("a transient log-stream open failure is retried until it succeeds")
+    func transientOpenFailureIsRetried() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("retry-open.log")
+        FileManager.default.createFile(atPath: logFile.path, contents: nil)
+        let writer = try FileHandle(forWritingTo: logFile)
+
+        let journal = ContainerLogJournal()
+        await journal.configure(storageDirectory: dir)
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        let opener = FlakyOpener(failures: 2)
+
+        await registry.arm(
+            nativeId: "open-retry-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: true,
+            journal: journal,
+            openLogStream: { _ in
+                try await opener.open { try FileHandle(forReadingFrom: logFile) }
+            }
+        )
+        try writer.write(contentsOf: Data("after recovery\n".utf8))
+
+        let journaled = await waitFor {
+            await journal.entries(nativeId: "open-retry-ctr").count >= 1
+        }
+        #expect(journaled, "output written after the transient open failures must still be journaled")
+        let attempts = await opener.attempt
+        #expect(attempts >= 3, "the open must have been retried past its two failures")
+
+        client.stopContainer()
+        _ = await waitFor {
+            let armed = await registry.isArmed(nativeId: "open-retry-ctr")
+            return !armed
+        }
+    }
+
+    /// The open-retry loop must still END: a CONFIRMED missing or stopped
+    /// container stops the follower so the registry can reap it — unlike a
+    /// failed lookup, which only retries.
+    @Test("log-stream open retries stop once the container is confirmed stopped")
+    func openRetryStopsOnConfirmedStop() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("retry-stop.log")
+        FileManager.default.createFile(atPath: logFile.path, contents: nil)
+
+        let journal = ContainerLogJournal()
+        await journal.configure(storageDirectory: dir)
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        let opener = FlakyOpener(failures: .max)  // every open fails
+
+        await registry.arm(
+            nativeId: "open-stop-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: true,
+            journal: journal,
+            openLogStream: { _ in
+                try await opener.open { try FileHandle(forReadingFrom: logFile) }
+            }
+        )
+
+        // The open keeps failing while the container runs: the follower
+        // stays armed and retrying — the pre-round-8 behavior of dying on
+        // the first failure is what this pins out.
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(
+            await registry.isArmed(nativeId: "open-stop-ctr"),
+            "a failing open alone must not end the follower while the container runs")
+
+        // The container is confirmed stopped: the retry loop exits and the
+        // registry reaps the follower.
+        client.stopContainer()
+        let finished = await waitFor {
+            let armed = await registry.isArmed(nativeId: "open-stop-ctr")
+            return !armed
+        }
+        #expect(finished, "a confirmed-stopped container must end the open-retry loop")
+    }
 }

@@ -17,32 +17,21 @@ import VaporTesting
 ///
 /// These tests drive the SHARED journal the production routes use. Every
 /// test first routes it at a test-owned directory through the one-time
-/// installer below — the shared journal's unconfigured default is the
-/// DEVELOPER'S real journal directory, and route tests reset and delete
-/// journal files. The installer runs once per process; the journal's
-/// `configure` is idempotent per directory, so repeated installs never wipe
-/// live state (an unconditional reconfigure would clear the writer epochs of
-/// followers other suites armed and silently drop their appends).
+/// process-wide installer (`SharedJournalTestIsolation`, shared by every
+/// route suite that drives lifecycle routes) — the shared journal's
+/// unconfigured default is the DEVELOPER'S real journal directory, and
+/// route tests reset and delete journal files. The installer runs once per
+/// process; the journal's `configure` is idempotent per directory, so
+/// repeated installs never wipe live state (an unconditional reconfigure
+/// would clear the writer epochs of followers other suites armed and
+/// silently drop their appends).
 @Suite("Container log journal lifecycle (routes)", .serialized)
 struct ContainerLogJournalLifecycleRouteTests {
 
-    /// Installs the process-wide test-owned directory for the SHARED journal,
-    /// exactly once: the first test to arrive configures it, every later
-    /// call returns the same directory and hits `configure`'s same-directory
-    /// no-op. An actor (not a static let) because the installation awaits
-    /// the journal actor.
-    private actor SharedJournalTestIsolation {
-        static let shared = SharedJournalTestIsolation()
-        private var directory: URL?
-
-        func install() async -> URL {
-            if let directory { return directory }
-            let dir = FileManager.default.temporaryDirectory
-                .appendingPathComponent("podm-journal-route-tests-\(UUID().uuidString)", isDirectory: true)
-            await ContainerLogJournal.shared.configure(storageDirectory: dir)
-            directory = dir
-            return dir
-        }
+    /// Routes the SHARED journal at the test-owned directory before any of
+    /// this suite's route tests runs — see `SharedJournalTestIsolation`.
+    init() async {
+        await SharedJournalTestIsolation.shared.install()
     }
 
     /// Polls `condition` until true or the timeout passes. The budget is
@@ -129,13 +118,14 @@ struct ContainerLogJournalLifecycleRouteTests {
             }
         }
 
-        // The follower arms, resets the journal for the new boot, then exits
-        // (the mock container has no Apple log stream to open).
+        // The follower arms, resets the journal for the new boot, then exits:
+        // the mock container has no Apple log stream to open, and the open
+        // retries confirm the (mock-stopped) container is not running.
         let finished = await waitFor {
             let armed = await ContainerLogFollowerRegistry.shared.isArmed(nativeId: nativeId)
             return !armed
         }
-        #expect(finished, "the follower should wind down after failing to open the log stream")
+        #expect(finished, "the follower should wind down once the open retries confirm the container stopped")
 
         let after = await ContainerLogJournal.shared.entries(nativeId: nativeId)
         #expect(after.isEmpty, "a stopped→running /start must reset the previous boot's journal")
@@ -155,7 +145,12 @@ struct ContainerLogJournalLifecycleRouteTests {
         let nativeId = "journal-start-running-ctr"
         await seedSharedJournal(nativeId: nativeId, line: "current boot\n")
 
-        let mock = StaticSnapshotClientMock(snapshot: try makeSnapshot(nativeId: nativeId, status: .running))
+        // The mock reports the container running while the request runs (the
+        // route must take its already-running path), then flips to stopped:
+        // since review round 8 the follower RETRIES a failing log-stream
+        // open while the container runs, so a test that leaves it running
+        // must confirm the stop before waiting for the follower to reap.
+        let mock = RunningThenStoppedMock(nativeId: nativeId)
         try await withApp(configure: { _ in }) { app in
             let regexRouter = app.regexRouter(with: app.logger)
             app.setRegexRouter(regexRouter)
@@ -167,9 +162,10 @@ struct ContainerLogJournalLifecycleRouteTests {
                 #expect(res.status == .noContent)
             }
         }
+        await mock.stopContainer()
 
-        // The armed follower resumes the current boot (no reset) and exits on
-        // the unavailable log stream.
+        // The armed follower resumes the current boot (no reset); the open
+        // retries confirm the container stopped and the follower winds down.
         let finished = await waitFor {
             let armed = await ContainerLogFollowerRegistry.shared.isArmed(nativeId: nativeId)
             return !armed
@@ -210,8 +206,9 @@ struct ContainerLogJournalLifecycleRouteTests {
             }
         }
 
-        // The follower resumes the winning boot's journal (no reset) and
-        // winds down on the unavailable log stream.
+        // The follower resumes the winning boot's journal (no reset); the
+        // open retries confirm the (mock-stopped) container is not running
+        // and the follower winds down.
         let finished = await waitFor {
             let armed = await ContainerLogFollowerRegistry.shared.isArmed(nativeId: nativeId)
             return !armed
@@ -250,8 +247,9 @@ struct ContainerLogJournalLifecycleRouteTests {
             }
         }
 
-        // The follower arms with a fresh boot, resets the journal, then
-        // winds down on the unavailable log stream.
+        // The follower arms with a fresh boot, resets the journal; the open
+        // retries confirm the (mock-stopped) container is not running and
+        // the follower winds down.
         let finished = await waitFor {
             let armed = await ContainerLogFollowerRegistry.shared.isArmed(nativeId: nativeId)
             return !armed
@@ -289,8 +287,9 @@ struct ContainerLogJournalLifecycleRouteTests {
             }
         }
 
-        // The follower resumes the winning boot's journal (no reset) and
-        // winds down on the unavailable log stream.
+        // The follower resumes the winning boot's journal (no reset); the
+        // open retries confirm the (mock-stopped) container is not running
+        // and the follower winds down.
         let finished = await waitFor {
             let armed = await ContainerLogFollowerRegistry.shared.isArmed(nativeId: nativeId)
             return !armed
@@ -320,6 +319,53 @@ struct ContainerLogJournalLifecycleRouteTests {
         func start(id: String, detachKeys: String?) async throws -> Bool {
             await ContainerExitCodeStore.shared.remove(id: id)
             return false
+        }
+        func stop(id: String, signal: String?, timeout: Int?) async throws {}
+        func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool { true }
+        func kill(id: String, signal: String?) async throws {}
+        func delete(id: String) async throws {}
+        func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait {
+            RESTContainerWait(statusCode: 0)
+        }
+        func prune(filters: [String: [String]]) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+            ([], 0)
+        }
+    }
+
+    /// Mock whose reported status flips to stopped on demand — the route
+    /// must see the container running (its already-running path), while the
+    /// follower's open-retry loop (review round 8) only winds down on a
+    /// CONFIRMED stopped container.
+    private actor RunningThenStoppedMock: ClientContainerProtocol {
+        private let nativeId: String
+        private var stopped = false
+
+        init(nativeId: String) {
+            self.nativeId = nativeId
+        }
+
+        func stopContainer() {
+            stopped = true
+        }
+
+        private var snapshot: ContainerSnapshot {
+            get throws {
+                // The suite's makeSnapshot is an instance member; build the
+                // snapshot through the shared file-scope fixture instead.
+                try makeContainerSnapshot(
+                    nativeId: nativeId, networks: [("myapp_default", "192.168.65.90")], labels: [:],
+                    status: stopped ? .stopped : .running)
+            }
+        }
+
+        func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] {
+            [try snapshot]
+        }
+        func getContainer(id: String) async throws -> ContainerSnapshot? { try snapshot }
+        nonisolated func enforceContainerRunning(container: ContainerSnapshot) throws {}
+        func start(id: String, detachKeys: String?) async throws -> Bool {
+            await ContainerExitCodeStore.shared.remove(id: id)
+            return true
         }
         func stop(id: String, signal: String?, timeout: Int?) async throws {}
         func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool { true }

@@ -20,6 +20,14 @@ import VaporTesting
 @Suite("ContainerStartRoute — healthcheck native-ID keying")
 struct ContainerStartHealthcheckTests {
 
+    /// Routes the SHARED journal (the one these routes use) at a test-owned
+    /// directory before any route test runs — this suite drives lifecycle
+    /// routes that reset and delete journal files. See
+    /// `SharedJournalTestIsolation`.
+    init() async {
+        await SharedJournalTestIsolation.shared.install()
+    }
+
     // MARK: - Helpers
 
     /// Returns a snapshot whose labels include a valid healthcheck config, simulating

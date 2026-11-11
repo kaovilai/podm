@@ -14,6 +14,14 @@ import VaporTesting
 @Suite("ContainerDeleteRoute — force query parameter")
 struct ContainerDeleteForceTests {
 
+    /// Routes the SHARED journal (the one these routes use) at a test-owned
+    /// directory before any route test runs — this suite drives lifecycle
+    /// routes that reset and delete journal files. See
+    /// `SharedJournalTestIsolation`.
+    init() async {
+        await SharedJournalTestIsolation.shared.install()
+    }
+
     @Test(
         "Deleting a live container without force returns 409 and performs no action",
         arguments: [RuntimeStatus.running, RuntimeStatus.stopping])

@@ -17,6 +17,14 @@ import VaporTesting
 @Suite("ContainerDeleteRoute — healthcheck stop keying")
 struct ContainerDeleteHealthcheckTests {
 
+    /// Routes the SHARED journal (the one these routes use) at a test-owned
+    /// directory before any route test runs — this suite drives lifecycle
+    /// routes that reset and delete journal files. See
+    /// `SharedJournalTestIsolation`.
+    init() async {
+        await SharedJournalTestIsolation.shared.install()
+    }
+
     @Test("Delete with unresolvable id falls back to request id — native-keyed loop survives")
     func deleteWithNilContainerFallsBackToRequestId() async throws {
         let nativeId = "native-delete-ctr"

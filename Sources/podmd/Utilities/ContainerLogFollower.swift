@@ -80,12 +80,33 @@ actor ContainerLogFollowerRegistry {
         if let bootStartedAt, let armedBoot = bootTokens[nativeId], bootStartedAt < armedBoot {
             return
         }
-        if !freshBoot,
-            let existing = tasks[nativeId],
-            existing.epoch == epochs[nativeId],
-            !existing.task.isCancelled
-        {
-            return  // a current-boot follower is already watching this container
+        if let existing = tasks[nativeId], existing.epoch == epochs[nativeId], !existing.task.isCancelled {
+            if !freshBoot {
+                // A current-boot follower is already watching this container.
+                // The arm may still carry what the original arm lacked — this
+                // boot's `startedDate` (the attach paths arm right after
+                // bootstrap, before Apple reports one; the `/start` that
+                // follows supplies it). Adopt it into the journal before
+                // returning: an unidentified journal can never prove a later
+                // reboot-while-unarmed, and would lend its old timestamps to
+                // identical startup lines.
+                if let bootStartedAt {
+                    await journal.adoptBootIdentity(
+                        nativeId: nativeId, epoch: existing.epoch,
+                        bootIdNano: ContainerLogJournal.bootIdNano(from: bootStartedAt))
+                }
+                return
+            }
+            // A FRESH arm for the boot that is already armed is redundant.
+            // A `/start` delayed past a `/restart` fetches the restart's
+            // newer snapshot during post-start setup, so it arrives with
+            // that same (newer) `startedDate` and freshBoot true — the
+            // older-boot guard above cannot reject it. Letting it through
+            // would cancel the restart's follower and erase the timestamps
+            // it already recorded. Same boot, same journal — leave both be.
+            if let bootStartedAt, bootStartedAt == bootTokens[nativeId] {
+                return
+            }
         }
         nextEpoch += 1
         let epoch = nextEpoch
@@ -294,21 +315,46 @@ enum ContainerLogFollower {
         }
         guard await isCurrent() else { return }
 
-        let handle: FileHandle
-        do {
-            if let openLogStream {
-                handle = try await openLogStream(nativeId)
-            } else {
-                guard
-                    let appleHandle = ContainerLogFollower.selectLogHandle(
+        // Opening the Apple log stream can fail TRANSIENTLY (the XPC service
+        // reconnecting while the VM keeps running). A single failure used to
+        // end the follower for good — the registry reaped it and later
+        // output lost its recorded timestamps until another lifecycle
+        // request or a daemon restart. Retry while this follower's epoch
+        // stays current, stopping only on cancellation/supersession or a
+        // CONFIRMED missing/stopped container. A failed status LOOKUP is
+        // not a confirmation (same rule as the poll loop below — the Apple
+        // service can stay unavailable through a reconnect retry): retry
+        // after the polling delay instead.
+        var handle: FileHandle?
+        while handle == nil {
+            if Task.isCancelled { return }
+            guard await isCurrent() else { return }
+            do {
+                if let openLogStream {
+                    handle = try await openLogStream(nativeId)
+                } else {
+                    handle = ContainerLogFollower.selectLogHandle(
                         try await ContainerClient().logs(id: nativeId))
-                else { return }
-                handle = appleHandle
+                }
+            } catch {
+                logger.debug(
+                    "log follower: could not open Apple log stream for \(nativeId) (will retry): \(error)")
             }
-        } catch {
-            logger.debug("log follower: could not open Apple log stream for \(nativeId): \(error)")
-            return
+            if handle == nil {
+                let current: ContainerSnapshot?
+                do {
+                    current = try await client.getContainer(id: nativeId)
+                } catch {
+                    try? await Task.sleep(nanoseconds: pollIntervalNs)
+                    continue
+                }
+                if Task.isCancelled { return }
+                guard await isCurrent() else { return }
+                if current == nil || current?.status != .running { return }
+                try? await Task.sleep(nanoseconds: pollIntervalNs)
+            }
         }
+        guard let handle else { return }
         defer { try? handle.close() }
 
         let bootJournal = await journal.contents(nativeId: nativeId)

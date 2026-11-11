@@ -130,9 +130,12 @@ extension ContainerAttachWSRoute {
         // The bootstrap above performed this container's boot — register a
         // fresh log-journal boot NOW (see ContainerAttachRoute's
         // attachStoppedOutputOnly for why the later no-op /start cannot be
-        // the one to do it).
+        // the one to do it, and for why the arm carries the boot identity
+        // fetched at arm time).
+        let attachBootStartedAt = (try? await client.getContainer(id: container.id))?.startedDate
         await ContainerLogFollowerRegistry.shared.arm(
-            nativeId: container.id, client: client, logger: req.logger, freshBoot: startedByThisCall)
+            nativeId: container.id, client: client, logger: req.logger, freshBoot: startedByThisCall,
+            bootStartedAt: attachBootStartedAt)
 
         let broadcaster = req.application.storage[EventBroadcasterKey.self]
         // A bootstrap attach streams the process stdio regardless of query flags.

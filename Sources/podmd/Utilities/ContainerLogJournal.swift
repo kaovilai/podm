@@ -237,6 +237,48 @@ actor ContainerLogJournal {
         activate(nativeId: nativeId, epoch: epoch, reset: false, bootIdNano: bootIdNano)
     }
 
+    /// Fills in the boot identity of a journal whose writer is ALREADY
+    /// active, without touching entries, alignment state or the writer
+    /// epoch. The registry's redundant-arm path uses this: the original arm
+    /// happened before Apple reported a start date (the attach paths arm
+    /// immediately after bootstrap), and the lifecycle request that follows
+    /// (`/start`) carries the real `startedDate`. Without persisting it, the
+    /// journal stays unidentified — a container that later reboots while
+    /// podmd is down can never prove the mismatch, and the old journal
+    /// lends its timestamps to identical startup lines.
+    ///
+    /// Only an UNIDENTIFIED journal adopts here: a recorded identity that
+    /// matches is a no-op, and one that differs is left alone (proving a
+    /// mismatch is the arm/activation paths' job, not a redundant arm's).
+    func adoptBootIdentity(nativeId: String, epoch: UInt64, bootIdNano: UInt64?) {
+        guard let bootIdNano else { return }
+        guard epoch >= writerEpochs[nativeId] ?? 0 else { return }
+        loadIfNeeded(nativeId)
+        persistLearnedIdentity(nativeId: nativeId, bootIdNano: bootIdNano)
+    }
+
+    /// Writes a newly learned boot identity into the persisted header — the
+    /// shared tail of both adoption paths (`resumeBoot` and the registry's
+    /// redundant arm). The plain append path in `persist` never rewrites the
+    /// header, so an identity that only lands in `states` dies with the
+    /// process: after the next daemon restart `loadIfNeeded` reads nil
+    /// again, adopts the journal, and cannot detect a reboot that happened
+    /// while podmd was down. The rewrite swaps the file, so the cached
+    /// writer handle must go with it — it would keep writing at its stale
+    /// offset into the old inode (same rule as `persist` on a trim).
+    private func persistLearnedIdentity(nativeId: String, bootIdNano: UInt64) {
+        guard var state = states[nativeId], state.bootIdNano == nil else { return }
+        state.bootIdNano = bootIdNano
+        states[nativeId] = state
+        let url = fileURL(nativeId)
+        guard !state.entries.isEmpty || FileManager.default.fileExists(atPath: url.path) else { return }
+        try? state.fileHandle?.close()
+        states[nativeId]?.fileHandle = nil
+        rewriteFile(
+            url, entries: state.entries, droppedLines: state.droppedLines, evictedNanos: state.evictedNanos,
+            bootIdNano: bootIdNano)
+    }
+
     private func activate(nativeId: String, epoch: UInt64, reset: Bool, droppedLines: Int = 0, bootIdNano: UInt64? = nil) {
         guard epoch > tombstoneEpochs[nativeId] ?? 0 else { return }
         guard epoch >= writerEpochs[nativeId] ?? 0 else { return }
@@ -246,7 +288,11 @@ actor ContainerLogJournal {
                 writerEpochs[nativeId] = epoch
                 // Adopting the current boot also adopts its identity when the
                 // caller knows it — a later resume can then detect a reboot.
-                if let bootIdNano { states[nativeId]?.bootIdNano = bootIdNano }
+                // The identity must reach the FILE, not just memory (see
+                // persistLearnedIdentity): an in-memory-only adoption is
+                // forgotten on the next daemon restart, which is exactly
+                // when the reboot detection needs it.
+                if let bootIdNano { persistLearnedIdentity(nativeId: nativeId, bootIdNano: bootIdNano) }
                 return
             }
         }

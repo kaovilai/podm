@@ -230,6 +230,58 @@ struct HealthCheckManagerTests {
         await mgr.stop(containerId: "c1")
     }
 
+    /// Review round 8 (CodeRabbit): a stop() while the probe loop was
+    /// suspended IN its pre-probe clock call left the stale loop one step
+    /// from firing `runCheck` against the stopped container. The loop must
+    /// re-check cancellation and generation once the clock call resumes.
+    @Test("a probe whose clock call spans a stop is not fired against the stopped container")
+    func staleProbeAfterClockSuspensionDoesNotRun() async throws {
+        let timeline = ProbeTimeline()
+        // A clock whose SECOND call (the one just before the first probe)
+        // blocks until the test releases it — the exact suspension window a
+        // stop() can slip into.
+        let gate = ClockGate()
+        let mgr = HealthCheckManager(
+            probe: { _, _, _ in
+                _ = await timeline.record()
+                return 0
+            },
+            intervalFloorNs: 1_000_000,
+            clock: { await gate.current() }
+        )
+        let cfg = HealthcheckConfig(
+            Test: ["CMD", "true"],
+            Interval: 10_000_000,
+            Timeout: 1_000_000_000,
+            Retries: 3,
+            StartPeriod: 0
+        )
+        await mgr.start(containerId: "stale-probe", config: cfg)
+
+        // Wait until the loop is suspended inside the pre-probe clock call.
+        let suspended = await {
+            for _ in 0..<600 {
+                if await gate.isHolding { return true }
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            return await gate.isHolding
+        }()
+        #expect(suspended, "the probe loop should reach (and hold at) its pre-probe clock call")
+
+        // The container stops while the clock call is suspended: the task is
+        // cancelled and the generation bumped.
+        await mgr.stop(containerId: "stale-probe")
+
+        // Release the clock: the stale loop must NOT fire its probe against
+        // the stopped container.
+        await gate.release()
+        try await Task.sleep(for: .milliseconds(200))
+        let probes = await timeline.timestamps.count
+        #expect(probes == 0, "a probe whose clock call spanned the stop must not run")
+
+        await mgr.stop(containerId: "stale-probe")
+    }
+
     // MARK: - Helpers
 
     /// Polls every 5ms up to ~3s for the manager to report `expected` status.
@@ -257,6 +309,31 @@ private actor ProbeTimeline {
     func record() -> Int {
         timestamps.append(DispatchTime.now().uptimeNanoseconds)
         return timestamps.count
+    }
+}
+
+/// A monotonic clock whose SECOND call blocks until `release()` — the seam
+/// for the stale-probe test: the probe loop suspends inside `clock()`
+/// exactly where a stop() can slip in.
+private actor ClockGate {
+    private var now: UInt64 = 1_000_000_000_000
+    private var calls = 0
+    private var held: CheckedContinuation<UInt64, Never>?
+
+    var isHolding: Bool { held != nil }
+
+    func current() async -> UInt64 {
+        calls += 1
+        if calls == 2 {
+            // The pre-probe clock call: hold until the test releases it.
+            return await withCheckedContinuation { held = $0 }
+        }
+        return now
+    }
+
+    func release() {
+        held?.resume(returning: now)
+        held = nil
     }
 }
 

@@ -18,6 +18,14 @@ import VaporTesting
 @Suite("ContainerAttachRoute — parameter validation")
 struct ContainerAttachRouteTests {
 
+    /// Routes the SHARED journal (the one these routes use) at a test-owned
+    /// directory before any route test runs — this suite drives lifecycle
+    /// routes that reset and delete journal files. See
+    /// `SharedJournalTestIsolation`.
+    init() async {
+        await SharedJournalTestIsolation.shared.install()
+    }
+
     @Test("Container not found returns 404")
     func unknownContainerReturns404() async throws {
         try await withAttachRouteApp(client: NullContainerMock()) { app in

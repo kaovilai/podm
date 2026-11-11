@@ -624,6 +624,54 @@ struct ContainerLogJournalTests {
             "a nil identity (Apple reported no startedDate) must not force a reset")
     }
 
+    /// Review round 8 (CodeRabbit): when a resume first learns a boot
+    /// identity (the persisted journal was written by an unidentified
+    /// `beginBoot` — the attach bootstrap — or is a version-3 journal), the
+    /// adoption used to update only the in-memory state. The plain append
+    /// path never rewrites the header, so the identity never reached disk
+    /// unless a cap trim happened; after the next daemon restart
+    /// `loadIfNeeded` read nil again, adopted the journal, and could not
+    /// detect a reboot that happened while podmd was down.
+    @Test("a resume that first learns a boot identity persists it to the header")
+    func resumePersistsLearnedIdentity() async {
+        let dir = tempDirectory()
+        // The attach bootstrap's journal: created without an identity (Apple
+        // had not reported a startedDate yet), with real entries on disk.
+        let writer = ContainerLogJournal()
+        await writer.configure(storageDirectory: dir)
+        await writer.beginBoot(nativeId: "adopt-ctr", epoch: 1)
+        await writer.append(nativeId: "adopt-ctr", epoch: 1, [entry(111, "startup banner\n")])
+
+        // The next daemon process resumes the same boot WITH its identity:
+        // the adoption must reach the FILE, not just memory.
+        let adopter = ContainerLogJournal()
+        await adopter.configure(storageDirectory: dir)
+        await adopter.resumeBoot(nativeId: "adopt-ctr", epoch: 2, bootIdNano: 1_730_000_000_000_000_000)
+        #expect(
+            await adopter.entries(nativeId: "adopt-ctr").map(\.bytes) == [Data("startup banner\n".utf8)],
+            "adopting the identity must preserve the boot's entries")
+
+        // A fresh instance (the restart after that) reads the identity back
+        // out of the persisted header.
+        let reader = ContainerLogJournal()
+        await reader.configure(storageDirectory: dir)
+        let raw = try? Data(contentsOf: dir.appendingPathComponent("podm-log-journals/adopt-ctr.journal"))
+        #expect(raw != nil)
+        if let raw {
+            let (_, _, _, bootIdNano, salvaged) = ContainerLogJournal.parse(raw)
+            #expect(!salvaged)
+            #expect(bootIdNano == 1_730_000_000_000_000_000)
+        }
+
+        // And the reboot detection the identity exists for now fires across
+        // restarts: a later resume with a DIFFERENT identity resets, not
+        // adopts — impossible while the journal stays unidentified.
+        await reader.resumeBoot(nativeId: "adopt-ctr", epoch: 3, bootIdNano: 2_000_000_000_000_000_000)
+        #expect(
+            await reader.entries(nativeId: "adopt-ctr").isEmpty,
+            "the persisted identity must prove the reboot and reset the stale journal")
+    }
+
     @Test("bootIdNano(from:) converts startedDate, and leaves unknown or pre-epoch dates nil")
     func bootIdConversion() {
         #expect(ContainerLogJournal.bootIdNano(from: nil) == nil)
