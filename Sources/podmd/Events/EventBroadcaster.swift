@@ -97,24 +97,42 @@ extension DockerEvent {
 actor EventBroadcaster {
     private var continuations: [UUID: AsyncStream<DockerEvent>.Continuation] = [:]
 
-    func stream() -> AsyncStream<DockerEvent> {
-        let id = UUID()
+    /// In-memory event history backing `GET /events` since/until replay.
+    /// Capped like moby's ring (`daemon/events/events.go`, which keeps 256;
+    /// podm keeps the last 1024) — events from before daemon start are not
+    /// replayable, same as dockerd.
+    private var history: [DockerEvent] = []
+    static let historyLimit = 1024
 
-        // Register the continuation synchronously, before returning the stream. The
-        // previous implementation deferred registration to `Task { addContinuation }`,
-        // leaving a window where the stream existed but was not yet in `continuations`
-        // — any event broadcast in that window was silently dropped for this listener
-        // (e.g. a container's start event firing right after `docker events` connects).
-        // `makeStream` lets us register inside the actor-isolated method with no race.
-        let (stream, continuation) = AsyncStream.makeStream(of: DockerEvent.self)
-        continuations[id] = continuation
-        continuation.onTermination = { @Sendable _ in
-            Task { await self.removeContinuation(id: id) }
-        }
-        return stream
+    func stream() -> AsyncStream<DockerEvent> {
+        subscribe(since: nil, until: nil, matching: nil).stream
+    }
+
+    /// Registers a listener and, in the same actor hop, computes the replay
+    /// window from history — the AsyncStream twin of moby's `SubscribeTopic`,
+    /// which loads buffered events and subscribes under one mutex so no
+    /// event can slip between the snapshot and the registration (the same
+    /// no-gap guarantee the `makeStream` comment below describes).
+    ///
+    /// - Parameters:
+    ///   - since: replay only events with `timeNano >= since` (nil: no lower
+    ///     bound; moby's zero-since keeps the whole buffer).
+    ///   - until: replay only events with `timeNano <= until` (nil: no upper
+    ///     bound).
+    ///   - matching: optional include-predicate applied to replayed events
+    ///     only; live filtering is the caller's job.
+    /// - Returns: the finite replay slice (oldest first) plus the live stream.
+    func subscribe(
+        since: UInt64?,
+        until: UInt64?,
+        matching: (@Sendable (DockerEvent) -> Bool)? = nil
+    ) -> (replay: [DockerEvent], stream: AsyncStream<DockerEvent>) {
+        let replay = loadHistory(since: since, until: until, matching: matching)
+        return (replay, makeRegisteredStream())
     }
 
     func broadcast(_ event: DockerEvent) {
+        appendToHistory(event)
         for continuation in continuations.values {
             continuation.yield(event)
         }
@@ -122,5 +140,62 @@ actor EventBroadcaster {
 
     private func removeContinuation(id: UUID) {
         continuations.removeValue(forKey: id)
+    }
+
+    /// The current history slice a since/until request would replay, without
+    /// registering a listener.
+    func snapshot(since: UInt64?, until: UInt64?, matching: (@Sendable (DockerEvent) -> Bool)? = nil) -> [DockerEvent] {
+        loadHistory(since: since, until: until, matching: matching)
+    }
+
+    // MARK: - History
+
+    private func appendToHistory(_ event: DockerEvent) {
+        history.append(event)
+        if history.count > Self.historyLimit {
+            history.removeFirst(history.count - Self.historyLimit)
+        }
+    }
+
+    /// moby's `loadBufferedEvents`: with neither bound set nothing is
+    /// replayed (the no-parameter request stays a pure live stream); with
+    /// any bound set, history is scanned newest→oldest. Out-of-window events
+    /// are SKIPPED, never used to stop the scan: history order is the order
+    /// of `broadcast` calls, not `timeNano` — producers timestamp before
+    /// broadcasting and some defer the broadcast in a `Task`, so a delayed
+    /// older event can sit at the end of history; terminating at it would
+    /// hide newer in-window entries behind it. The cap (1024) makes a full
+    /// scan free.
+    private func loadHistory(
+        since: UInt64?,
+        until: UInt64?,
+        matching: (@Sendable (DockerEvent) -> Bool)?
+    ) -> [DockerEvent] {
+        guard since != nil || until != nil else { return [] }
+        var replay: [DockerEvent] = []
+        for event in history.reversed() {
+            if let since, event.timeNano < since { continue }
+            if let until, event.timeNano > until { continue }
+            if matching?(event) ?? true { replay.append(event) }
+        }
+        return replay.reversed()
+    }
+
+    // MARK: - Listener registration
+
+    /// Registers the continuation synchronously, before returning the stream. The
+    /// previous implementation deferred registration to `Task { addContinuation }`,
+    /// leaving a window where the stream existed but was not yet in `continuations`
+    /// — any event broadcast in that window was silently dropped for this listener
+    /// (e.g. a container's start event firing right after `docker events` connects).
+    /// `makeStream` lets us register inside the actor-isolated method with no race.
+    private func makeRegisteredStream() -> AsyncStream<DockerEvent> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream.makeStream(of: DockerEvent.self)
+        continuations[id] = continuation
+        continuation.onTermination = { @Sendable _ in
+            Task { await self.removeContinuation(id: id) }
+        }
+        return stream
     }
 }
