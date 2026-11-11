@@ -49,7 +49,46 @@ struct InstallCommand: ParsableCommand {
             try ClientPaths.mergeAndWrite(recorded)
         }
 
-        // 3. Optional launchd on-demand daemon.
+        // 3. Zsh completion (issue #46): the user's completions dir when it
+        //    exists, else podm's own with fpath instructions. A failure here
+        //    is a warning, not a failed install — the shims work without it.
+        do {
+            let outcome = try CompletionInstaller.installZsh(
+                userCompletionsDir: PodmPaths.zshCompletionsDir,
+                fallbackDir: PodmPaths.completionsFallbackDir)
+            switch outcome.destination {
+            case .userCompletions(let dir):
+                print(
+                    "\(outcome.updated ? "Installed" : "Up to date") zsh completion: \(dir.path)/_podm"
+                        + " (mirrored podman subcommands delegate to your _podman)")
+            case .podmFallback(let dir):
+                print("Installed zsh completion: \(dir.path)/_podm")
+                print(
+                    """
+                    Add it to zsh's fpath (e.g. in ~/.zshrc, BEFORE compinit):
+                        fpath="\(dir.path):$fpath"
+                    """)
+            }
+        } catch {
+            print("warning: could not install zsh completion: \(error)")
+        }
+
+        // 4. Podman connection (issue #47): register podm as a selectable
+        //    podman remote. Primacy stays the user's decision — this never
+        //    changes the default connection.
+        if let podmanPath = recorded["podman"] ?? ClientPaths.read()["podman"] {
+            if PodmanConnectionRegistrar.register(
+                podmanPath: podmanPath, uri: PodmPaths.containerHostURL)
+            {
+                print("Registered podman connection 'podm' -> \(PodmPaths.containerHostURL)")
+            } else {
+                print("warning: real podman CLI exited non-zero registering the 'podm' connection")
+            }
+        } else {
+            print("No real podman CLI found — skipped podman connection registration")
+        }
+
+        // 5. Optional launchd on-demand daemon.
         if let templatePath = launchdTemplate {
             let templateURL = URL(fileURLWithPath: templatePath)
             guard let template = try? String(contentsOf: templateURL, encoding: .utf8) else {
@@ -65,11 +104,13 @@ struct InstallCommand: ParsableCommand {
             )
         }
 
-        // 4. Post-install instructions (the sudo command is printed only, never run).
+        // 6. Post-install instructions (the sudo command is printed only, never run).
         print(
             """
             Add the shims to your PATH (e.g. in ~/.zshrc):
                 export PATH="$HOME/.podm/bin:$PATH"
+            Optional: make podm the default podman remote:
+                podman system connection default podm
             Optional: switch the docker CLI to the podm context (the daemon registers it on startup):
                 docker context use podm
             Optional: expose the daemon on the default Docker socket:

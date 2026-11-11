@@ -32,7 +32,24 @@ struct UninstallCommand: ParsableCommand {
             }
         }
 
-        // 3. Report what deliberately stays behind.
+        // 3. Zsh completion, from either install location.
+        let removedCompletions = CompletionInstaller.uninstallZsh(
+            userCompletionsDir: PodmPaths.zshCompletionsDir,
+            fallbackDir: PodmPaths.completionsFallbackDir)
+        for path in removedCompletions {
+            print("Removed zsh completion: \(path.path)")
+        }
+
+        // 4. Podman connection (issue #47). Uses the recorded real CLI;
+        //    without it there is nothing registered to remove.
+        if let podmanPath = ClientPaths.read()["podman"] {
+            if PodmanConnectionRegistrar.isRegistered(podmanPath: podmanPath) {
+                _ = PodmanConnectionRegistrar.unregister(podmanPath: podmanPath)
+                print("Removed podman connection '\(PodmanConnectionRegistrar.connectionName)'")
+            }
+        }
+
+        // 5. Report what deliberately stays behind.
         print(
             """
             Kept (untouched):
