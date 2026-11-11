@@ -392,8 +392,11 @@ struct ContainerLogJournalTests {
         }
         #expect(withMarker.timestamp(for: Data("c\n".utf8)) == 300)
 
-        // Nothing at the head (follower behind): fresh, alignment usable.
-        var uncovered = ContainerLogJournal.Alignment(entries: retained)
+        // Exhaustion — no entry at all, the follower is behind the stream:
+        // fresh, alignment usable. (A retained ORDINARY entry at the head is
+        // NOT this case: it is a mismatch that must fail alignment — see
+        // consumeGapMarkerMismatchInvalidates.)
+        var uncovered = ContainerLogJournal.Alignment(entries: [])
         guard case .fresh = uncovered.consumeGapMarker() else {
             Issue.record("an uncovered oversized line must be reported fresh")
             return
@@ -414,20 +417,121 @@ struct ContainerLogJournalTests {
         // Evicted ordinals consumed via consumeGapMarker (oversized lines)
         // report the retained stamp too.
         var marker = ContainerLogJournal.Alignment(entries: retained, droppedLines: 1, evictedNanos: [100])
-        guard case .evicted(100) = marker.consumeGapMarker() else {
+        guard case .evicted(unixNano: 100, isUpperBound: false) = marker.consumeGapMarker() else {
             Issue.record("an evicted ordinal must report its retained stamp, not nil")
             return
         }
         #expect(marker.timestamp(for: Data("c\n".utf8)) == 300)
 
         // Evictions OLDER than the retained stamp window fall back to the
-        // oldest retained stamp — an upper bound on their write time, so a
+        // oldest retained stamp — an UPPER BOUND on their write time, so a
         // past `--until` keeps them and a recent `--since` may keep them,
-        // never read-time.
+        // never read-time. The bound flag tells the window consumers apart
+        // from an exact stamp.
         var old = ContainerLogJournal.Alignment(entries: retained, droppedLines: 5, evictedNanos: [400])
-        guard case .evicted(400) = old.classify(Data("ancient\n".utf8)) else {
+        guard case .evicted(unixNano: 400, isUpperBound: true) = old.classify(Data("ancient\n".utf8)) else {
             Issue.record("an eviction past the stamp window must report the bound")
             return
         }
+        #expect(
+            old.recordedTime(for: Data("also-ancient\n".utf8))
+                == ContainerLogJournal.Alignment.RecordedTime(
+                    unixNano: 400, isUpperBound: true))
+    }
+
+    // MARK: - Review round 6
+
+    @Test("a damaged dropped-count beyond the Int range salvages instead of trapping")
+    func parseRejectsDroppedCountBeyondInt() {
+        // A u64 count with the high bit set: decoding it straight into Int
+        // turned the value negative (or trapped on the shift), and the
+        // salvage rewrite then trapped in UInt64(droppedLines) — crashing
+        // the daemon on a damaged file instead of recovering the journal.
+        var file = Data("PDLJ".utf8)
+        withUnsafeBytes(of: UInt32(2).littleEndian) { file.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt64(0x8000_0000_0000_0000).littleEndian) { file.append(contentsOf: $0) }
+        let (parsed, droppedLines, _, salvaged) = ContainerLogJournal.parse(file)
+        #expect(salvaged, "an unrepresentable dropped count is corruption — salvage it")
+        #expect(parsed.isEmpty)
+        #expect(droppedLines == 0)
+    }
+
+    @Test("loading a journal with a damaged dropped-count recovers instead of crashing")
+    func loadRejectsDroppedCountBeyondInt() async {
+        let dir = tempDirectory()
+        var file = Data("PDLJ".utf8)
+        withUnsafeBytes(of: UInt32(2).littleEndian) { file.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt64(0x8000_0000_0000_0000).littleEndian) { file.append(contentsOf: $0) }
+        // A partial trailing record forces the salvage rewrite on load —
+        // the path whose header re-encode used to trap on the negative count.
+        file.append(Data([0x01, 0x02, 0x03]))
+        try? FileManager.default.createDirectory(
+            at: dir.appendingPathComponent("podm-log-journals", isDirectory: true),
+            withIntermediateDirectories: true)
+        FileManager.default.createFile(
+            atPath: dir.appendingPathComponent("podm-log-journals/damaged.journal").path, contents: file)
+
+        let journal = ContainerLogJournal()
+        await journal.configure(storageDirectory: dir)
+        let contents = await journal.contents(nativeId: "damaged")
+        #expect(contents.entries.isEmpty)
+        #expect(contents.droppedLines == 0)
+
+        // The salvaged file on disk now parses cleanly with a count of 0.
+        let reloaded = try? Data(contentsOf: dir.appendingPathComponent("podm-log-journals/damaged.journal"))
+        #expect(reloaded != nil)
+        if let reloaded {
+            let (entries, dropped, _, salvaged) = ContainerLogJournal.parse(reloaded)
+            #expect(!salvaged)
+            #expect(entries.isEmpty)
+            #expect(dropped == 0)
+        }
+    }
+
+    @Test("consumeGapMarker fails alignment on a retained non-marker entry; only exhaustion stays usable")
+    func consumeGapMarkerMismatchInvalidates() {
+        let retained = [entry(300, "c\n")]
+        // A retained ORDINARY entry where the oversized line's marker should
+        // be is a content mismatch: the journal provably does not describe
+        // this stream. Returning .fresh without failing left matching on, so
+        // a stale journal's retained line behind the oversized line kept
+        // lending its old timestamp to the new boot's identical lines.
+        var mismatched = ContainerLogJournal.Alignment(entries: retained)
+        guard case .fresh = mismatched.consumeGapMarker() else {
+            Issue.record("a retained non-marker entry must report fresh")
+            return
+        }
+        #expect(mismatched.failed, "a retained non-marker at the marker position must invalidate alignment")
+        #expect(mismatched.timestamp(for: Data("c\n".utf8)) == nil, "alignment must not recover after the mismatch")
+
+        // Exhaustion — no entry at all, the follower is simply behind the
+        // stream — stays usable.
+        var exhausted = ContainerLogJournal.Alignment(entries: [])
+        guard case .fresh = exhausted.consumeGapMarker() else {
+            Issue.record("exhaustion must report fresh")
+            return
+        }
+        #expect(!exhausted.failed)
+    }
+
+    @Test("append in many small batches over a growing journal loses no state")
+    func appendManySmallBatchesKeepsState() async {
+        // append takes the state OUT of the dictionary while mutating it (a
+        // value-type copy would trigger copy-on-write of the whole retained
+        // entries array on every batch) and restores it afterwards: this
+        // pins the remove/restore cycle across many polling-sized flushes.
+        let journal = ContainerLogJournal()
+        await journal.configure(storageDirectory: tempDirectory())
+        await journal.beginBoot(nativeId: "ctr", epoch: 1)
+        var expected: [UInt64] = []
+        for batch in 0..<200 {
+            let entries = (0..<8).map { entry(UInt64(batch * 8 + $0), "line-\(batch)-\($0)\n") }
+            expected.append(contentsOf: entries.map(\.unixNano))
+            await journal.append(nativeId: "ctr", epoch: 1, entries)
+        }
+        let contents = await journal.contents(nativeId: "ctr")
+        #expect(contents.entries.count == 1600)
+        #expect(contents.entries.map(\.unixNano) == expected)
+        #expect(contents.droppedLines == 0)
     }
 }

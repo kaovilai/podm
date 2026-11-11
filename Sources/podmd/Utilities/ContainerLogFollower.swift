@@ -1,4 +1,5 @@
 import ContainerAPIClient
+import ContainerResource
 import Foundation
 import Logging
 
@@ -99,6 +100,14 @@ enum ContainerLogFollower {
     /// journal before the stream hits EOF instead of accumulating in memory.
     static let journalBatchLines = 256
 
+    /// Framed-byte bound for one in-flight journal batch. The line-count
+    /// bound alone allowed ~256 MiB of payload (256 lines at the 1 MiB
+    /// pending-line bound) to accumulate per follower before the journal's
+    /// 4 MiB cap ever ran — several containers emitting large lines could
+    /// exhaust daemon memory. Bounding the batch's payload by bytes as well
+    /// keeps each follower's in-flight batch near one max-size line.
+    static let journalBatchBytes = 1 << 20
+
     /// A single line without a newline may hold at most this many bytes in
     /// the pending buffer; beyond that the line is discarded (unjournaled —
     /// its timestamps fall back to read time) so a newline-free stream
@@ -111,6 +120,17 @@ enum ContainerLogFollower {
     /// bounded batches WHILE the stream is read, not in one unbounded
     /// accumulation at EOF.
     nonisolated(unsafe) static var onBatchFlush: (@Sendable (String) -> Void)?
+
+    /// Picks the container's log stream out of the handles Apple Container's
+    /// `logs(id:)` returns — 1.2.2 yields TWO (`[containerLog, bootlog]`),
+    /// both with `closeOnDealloc: false` — and closes the rest. Taking
+    /// `.first` and dropping the array leaks a descriptor per follower arm,
+    /// and repeated container restarts exhaust the daemon's fd limit.
+    static func selectLogHandle(_ handles: [FileHandle]) -> FileHandle? {
+        guard let log = handles.first else { return nil }
+        for unused in handles.dropFirst() { try? unused.close() }
+        return log
+    }
 
     /// Tears a container's log-following state down along with it — called
     /// from the delete, prune and --rm auto-remove cleanup paths. `registry`
@@ -169,7 +189,10 @@ enum ContainerLogFollower {
             if let openLogStream {
                 handle = try await openLogStream(nativeId)
             } else {
-                guard let appleHandle = try await ContainerClient().logs(id: nativeId).first else { return }
+                guard
+                    let appleHandle = ContainerLogFollower.selectLogHandle(
+                        try await ContainerClient().logs(id: nativeId))
+                else { return }
                 handle = appleHandle
             }
         } catch {
@@ -218,12 +241,31 @@ enum ContainerLogFollower {
         func readAvailable(finalizeUnterminatedLine: Bool = false) async -> Bool {
             var gotData = false
             var fresh: [ContainerLogJournal.Entry] = []
+            var freshBytes = 0
 
             func flushBatch() async {
                 guard !fresh.isEmpty else { return }
-                await journal.append(nativeId: nativeId, epoch: epoch, fresh)
+                let batch = fresh
                 fresh.removeAll(keepingCapacity: true)
+                freshBytes = 0
+                await journal.append(nativeId: nativeId, epoch: epoch, batch)
                 ContainerLogFollower.onBatchFlush?(nativeId)
+            }
+
+            /// Enqueues one journal entry, flushing the batch when EITHER
+            /// bound is exceeded. Ordinary lines and gap markers share this
+            /// path: the line-count bound alone let ~256 MiB of large-line
+            /// payload accumulate before a flush, and gap markers appended
+            /// outside a flush check accumulated unboundedly until a read
+            /// gap.
+            func enqueue(_ entry: ContainerLogJournal.Entry) async {
+                fresh.append(entry)
+                freshBytes += entry.framedByteCount
+                if fresh.count >= ContainerLogFollower.journalBatchLines
+                    || freshBytes >= ContainerLogFollower.journalBatchBytes
+                {
+                    await flushBatch()
+                }
             }
 
             /// Records that one oversized stream line was consumed without
@@ -234,9 +276,10 @@ enum ContainerLogFollower {
             /// is equally accounted: the line's marker was evicted by the
             /// cap, and the evicted-prefix count already covers the line —
             /// appending a marker here would double-count its ordinal.
-            func markOversizedLine() {
+            func markOversizedLine() async {
                 if case .fresh = alignment.consumeGapMarker() {
-                    fresh.append(ContainerLogJournal.Entry.gapMarker(unixNano: ContainerLogJournal.currentUnixNano()))
+                    await enqueue(
+                        ContainerLogJournal.Entry.gapMarker(unixNano: ContainerLogJournal.currentUnixNano()))
                 }
                 // .covered and .evicted are both already accounted — by the
                 // persisted marker, or by the evicted prefix the cap took
@@ -259,6 +302,7 @@ enum ContainerLogFollower {
                 // would count its line twice — replay would skip the line as
                 // evicted AND mismatch the next retained line against the
                 // marker, losing its recorded timestamp.
+                freshBytes -= fresh.filter(\.isGapMarker).reduce(0) { $0 + $1.framedByteCount }
                 fresh.removeAll { $0.isGapMarker }
                 await journal.beginBoot(nativeId: nativeId, epoch: epoch, droppedLines: linesConsumedUnretained)
                 alignment = ContainerLogJournal.Alignment(entries: [])
@@ -283,7 +327,7 @@ enum ContainerLogFollower {
                         // Tail of an oversized line: not journalable, but its
                         // ordinal still consumes a gap marker (or records one).
                         discardingPartialLine = false
-                        markOversizedLine()
+                        await markOversizedLine()
                         continue
                     }
                     if line.count > ContainerLogFollower.maxPendingLineBytes {
@@ -292,7 +336,7 @@ enum ContainerLogFollower {
                         // treatment as the mid-line discard — marker, no
                         // payload — so the journal never retains a line the
                         // windowed readers would have to spill.
-                        markOversizedLine()
+                        await markOversizedLine()
                         continue
                     }
                     switch alignment.classify(line) {
@@ -309,15 +353,12 @@ enum ContainerLogFollower {
                             // the read land in the replacement journal.
                             await healStaleJournal()
                         }
-                        fresh.append(
+                        await enqueue(
                             ContainerLogJournal.Entry(
                                 unixNano: ContainerLogJournal.currentUnixNano(),
                                 streamType: DockerStreamFrame.StreamType.stdout.rawValue,
                                 bytes: line
                             ))
-                        if fresh.count >= ContainerLogFollower.journalBatchLines {
-                            await flushBatch()
-                        }
                     }
                 }
                 if pending.count > ContainerLogFollower.maxPendingLineBytes {
@@ -332,7 +373,7 @@ enum ContainerLogFollower {
                     // unjournalable — record the marker for the line's
                     // ordinal, so a resumed follower re-reading the same exit
                     // consumes it instead of double-accounting.
-                    markOversizedLine()
+                    await markOversizedLine()
                 } else if !pending.isEmpty {
                     switch alignment.classify(pending) {
                     case .covered, .evicted:
@@ -341,7 +382,7 @@ enum ContainerLogFollower {
                         if alignment.failed {
                             await healStaleJournal()
                         }
-                        fresh.append(
+                        await enqueue(
                             ContainerLogJournal.Entry(
                                 unixNano: ContainerLogJournal.currentUnixNano(),
                                 streamType: DockerStreamFrame.StreamType.stdout.rawValue,
@@ -357,7 +398,19 @@ enum ContainerLogFollower {
             guard await isCurrent() else { return }
             let gotData = await readAvailable()
             if gotData { continue }
-            let current = try? await client.getContainer(id: nativeId)
+            let current: ContainerSnapshot?
+            do {
+                current = try await client.getContainer(id: nativeId)
+            } catch {
+                // A FAILED lookup is not a confirmed exit: the Apple API
+                // service can stay unavailable through a reconnect retry
+                // while the VM keeps running. Ending the follower here
+                // would permanently stop journaling — later output would
+                // lose its timestamps until another start or a daemon
+                // restart. Retry after the polling delay instead.
+                try? await Task.sleep(nanoseconds: pollIntervalNs)
+                continue
+            }
             guard await isCurrent() else { return }
             if current == nil || current?.status != .running {
                 // Give the exit path the same flush grace the process exit

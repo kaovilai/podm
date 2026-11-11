@@ -60,9 +60,14 @@ extension ContainerLogsRoute {
             }
 
             // always use the container's log, not the boot of the container
-            let boot = false
             let fhs = try await ContainerClient().logs(id: container.id)
-            let fileHandle = boot ? fhs[1] : fhs[0]
+            // logs(id:) yields TWO handles in 1.2.2 (containerLog, bootlog),
+            // both closeOnDealloc:false — selectLogHandle keeps the container
+            // log and closes the bootlog instead of leaking it (same class
+            // as the follower's arm path).
+            guard let fileHandle = ContainerLogFollower.selectLogHandle(fhs) else {
+                throw Abort(.internalServerError, reason: "container log stream unavailable")
+            }
             // Create a streaming body
             // `follow=1` means tail like
             let follow = MobyBool.queryValue(req.query["follow"] as String?)
@@ -690,15 +695,29 @@ extension ContainerLogsRoute {
         var inOversizedLine = false
         // The write time resolved for the logical line currently spilling:
         // fixed at its first fragment and reused by every later fragment,
-        // so the whole line shares one window decision.
+        // so the whole line shares one window decision. `oversizedLineBound`
+        // records whether that fixed time is only an upper bound (an evicted
+        // stamp past the retained window) — the decision must treat it like
+        // `accept` does.
         var oversizedLineNano: UInt64?
+        var oversizedLineBound = false
 
         /// Applies the since/until window to one accepted line (or fragment
         /// of an oversized line) and emits it, or holds it in the tail ring.
-        func accept(_ line: Data, unixNano: UInt64, position: WindowTailRing.Position = .inline) async throws {
+        /// `isUpperBound` marks a journal time that is only an UPPER BOUND on
+        /// the write time (an eviction older than the retained stamp window):
+        /// a bound at or after `since` cannot prove the line predates it, and
+        /// a bound past `until` cannot prove the line was written after it —
+        /// only an exact time may exclude the line on the `until` side (and
+        /// a provable `nano < since` excludes on the `since` side, bound or
+        /// not).
+        func accept(
+            _ line: Data, unixNano: UInt64, isUpperBound: Bool = false,
+            position: WindowTailRing.Position = .inline
+        ) async throws {
             // moby: lines written before `since` or after `until` are dropped.
             if let since, unixNano < since { return }
-            if let until, unixNano > until { return }
+            if let until, !isUpperBound, unixNano > until { return }
             if ring != nil {
                 try ring?.append(line, unixNano: unixNano, position: position)
             } else {
@@ -727,8 +746,10 @@ extension ContainerLogsRoute {
                     // decision fixed there holds for this fragment too.
                     inOversizedLine = false
                     let unixNano = oversizedLineNano ?? nowNanos()
+                    let isBound = oversizedLineBound
                     oversizedLineNano = nil
-                    try await accept(line, unixNano: unixNano, position: .spillContinuation)
+                    oversizedLineBound = false
+                    try await accept(line, unixNano: unixNano, isUpperBound: isBound, position: .spillContinuation)
                     continue
                 }
                 if line.count > ContainerLogFollower.maxPendingLineBytes {
@@ -737,12 +758,16 @@ extension ContainerLogsRoute {
                     // gap marker (or an evicted ordinal), not this payload:
                     // consume it — keeping later lines alignable — and window
                     // the line with its recorded (or the read) time.
-                    let unixNano = alignment.consumeGapMarker().recordedNano ?? nowNanos()
-                    try await accept(line, unixNano: unixNano, position: .completeSpill)
+                    let recorded = alignment.consumeGapMarker().recordedTime
+                    try await accept(
+                        line, unixNano: recorded?.unixNano ?? nowNanos(),
+                        isUpperBound: recorded?.isUpperBound ?? false, position: .completeSpill)
                     continue
                 }
-                let unixNano = alignment.timestamp(for: line) ?? nowNanos()
-                try await accept(line, unixNano: unixNano)
+                let recorded = alignment.recordedTime(for: line)
+                try await accept(
+                    line, unixNano: recorded?.unixNano ?? nowNanos(),
+                    isUpperBound: recorded?.isUpperBound ?? false)
             }
             if pending.count > ContainerLogFollower.maxPendingLineBytes {
                 // Spill the head of an unterminated line at the bound: emit
@@ -750,11 +775,16 @@ extension ContainerLogsRoute {
                 // The line's FIRST fragment fixes the write time and window
                 // decision for the whole logical line.
                 if inOversizedLine {
-                    try await accept(pending, unixNano: oversizedLineNano ?? nowNanos(), position: .spillContinuation)
+                    try await accept(
+                        pending, unixNano: oversizedLineNano ?? nowNanos(),
+                        isUpperBound: oversizedLineBound, position: .spillContinuation)
                 } else {
-                    let unixNano = alignment.consumeGapMarker().recordedNano ?? nowNanos()
+                    let recorded = alignment.consumeGapMarker().recordedTime
+                    let unixNano = recorded?.unixNano ?? nowNanos()
                     oversizedLineNano = unixNano
-                    try await accept(pending, unixNano: unixNano, position: .spillHead)
+                    oversizedLineBound = recorded?.isUpperBound ?? false
+                    try await accept(
+                        pending, unixNano: unixNano, isUpperBound: oversizedLineBound, position: .spillHead)
                     inOversizedLine = true
                 }
                 pending.removeAll(keepingCapacity: true)
@@ -779,15 +809,19 @@ extension ContainerLogsRoute {
             // A spilled line's final fragment keeps the line's fixed write
             // time and window decision, like every other fragment.
             if inOversizedLine {
-                try await accept(pending, unixNano: oversizedLineNano ?? nowNanos(), position: .spillContinuation)
+                try await accept(
+                    pending, unixNano: oversizedLineNano ?? nowNanos(),
+                    isUpperBound: oversizedLineBound, position: .spillContinuation)
             } else {
                 // The follower's confirmed-exit drain journals the final
                 // unterminated line (without its missing newline): recover
                 // that recorded time — stamping it with the read time made
                 // an `--until` after the exit but before this request
                 // return nothing for the container's only output.
-                let unixNano = alignment.timestamp(for: pending) ?? nowNanos()
-                try await accept(pending, unixNano: unixNano)
+                let recorded = alignment.recordedTime(for: pending)
+                try await accept(
+                    pending, unixNano: recorded?.unixNano ?? nowNanos(),
+                    isUpperBound: recorded?.isUpperBound ?? false)
             }
             pending.removeAll()
         }
@@ -798,9 +832,12 @@ extension ContainerLogsRoute {
         // continues into the follow loop with its fixed time and decision.
         if inOversizedLine, !streamEnded {
             let nano = oversizedLineNano ?? nowNanos()
-            let dropped = (since.map { nano < $0 } ?? false) || (until.map { nano > $0 } ?? false)
+            // Same bound semantics as accept: an upper-bound time cannot
+            // prove the line past `until`.
+            let pastSince = since.map { nano < $0 } ?? false
+            let pastUntil = !oversizedLineBound && (until.map { nano > $0 } ?? false)
             return BacklogHandoff(
-                pending: pending, openLine: WindowedOpenLine(unixNano: nano, inWindow: !dropped))
+                pending: pending, openLine: WindowedOpenLine(unixNano: nano, inWindow: !(pastSince || pastUntil)))
         }
         return BacklogHandoff(pending: pending, openLine: nil)
     }

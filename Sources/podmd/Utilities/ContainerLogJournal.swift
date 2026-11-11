@@ -233,7 +233,14 @@ actor ContainerLogJournal {
         guard writerEpochs[nativeId] == epoch else { return }
         guard !newEntries.isEmpty else { return }
         loadIfNeeded(nativeId)
-        var state = states[nativeId] ?? State()
+        // Take the state OUT of the dictionary while mutating it: copying the
+        // value out leaves `states` holding the original entries array, so
+        // the append below would trigger copy-on-write of the ENTIRE retained
+        // journal on every batch — including each small polling flush —
+        // making the work grow with the historical entry count instead of
+        // the new batch. This method has no suspension points, so the gap in
+        // the dictionary is invisible to other calls.
+        var state = states.removeValue(forKey: nativeId) ?? State()
         state.entries.append(contentsOf: newEntries)
         state.totalFramedBytes += newEntries.reduce(0) { $0 + $1.framedByteCount }
         var trimmed = false
@@ -361,7 +368,12 @@ actor ContainerLogJournal {
     private static func headerData(droppedLines: Int = 0, evictedNanos: [UInt64] = []) -> Data {
         var data = magic
         withUnsafeBytes(of: version.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: UInt64(droppedLines).littleEndian) { data.append(contentsOf: $0) }
+        // Clamping, not trapping: a negative count can only come from a
+        // caller bug, and a trap here would take the daemon down while
+        // writing a header.
+        withUnsafeBytes(of: UInt64(clamping: max(0, droppedLines)).littleEndian) {
+            data.append(contentsOf: $0)
+        }
         withUnsafeBytes(of: UInt32(evictedNanos.count).littleEndian) { data.append(contentsOf: $0) }
         for nano in evictedNanos {
             withUnsafeBytes(of: nano.littleEndian) { data.append(contentsOf: $0) }
@@ -397,9 +409,15 @@ actor ContainerLogJournal {
             // Version 2+ carries the evicted-prefix line count; a short header
             // is a truncated file, salvaged to nothing.
             guard bytes.count >= 16 else { return ([], 0, [], true) }
-            droppedLines =
-                Int(bytes[8]) | Int(bytes[9]) << 8 | Int(bytes[10]) << 16 | Int(bytes[11]) << 24
-                | Int(bytes[12]) << 32 | Int(bytes[13]) << 40 | Int(bytes[14]) << 48 | Int(bytes[15]) << 56
+            // Decode as UInt64 and reject counts that cannot be a nonnegative
+            // Int: decoding straight into Int turns a damaged high bit into
+            // a NEGATIVE count (or traps on the shift), and a subsequent
+            // salvage rewrite would trap in UInt64(droppedLines) below —
+            // crashing the daemon instead of recovering the journal.
+            var dropped: UInt64 = 0
+            for i in 0..<8 { dropped |= UInt64(bytes[8 + i]) << (8 * UInt64(i)) }
+            guard let count = Int(exactly: dropped) else { return ([], 0, [], true) }
+            droppedLines = count
             offset = 16
         } else {
             guard version == 1 else { return ([], 0, [], true) }
@@ -496,9 +514,12 @@ extension ContainerLogJournal {
             /// The line falls in the evicted prefix: it was already
             /// accounted for (a follower must not re-journal it), and its
             /// write time is the retained evicted stamp when the journal
-            /// still holds one — nil only for evictions older than the
-            /// retained stamp window, where no time is recoverable.
-            case evicted(unixNano: UInt64?)
+            /// still holds one — nil only when no stamps are recoverable.
+            /// `isUpperBound` is true for evictions OLDER than the retained
+            /// stamp window: the reported stamp is the oldest retained one,
+            /// so the line was written at or before it — window consumers
+            /// must not treat it as the line's exact write time.
+            case evicted(unixNano: UInt64?, isUpperBound: Bool)
             /// Not covered by the journal (follower behind, or alignment
             /// failed) — a follower records it, a reader falls back to read
             /// time.
@@ -508,18 +529,39 @@ extension ContainerLogJournal {
             var recordedNano: UInt64? {
                 switch self {
                 case .covered(let unixNano): return unixNano
-                case .evicted(let unixNano): return unixNano
+                case .evicted(let unixNano, _): return unixNano
+                case .fresh: return nil
+                }
+            }
+
+            /// The journal-recorded time including whether it is exact: nil
+            /// when the line is not covered by one.
+            var recordedTime: RecordedTime? {
+                switch self {
+                case .covered(let unixNano): return RecordedTime(unixNano: unixNano, isUpperBound: false)
+                case .evicted(let unixNano, let isUpperBound):
+                    return unixNano.map { RecordedTime(unixNano: $0, isUpperBound: isUpperBound) }
                 case .fresh: return nil
                 }
             }
         }
 
+        /// A journal-recovered write time for one line: exact when the
+        /// journal retained the line (or its evicted stamp / gap marker), or
+        /// only an UPPER BOUND when the line predates the retained stamp
+        /// window — the line was written at or before `unixNano`, and a
+        /// window consumer cannot prove more than that.
+        struct RecordedTime: Equatable {
+            let unixNano: UInt64
+            let isUpperBound: Bool
+        }
+
         mutating func classify(_ line: Data) -> Coverage {
             guard usable else { return .fresh }
             if skipped < droppedLines {
-                let nano = evictedNano(at: skipped)
+                let time = evictedTime(at: skipped)
                 skipped += 1
-                return .evicted(unixNano: nano)
+                return .evicted(unixNano: time?.unixNano, isUpperBound: time?.isUpperBound ?? false)
             }
             guard index < entries.count else { return .fresh }
             let entry = entries[index]
@@ -531,16 +573,19 @@ extension ContainerLogJournal {
             return .covered(entry.unixNano)
         }
 
-        /// The retained stamp for evicted ordinal `ordinal`, or the oldest
-        /// retained stamp (an upper bound on the write time) for evictions
-        /// older than the retained window, or nil when no stamps are held.
-        private func evictedNano(at ordinal: Int) -> UInt64? {
+        /// The retained stamp for evicted ordinal `ordinal` (exact), the
+        /// oldest retained stamp (an UPPER BOUND on the write time) for
+        /// evictions older than the retained window, or nil when no stamps
+        /// are held.
+        private func evictedTime(at ordinal: Int) -> RecordedTime? {
             guard !evictedNanos.isEmpty else { return nil }
             let base = max(droppedLines - evictedNanos.count, 0)
-            if ordinal < base { return evictedNanos.first }
+            if ordinal < base { return RecordedTime(unixNano: evictedNanos.first!, isUpperBound: true) }
             let index = ordinal - base
-            if index < evictedNanos.count { return evictedNanos[index] }
-            return evictedNanos.last
+            if index < evictedNanos.count {
+                return RecordedTime(unixNano: evictedNanos[index], isUpperBound: false)
+            }
+            return RecordedTime(unixNano: evictedNanos.last!, isUpperBound: false)
         }
 
         /// The journal-recorded time for `line`, or nil when the line is not
@@ -549,7 +594,16 @@ extension ContainerLogJournal {
         /// as newly written (read time) let a recent `--since` include old
         /// output and a past `--until` exclude in-window output.
         mutating func timestamp(for line: Data) -> UInt64? {
-            classify(line).recordedNano
+            recordedTime(for: line)?.unixNano
+        }
+
+        /// Like `timestamp(for:)` but also reports whether the time is exact
+        /// or only an upper bound (see `RecordedTime`): the windowed readers
+        /// need that distinction — an evicted line past the retained stamp
+        /// window inherits the oldest retained stamp, and treating that
+        /// bound as exact wrongly excluded lines from a past `--until`.
+        mutating func recordedTime(for line: Data) -> RecordedTime? {
+            classify(line).recordedTime
         }
 
         /// Consumes the gap marker recording one oversized stream line the
@@ -572,14 +626,27 @@ extension ContainerLogJournal {
         /// stamp when one is held), or `.fresh` when no marker is at the
         /// head (the journal does not cover this line — follower behind, or
         /// a pre-marker journal).
+        ///
+        /// A retained ORDINARY entry at the head is an alignment mismatch —
+        /// the journal expects the oversized line's marker but holds a real
+        /// line instead — and disables matching, exactly like a `classify`
+        /// mismatch: a stale journal whose retained line sits right behind
+        /// the stream's oversized line would otherwise stay usable and lend
+        /// its old timestamps to the new boot's lines. Only exhaustion (no
+        /// entry at all — the follower is simply behind the stream) leaves
+        /// the alignment usable.
         mutating func consumeGapMarker() -> Coverage {
             guard usable else { return .fresh }
             if skipped < droppedLines {
-                let nano = evictedNano(at: skipped)
+                let time = evictedTime(at: skipped)
                 skipped += 1
-                return .evicted(unixNano: nano)
+                return .evicted(unixNano: time?.unixNano, isUpperBound: time?.isUpperBound ?? false)
             }
-            guard index < entries.count, entries[index].isGapMarker else { return .fresh }
+            guard index < entries.count else { return .fresh }
+            guard entries[index].isGapMarker else {
+                usable = false
+                return .fresh
+            }
             let unixNano = entries[index].unixNano
             index += 1
             return .covered(unixNano)

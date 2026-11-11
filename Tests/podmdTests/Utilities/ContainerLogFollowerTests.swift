@@ -15,13 +15,26 @@ import Testing
 @Suite("ContainerLogFollower")
 struct ContainerLogFollowerTests {
 
-    /// ClientContainerProtocol mock whose reported status flips on demand.
+    /// ClientContainerProtocol mock whose reported status flips on demand,
+    /// and whose status LOOKUPS can be made to fail (an Apple API service
+    /// outage) and recover — a failed lookup must not read as an exit.
     private final class StatusFlipMock: ClientContainerProtocol, @unchecked Sendable {
         private let lock = NSLock()
         private var stopped = false
+        private var failLookups = false
         func stopContainer() {
             lock.lock()
             stopped = true
+            lock.unlock()
+        }
+        func failContainerLookups() {
+            lock.lock()
+            failLookups = true
+            lock.unlock()
+        }
+        func recoverContainerLookups() {
+            lock.lock()
+            failLookups = false
             lock.unlock()
         }
         private var snapshot: ContainerSnapshot {
@@ -38,7 +51,18 @@ struct ContainerLogFollowerTests {
             return ContainerSnapshot(configuration: config, status: stopped ? .stopped : .running, networks: [])
         }
         func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { [snapshot] }
-        func getContainer(id: String) async throws -> ContainerSnapshot? { snapshot }
+        func getContainer(id: String) async throws -> ContainerSnapshot? {
+            if lookupFailing { throw StatusFlipMock.LookupUnavailable() }
+            return snapshot
+        }
+
+        private var lookupFailing: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return failLookups
+        }
+
+        private struct LookupUnavailable: Error {}
         func enforceContainerRunning(container: ContainerSnapshot) throws {}
         func start(id: String, detachKeys: String?) async throws -> Bool { true }
         func stop(id: String, signal: String?, timeout: Int?) async throws {}
@@ -316,7 +340,8 @@ struct ContainerLogFollowerTests {
         let journal = ContainerLogJournal()
         await journal.configure(storageDirectory: dir)
         let flushCounter = FlushCounter(nativeId: "batch-ctr")
-        ContainerLogFollower.onBatchFlush = flushCounter.record
+        FlushHub.install()
+        FlushHub.shared.register(flushCounter, nativeId: "batch-ctr")
 
         let client = StatusFlipMock()
         let registry = ContainerLogFollowerRegistry.shared
@@ -328,7 +353,7 @@ struct ContainerLogFollowerTests {
             journal: journal,
             openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
         )
-        defer { ContainerLogFollower.onBatchFlush = nil }
+        defer { FlushHub.shared.unregister(nativeId: "batch-ctr") }
 
         let journaled = await waitFor {
             await journal.entries(nativeId: "batch-ctr").count >= 600
@@ -359,6 +384,41 @@ struct ContainerLogFollowerTests {
             lock.lock()
             count += 1
             lock.unlock()
+        }
+    }
+
+    /// `onBatchFlush` is a single global closure, but tests run in parallel:
+    /// two tests assigning it (and nil-ing it in `defer`) overwrite each
+    /// other and lose flush signals. The hub installs ONE forwarding closure
+    /// and routes each flush to whichever counter is registered for that
+    /// container — unregistered ids are no-ops, so the installed closure is
+    /// safe to leave in place for the rest of the process.
+    private final class FlushHub: @unchecked Sendable {
+        static let shared = FlushHub()
+        private let lock = NSLock()
+        private var counters: [String: FlushCounter] = [:]
+
+        static func install() {
+            ContainerLogFollower.onBatchFlush = { FlushHub.shared.forward($0) }
+        }
+
+        func register(_ counter: FlushCounter, nativeId: String) {
+            lock.lock()
+            counters[nativeId] = counter
+            lock.unlock()
+        }
+
+        func unregister(nativeId: String) {
+            lock.lock()
+            counters[nativeId] = nil
+            lock.unlock()
+        }
+
+        private func forward(_ nativeId: String) {
+            lock.lock()
+            let counter = counters[nativeId]
+            lock.unlock()
+            counter?.record(nativeId)
         }
     }
 
@@ -860,6 +920,10 @@ struct ContainerLogFollowerTests {
     @Test("a cancelled follower stops draining a log that keeps growing")
     func cancelledFollowerStopsDraining() async throws {
         let dir = tempDirectory()
+        // This test's log grows ~100 MB even when it runs cleanly: remove
+        // the directory so repeated local runs do not accumulate gigabytes
+        // in the system temp directory.
+        defer { try? FileManager.default.removeItem(at: dir) }
         let logFile = dir.appendingPathComponent("output.log")
         FileManager.default.createFile(atPath: logFile.path, contents: nil)
         let writer = try FileHandle(forWritingTo: logFile)
@@ -870,11 +934,24 @@ struct ContainerLogFollowerTests {
 
         // Appends to the log faster than the follower drains, so the drain
         // loop's read gap (EOF) never arrives while this runs — the exact
-        // shape of a container writing faster than it is read.
+        // shape of a container writing faster than it is read. The loop is
+        // PACED and hard-capped: an unpaced, unbounded variant wrote ~2 GB/s
+        // of "spam" — on CI's starved 3-core runners the synchronization
+        // window (waitFor + settle sleeps) stretched to tens of seconds, the
+        // writer filled the runner's disk, and `make test` plus the runner's
+        // own logger died with ENOSPC (job logs lost — pr-check red on
+        // 6e3016d, three attempts). ~40 KiB per 1 ms yields ~40 MB/s, still
+        // far above the follower's journaling throughput, so the busy-stream
+        // premise holds; the 64 MiB cap only engages on a pathologically
+        // slow run whose premise is already gone.
         let writerTask = Task.detached {
             let block = Data(String(repeating: "spam\n", count: 8192).utf8)  // ~40 KiB per write
-            while !Task.isCancelled {
+            let budgetBytes = 64 * 1024 * 1024
+            var written = 0
+            while !Task.isCancelled, written < budgetBytes {
                 try? writer.write(contentsOf: block)
+                written += block.count
+                try? await Task.sleep(nanoseconds: 1_000_000)
             }
         }
 
@@ -964,5 +1041,210 @@ struct ContainerLogFollowerTests {
         }
         let resumed = await journal.entries(nativeId: "final-line-ctr")
         #expect(resumed.count == 1, "the resumed exit drain must not duplicate the final line")
+    }
+
+    // MARK: - Review round 6
+
+    /// Whether `fd` is closed (or was recycled to a different file —
+    /// comparing only the fd number races against a concurrent open reusing
+    /// it, so the inode decides). Probing a closed FileHandle's
+    /// `fileDescriptor` raises an NSException on Darwin; the raw fd does not.
+    private func fdIsClosed(_ fd: Int32, ofFileAt url: URL) -> Bool {
+        if fcntl(fd, F_GETFD) == -1 { return true }
+        var current = stat()
+        guard fstat(fd, &current) == 0 else { return true }
+        var expected = stat()
+        guard stat(url.path, &expected) == 0 else { return true }
+        return current.st_ino != expected.st_ino || current.st_dev != expected.st_dev
+    }
+
+    @Test("Apple's extra log handles (the bootlog) are closed, not leaked")
+    func selectLogHandleClosesExtras() throws {
+        let dir = tempDirectory()
+        let logPath = dir.appendingPathComponent("container.log")
+        let bootPath = dir.appendingPathComponent("boot.log")
+        FileManager.default.createFile(atPath: logPath.path, contents: nil)
+        FileManager.default.createFile(atPath: bootPath.path, contents: nil)
+
+        // Mirror how Apple's handles arrive: FileHandles over raw fds with
+        // closeOnDealloc:false — closing them is the caller's job.
+        let logFD = open(logPath.path, O_RDONLY)
+        let bootFD = open(bootPath.path, O_RDONLY)
+        #expect(logFD >= 0 && bootFD >= 0)
+        let log = FileHandle(fileDescriptor: logFD, closeOnDealloc: false)
+        let boot = FileHandle(fileDescriptor: bootFD, closeOnDealloc: false)
+
+        // Apple Container 1.2.2 returns [containerLog, bootlog], both with
+        // closeOnDealloc:false — taking .first and dropping the array leaked
+        // one descriptor per follower arm, and repeated restarts exhausted
+        // the daemon's fd limit.
+        let selected = ContainerLogFollower.selectLogHandle([log, boot])
+        #expect(selected === log)
+        #expect(fdIsClosed(bootFD, ofFileAt: bootPath), "the unused bootlog handle must be closed")
+        #expect(!fdIsClosed(logFD, ofFileAt: logPath), "the container log handle stays open for reading")
+        close(logFD)
+    }
+
+    @Test("payload-heavy batches flush on framed bytes, not only on line count")
+    func boundedBatchJournalingByBytes() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("output.log")
+        // Six 256 KiB lines: far below the 256-line count bound, but 1.5 MiB
+        // total crosses the 1 MiB batch-byte bound mid-read. The count-only
+        // check let ~256 MiB of large-line payload accumulate per follower
+        // before the journal's 4 MiB cap ever ran.
+        let line = Data(repeating: 0x78, count: 256 * 1024) + Data("\n".utf8)
+        var contents = Data()
+        for _ in 0..<6 { contents.append(line) }
+        FileManager.default.createFile(atPath: logFile.path, contents: contents)
+
+        let journal = ContainerLogJournal()
+        await journal.configure(storageDirectory: dir)
+        let flushCounter = FlushCounter(nativeId: "byte-batch-ctr")
+        FlushHub.install()
+        FlushHub.shared.register(flushCounter, nativeId: "byte-batch-ctr")
+        defer { FlushHub.shared.unregister(nativeId: "byte-batch-ctr") }
+
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        await registry.arm(
+            nativeId: "byte-batch-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: true,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+
+        let journaled = await waitFor {
+            await journal.entries(nativeId: "byte-batch-ctr").count >= 6
+        }
+        #expect(journaled, "the whole backlog should be journaled")
+        #expect(
+            flushCounter.count >= 2,
+            "payload-heavy batches must flush on the byte bound mid-read, not accumulate until EOF")
+
+        client.stopContainer()
+        let finished = await waitFor {
+            let armed = await registry.isArmed(nativeId: "byte-batch-ctr")
+            return !armed
+        }
+        #expect(finished)
+    }
+
+    @Test("a failed status lookup is retried, not treated as the container's exit")
+    func statusLookupFailureRetries() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("output.log")
+        FileManager.default.createFile(atPath: logFile.path, contents: nil)
+        let writer = try FileHandle(forWritingTo: logFile)
+
+        let journal = ContainerLogJournal()
+        await journal.configure(storageDirectory: dir)
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        await registry.arm(
+            nativeId: "lookup-error-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: true,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+
+        // The status lookup starts failing (the Apple API service stays
+        // unavailable through a reconnect retry) while the VM keeps running.
+        // The old try? collapsed the error into nil — a "confirmed" exit —
+        // permanently ending the follower and its timestamping.
+        client.failContainerLookups()
+        try writer.write(contentsOf: Data("during-outage\n".utf8))
+        let journaled = await waitFor {
+            await journal.entries(nativeId: "lookup-error-ctr").contains {
+                $0.bytes == Data("during-outage\n".utf8)
+            }
+        }
+        #expect(journaled, "output written during the outage must still be journaled")
+
+        // Several poll intervals with the lookup failing: the follower must
+        // still be armed (retrying), not wound down as if the container had
+        // exited.
+        try await Task.sleep(for: .milliseconds(600))
+        let stillArmed = await registry.isArmed(nativeId: "lookup-error-ctr")
+        #expect(stillArmed, "a failed lookup must not end the follower while the container may still be running")
+
+        // The service recovers: journaling continues where it left off.
+        client.recoverContainerLookups()
+        try writer.write(contentsOf: Data("after-recovery\n".utf8))
+        let recovered = await waitFor {
+            await journal.entries(nativeId: "lookup-error-ctr").contains {
+                $0.bytes == Data("after-recovery\n".utf8)
+            }
+        }
+        #expect(recovered, "journaling must continue once the lookup outage lifts")
+
+        // A real stop still ends the follower, with the exit drain.
+        client.stopContainer()
+        try writer.write(contentsOf: Data("final\n".utf8))
+        let finished = await waitFor {
+            let armed = await registry.isArmed(nativeId: "lookup-error-ctr")
+            return !armed
+        }
+        #expect(finished)
+        let entries = await journal.entries(nativeId: "lookup-error-ctr")
+        #expect(entries.map(\.bytes).contains(Data("final\n".utf8)), "the exit drain still journals the final line")
+    }
+
+    @Test("an oversized line before a stale journal's retained line invalidates and heals")
+    func oversizedLineBeforeStaleRetainedLineHeals() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("output.log")
+        // The stale journal retained "banner\n" with an old timestamp; the
+        // new boot's stream has an oversized line followed by the SAME banner
+        // text. consumeGapMarker used to return .fresh for the retained
+        // non-marker entry without failing alignment, so the new banner
+        // matched the stale retained entry and inherited its old timestamp.
+        let giant = Data(repeating: 0x78, count: ContainerLogFollower.maxPendingLineBytes + (1 << 18))
+        var contents = giant
+        contents.append(Data("\nbanner\n".utf8))
+        FileManager.default.createFile(atPath: logFile.path, contents: contents)
+
+        let before = ContainerLogJournal.currentUnixNano()
+        let journal = await seedJournal(
+            dir: dir,
+            nativeId: "stale-oversized-ctr",
+            entries: [ContainerLogJournal.Entry(unixNano: 100, streamType: 1, bytes: Data("banner\n".utf8))]
+        )
+
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        await registry.arm(
+            nativeId: "stale-oversized-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: false,  // resume: adopts the persisted (stale) journal
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+
+        let healed = await waitFor {
+            await journal.contents(nativeId: "stale-oversized-ctr").entries.contains {
+                $0.bytes == Data("banner\n".utf8) && $0.unixNano >= before
+            }
+        }
+        #expect(healed, "the banner line must be re-journaled with a fresh timestamp after the heal")
+
+        let contentsAfter = await journal.contents(nativeId: "stale-oversized-ctr")
+        #expect(
+            contentsAfter.entries.map(\.bytes) == [Data("banner\n".utf8)],
+            "the healed journal holds only the re-stamped banner — no surviving gap marker, no stale copy")
+        #expect(
+            contentsAfter.droppedLines == 1,
+            "the consumed oversized line is accounted in the replacement's dropped prefix")
+
+        client.stopContainer()
+        _ = await waitFor {
+            let armed = await registry.isArmed(nativeId: "stale-oversized-ctr")
+            return !armed
+        }
     }
 }

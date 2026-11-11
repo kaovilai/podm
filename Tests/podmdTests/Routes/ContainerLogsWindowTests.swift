@@ -961,6 +961,35 @@ struct ContainerLogsWindowTests {
         #expect(legacyResult.payloads == ["c\n"], "without retained stamps the evicted lines fall back to read time")
     }
 
+    /// Review round 6: evictions OLDER than the retained stamp window report
+    /// the oldest retained stamp as an UPPER BOUND, and the scanner knows the
+    /// difference — a line written at 100 with a fallback bound of 400 was
+    /// wrongly excluded by `until=200` (and included by `since=300`) when the
+    /// bound was treated as the exact write time.
+    @Test("an evicted line past the stamp window is judged by its bound, not as an exact time")
+    func evictedBoundStampWindowing() async throws {
+        // Five evicted lines but only the newest stamp (400) retained — the
+        // first four evictions are past the stamp window and inherit it as
+        // an upper bound; the fifth is exact. The retained suffix "kept\n"
+        // was written at 600.
+        let fixture = journal([(600, "kept\n")], dropped: 5, evictedNanos: [400])
+
+        // until=200: the bound (400) exceeds it, but those lines may well
+        // have been written before 200 — only an exact time may exclude on
+        // the until side, so the four bound lines stay. The fifth evicted
+        // line (exact 400) and the retained line (600) are dropped.
+        let untilResult = try await scan("a\nb\nc\nd\ne\nkept\n", journal: fixture, until: 200)
+        #expect(
+            untilResult.payloads == ["a\n", "b\n", "c\n", "d\n"],
+            "a bound past until must not drop the lines it bounds")
+
+        // since=450: the bound (400) sits below it — those lines provably
+        // predate the window even as bounds, so only the retained line
+        // (600) survives.
+        let sinceResult = try await scan("a\nb\nc\nd\ne\nkept\n", journal: fixture, since: 450)
+        #expect(sinceResult.payloads == ["kept\n"], "a bound below since still excludes the line")
+    }
+
     /// The same fix on the oversized-line paths: an oversized line whose gap
     /// marker the cap evicted keeps its retained stamp for the whole logical
     /// line (head fragment through terminator).
