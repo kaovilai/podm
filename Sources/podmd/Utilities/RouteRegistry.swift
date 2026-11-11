@@ -6,7 +6,7 @@ import Vapor
 /// Boots the production route surface: constructs the service clients, installs
 /// the regex router, and registers every route collection exactly as the daemon
 /// serves them. Extracted from `configure()` so the route-conformance test can
-/// enumerate and exercise the REAL registered surface (164 collections) rather
+/// enumerate and exercise the REAL registered surface (162 collections) rather
 /// than a hand-maintained list. Returns the Apple container app-support URL the
 /// post-registration services in `configure()` need.
 ///
@@ -59,6 +59,10 @@ enum RouteRegistry {
         // docker-dialect config store — file-backed under app support, same
         // hardening pattern as the secret store; distinct store and directory.
         let configStore = ConfigStore(storageDirectory: appleContainerAppSupportUrl)
+        // docker-dialect plugin metadata store — file-backed under app
+        // support, 0600; serves the local-metadata half of /plugins (issue
+        // #35), no payload half (nothing can execute a plugin rootfs).
+        let pluginStore = PluginStore(storageDirectory: appleContainerAppSupportUrl)
         let archiveClient = ClientArchiveService(appSupportPath: appleContainerAppSupportUrl)
         let builderClient = ClientBuilderService(appSupportURL: appleContainerAppSupportUrl, containerSystemConfig: systemConfig)
 
@@ -149,17 +153,19 @@ enum RouteRegistry {
         try app.register(collection: DistributionJsonRoute(systemConfig: systemConfig))
 
         // --- plugin routes ---
-        try app.register(collection: PluginsCreateRoute())
+        // The local-metadata family (list/inspect/privileges/create) is live
+        // over the PluginStore; the runtime half (enable/disable/push/set/
+        // upgrade/pull) stays deliberately stubbed.
+        try app.register(
+            collection: PluginsRoute(
+                store: pluginStore,
+                privilegesProvider: RegistryPluginPrivilegesProvider(containerSystemConfig: systemConfig)))
         try app.register(collection: PluginsNameDisableRoute())
         try app.register(collection: PluginsNameEnableRoute())
-        try app.register(collection: PluginsNameJsonRoute())
         try app.register(collection: PluginsNamePushRoute())
-        try app.register(collection: PluginsNameRoute())
         try app.register(collection: PluginsNameSetRoute())
         try app.register(collection: PluginsNameUpgradeRoute())
-        try app.register(collection: PluginsPrivilegesRoute())
         try app.register(collection: PluginsPullRoute())
-        try app.register(collection: PluginsRoute())
 
         // --- swarm node routes ---
         try app.register(collection: NodesIdRoute())

@@ -38,7 +38,10 @@ struct RouteConformanceTests {
     ///   live over the local SecretStore — see SecretsRoute; the other
     ///   /configs routes are live over the local ConfigStore — see
     ///   ConfigsRoute.)
-    /// - plugins family: podman/docker plugin system is out of scope.
+    /// - plugins runtime family (pull/enable/disable/push/set/upgrade):
+    ///   privileged plugin containers and host /run/docker/plugins sockets
+    ///   do not fit podm's microVM isolation; the metadata subset
+    ///   (list/inspect/privileges/create) is live — see PluginsRoute.
     ///
     /// Adding an entry requires a reason here; implementing a route requires
     /// REMOVING its entry (the reverse assertion fails otherwise).

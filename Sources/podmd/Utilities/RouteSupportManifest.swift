@@ -106,39 +106,38 @@ enum RouteSupportManifest {
             method: "GET", pattern: "/tasks/{id}/logs",
             reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         // ── Plugin system compatibility surface ──────────────────────────────
-        DeliberateStub(
-            method: "GET", pattern: "/plugins",
-            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
-        DeliberateStub(
-            method: "GET", pattern: "/plugins/{name}",
-            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
+        // (The local-metadata half of /plugins — list, inspect, privileges,
+        // create — is live over the local PluginStore; see PluginsRoute.)
         DeliberateStub(
             method: "POST", pattern: "/plugins/{name}/disable",
-            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
+            reason:
+                "The docker plugin runtime (privileged plugin container + /run/docker/plugins socket) has no mapping onto Apple's microVM isolation; the route answers not-implemented for CLI compatibility."
+        ),
         DeliberateStub(
             method: "POST", pattern: "/plugins/{name}/enable",
-            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
-        DeliberateStub(
-            method: "GET", pattern: "/plugins/{name}/json",
-            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
+            reason:
+                "The docker plugin runtime (privileged plugin container + /run/docker/plugins socket) has no mapping onto Apple's microVM isolation; the route answers not-implemented for CLI compatibility."
+        ),
         DeliberateStub(
             method: "POST", pattern: "/plugins/{name}/push",
-            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
+            reason:
+                "The docker plugin runtime (privileged plugin container + /run/docker/plugins socket) has no mapping onto Apple's microVM isolation; the route answers not-implemented for CLI compatibility."
+        ),
         DeliberateStub(
             method: "POST", pattern: "/plugins/{name}/set",
-            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
+            reason:
+                "The docker plugin runtime (privileged plugin container + /run/docker/plugins socket) has no mapping onto Apple's microVM isolation; the route answers not-implemented for CLI compatibility."
+        ),
         DeliberateStub(
             method: "POST", pattern: "/plugins/{name}/upgrade",
-            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
-        DeliberateStub(
-            method: "POST", pattern: "/plugins/create",
-            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
-        DeliberateStub(
-            method: "GET", pattern: "/plugins/privileges",
-            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
+            reason:
+                "The docker plugin runtime (privileged plugin container + /run/docker/plugins socket) has no mapping onto Apple's microVM isolation; the route answers not-implemented for CLI compatibility."
+        ),
         DeliberateStub(
             method: "POST", pattern: "/plugins/pull",
-            reason: "The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility."),
+            reason:
+                "The docker plugin runtime (privileged plugin container + /run/docker/plugins socket) has no mapping onto Apple's microVM isolation; the route answers not-implemented for CLI compatibility."
+        ),
     ]
 
     static let stubKeys: Set<String> = Set(stubs.map(\.key))
