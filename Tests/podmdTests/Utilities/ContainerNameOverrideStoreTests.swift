@@ -152,7 +152,12 @@ func concurrentClaimOwnerQuoted() async throws {
             loserConflict = outcome
         }
     }
-    #expect(winnerHex != nil, "exactly one claim wins")
+    let claimedCount = outcomes.filter {
+        if case .claimed = $0 { return true }
+        return false
+    }.count
+    #expect(claimedCount == 1, "exactly one claim wins")
+    #expect(winnerHex != nil)
     guard let winner = winnerHex, let loser = loserHex, let conflict = loserConflict else { return }
     guard case .conflict(let owner) = conflict else {
         Issue.record("expected a conflict outcome for the loser")

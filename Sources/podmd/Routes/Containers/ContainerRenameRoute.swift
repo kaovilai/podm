@@ -122,10 +122,14 @@ struct ContainerRenameRoute: RouteCollection {
                             "Error when allocating new name: Conflict. The container name \"/\(newName)\" is already in use by container \"\(ownerId)\". You have to remove (or rename) that container to be able to reuse that name."
                     )
                 }
+                // No moby analog quotes this case (an in-flight create
+                // reservation, or a lost compare-and-swap against this same
+                // container) — keep podm's plain form rather than a hybrid
+                // that half-quotes moby's wrapper.
                 throw Abort(
                     .conflict,
                     reason:
-                        "Error when allocating new name: name is already in use: \(newName)"
+                        "name is already in use: \(newName)"
                 )
             }
             // Swap the container's DNS hostname alias while it runs so peers

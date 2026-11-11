@@ -103,8 +103,8 @@ actor ContainerNameOverrideStore {
     /// owner; the loser must still be able to quote the winner).
     func claim(hexId: String, name: String, expectedOverride: String?, reserved: Set<String>) -> ClaimOutcome {
         if reserved.contains(name) { return .conflict(owner: nil) }
-        if overrides.values.contains(name) {
-            return .conflict(owner: overrides.first(where: { $0.value == name })?.key)
+        if let owner = overrides.first(where: { $0.value == name })?.key {
+            return .conflict(owner: owner)
         }
         if pendingCreates.contains(name) { return .conflict(owner: nil) }
         if overrides[hexId] != expectedOverride { return .conflict(owner: nil) }
