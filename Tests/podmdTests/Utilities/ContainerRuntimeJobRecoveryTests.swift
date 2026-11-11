@@ -88,6 +88,12 @@ struct ContainerRuntimeJobRecoveryTests {
         } catch ClientContainerError.runtimeJobWedged(let nativeId, _) {
             #expect(nativeId == "native-2")
         }
+        // The wedged error is thrown at the second-window deadline, which
+        // can land BEFORE the bootout task's registry hop gets scheduled
+        // under load — the bootout is not suppressed (the operation never
+        // finished), so it arrives shortly after. Wait for it rather than
+        // asserting it synchronously.
+        await waitForCondition(timeoutNs: 10_000_000_000) { bootouts.labels.count == 1 }
         let labels = bootouts.labels
         #expect(labels.count == 1, "the recovery was attempted exactly once")
         #expect(labels.first?.hasSuffix("com.apple.container.container-runtime-linux.native-2") == true)
@@ -317,6 +323,302 @@ struct ContainerRuntimeJobRecoveryTests {
         await acquired.wait()
     }
 
+    // MARK: review round 2 — bounded admission wait (all slots wedged)
+
+    @Test(
+        "a force-stop queued behind wedged slot-holders fails bounded instead of hanging",
+        .timeLimit(.minutes(1))
+    )
+    func allSlotsWedgedForceStopFailsBounded() async throws {
+        let bootouts = BootoutLog()
+        let admission = VMLifecycleAdmission(limit: 1)
+        // A wedged ordinary stop: holds the only slot forever. Before the
+        // fix, the force-delete queued behind it FOREVER — before either
+        // recovery window started.
+        let holderStarted = WedgeGate()
+        let holderNeverEnds = WedgeGate()  // never opened
+        let holder = Task<Void, Never> {
+            try? await admission.withSlot {
+                holderStarted.open()
+                await holderNeverEnds.wait()
+            }
+        }
+        await holderStarted.wait()
+        _ = holder  // deliberately never awaited — it models the wedge
+
+        let startedAt = Date()
+        do {
+            try await ClientContainerService.withAdmissionScopedRecovery(
+                container: Self.snapshot(id: "native-adm", status: .running),
+                admission: admission,
+                firstWindowNs: 5_000_000_000,
+                secondWindowNs: 5_000_000_000,
+                admissionQueueTimeoutNs: 50_000_000,
+                bootout: { label in
+                    bootouts.record(label)
+                    return 0
+                }
+            ) {}
+            Issue.record("expected admissionTimedOut")
+        } catch ClientContainerError.admissionTimedOut(let nativeId) {
+            #expect(nativeId == "native-adm")
+        }
+        #expect(Date().timeIntervalSince(startedAt) < 5, "the admission wait must be bounded")
+        #expect(bootouts.labels.isEmpty, "the recovery must never start while still queued")
+    }
+
+    @Test(
+        "a healthy backlog still admits the force-stop within the admission deadline",
+        .timeLimit(.minutes(1))
+    )
+    func healthyBacklogAdmittedWithinDeadline() async throws {
+        let bootouts = BootoutLog()
+        let admission = VMLifecycleAdmission(limit: 1)
+        let holderStarted = WedgeGate()
+        let releaseHolder = WedgeGate()
+        let holder = Task<Void, Never> {
+            try? await admission.withSlot {
+                holderStarted.open()
+                await releaseHolder.wait()
+            }
+        }
+        await holderStarted.wait()
+        // Release the backlog shortly after the force-stop queues — well
+        // inside the admission deadline.
+        Task<Void, Never> {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            releaseHolder.open()
+        }
+        try await ClientContainerService.withAdmissionScopedRecovery(
+            container: Self.snapshot(id: "native-adm2", status: .running),
+            admission: admission,
+            firstWindowNs: 5_000_000_000,
+            secondWindowNs: 5_000_000_000,
+            admissionQueueTimeoutNs: 5_000_000_000,
+            bootout: { label in
+                bootouts.record(label)
+                return 0
+            }
+        ) {}
+        await holder.value
+        #expect(bootouts.labels.isEmpty, "a healthy queued stop must not trigger a bootout")
+    }
+
+    // MARK: review round 2 — bootout/replace coordination (reusable native ids)
+
+    @Test("a bootout that has not STARTED is suppressed when its operation finishes")
+    func unstartedBootoutSuppressedWhenOperationFinishes() async throws {
+        let registry = ContainerRuntimeJobRecovery.OutstandingBootoutRegistry()
+        let label = "gui/501/com.apple.container.container-runtime-linux.reg-1"
+        let token = await registry.schedule(label: label)
+        #expect(await registry.isClear(label: label) == false, "a scheduled bootout is outstanding")
+
+        // The operation finished before the bootout task ever started —
+        // a same-name replacement may already own the runtime job.
+        await registry.operationFinished(label: label, token: token)
+        #expect(await registry.isClear(label: label), "a suppressed bootout leaves nothing outstanding")
+        #expect(await registry.starting(label: label, token: token) == false, "the suppressed bootout must not run")
+    }
+
+    @Test("an already-started bootout runs to completion; the finished operation cannot stop it")
+    func startedBootoutRunsToCompletion() async throws {
+        let registry = ContainerRuntimeJobRecovery.OutstandingBootoutRegistry()
+        let label = "gui/501/com.apple.container.container-runtime-linux.reg-2"
+        let token = await registry.schedule(label: label)
+        #expect(await registry.starting(label: label, token: token) == true, "an unclaimed bootout starts")
+
+        // The operation finishing mid-bootout must not cancel it — it is
+        // already in flight against launchd.
+        await registry.operationFinished(label: label, token: token)
+        #expect(await registry.isClear(label: label) == false, "a running bootout stays outstanding")
+
+        await registry.bootoutFinished(label: label)
+        #expect(await registry.isClear(label: label))
+    }
+
+    @Test("waitUntilClear blocks while a bootout is outstanding and resumes when it finishes")
+    func waitUntilClearBlocksAndResumes() async throws {
+        let registry = ContainerRuntimeJobRecovery.OutstandingBootoutRegistry()
+        let label = "gui/501/com.apple.container.container-runtime-linux.reg-3"
+        let token = await registry.schedule(label: label)
+        _ = await registry.starting(label: label, token: token)
+
+        let resumed = AtomicFlag()
+        let waiter = Task<Void, Never> {
+            await registry.waitUntilClear(label: label)
+            resumed.set()
+        }
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        #expect(resumed.isSet() == false, "create/start must stay blocked while the bootout is outstanding")
+
+        await registry.bootoutFinished(label: label)
+        await waiter.value
+        #expect(resumed.isSet(), "the waiter resumes once the bootout finishes")
+    }
+
+    @Test(
+        "a started recovery bootout blocks same-name reuse until it finishes",
+        .timeLimit(.minutes(1))
+    )
+    func startedBootoutBlocksSameNameReuseUntilFinished() async throws {
+        // Native ids are reusable names: DELETE succeeded within the second
+        // window while the recovery bootout (started at the first window)
+        // is still running. A create/start of the SAME native id must wait.
+        let gate = WedgeGate()
+        let bootouts = BootoutLog()
+        let hookRelease = DispatchSemaphore(value: 0)
+        try await ContainerRuntimeJobRecovery.withHangRecovery(
+            nativeId: "native-reuse",
+            runtimeHandler: "container-runtime-linux",
+            firstWindowNs: 50_000_000,
+            secondWindowNs: 5_000_000_000,
+            bootout: { label in
+                bootouts.record(label)
+                gate.open()  // the bootout unwedges the apiserver...
+                // ...but launchctl itself is still answering. A same-name
+                // replacement created right after the DELETE response must
+                // not have its runtime job booted out by THIS in-flight
+                // bootout.
+                hookRelease.wait()
+                return 0
+            }
+        ) {
+            await gate.wait()
+        }
+        #expect(bootouts.labels.count == 1, "the bootout started before the operation finished and must run")
+
+        // create/start of the same native id: must block while the bootout
+        // is still in flight...
+        let resumed = AtomicFlag()
+        let reuse = Task<Void, Never> {
+            await ContainerRuntimeJobRecovery.awaitNoOutstandingBootout(
+                nativeId: "native-reuse", runtimeHandler: "container-runtime-linux")
+            resumed.set()
+        }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        #expect(resumed.isSet() == false, "same-name create/start must wait for the in-flight bootout")
+
+        // ...and proceed once it finishes.
+        hookRelease.signal()
+        await reuse.value
+        #expect(resumed.isSet())
+    }
+
+    // MARK: review round 2 — expiry at the final deadline (reconnect retries)
+
+    @Test(
+        "the final deadline marks the recovery expired so reconnect retries are refused",
+        .timeLimit(.minutes(1))
+    )
+    func finalDeadlineExpiresRecovery() async throws {
+        let gate = WedgeGate()
+        let expiry = ContainerRuntimeJobRecovery.RecoveryExpiry()
+        #expect(expiry.isExpired == false)
+        #expect(expiry.retryPermit(), "the permit must allow retries before the deadline")
+        do {
+            try await ContainerRuntimeJobRecovery.withHangRecovery(
+                nativeId: "native-exp",
+                runtimeHandler: "container-runtime-linux",
+                firstWindowNs: 50_000_000,
+                secondWindowNs: 50_000_000,
+                bootout: { _ in 0 },
+                expiry: expiry
+            ) {
+                await gate.wait()  // never opened
+            }
+            Issue.record("expected runtimeJobWedged")
+        } catch ClientContainerError.runtimeJobWedged {}
+        #expect(expiry.isExpired == true, "reconnect retries must be refused after the final deadline")
+        #expect(expiry.retryPermit() == false)
+    }
+
+    @Test("an operation completing within the windows never expires its recovery")
+    func healthyRecoveryNeverExpires() async throws {
+        let expiry = ContainerRuntimeJobRecovery.RecoveryExpiry()
+        try await ContainerRuntimeJobRecovery.withHangRecovery(
+            nativeId: "native-exp2",
+            runtimeHandler: "container-runtime-linux",
+            firstWindowNs: 5_000_000_000,
+            secondWindowNs: 5_000_000_000,
+            bootout: { _ in 0 },
+            expiry: expiry
+        ) {}
+        #expect(expiry.isExpired == false)
+    }
+
+    // MARK: review round 2 — late success after the wedged error
+
+    @Test(
+        "a delete that succeeds after the wedged error runs onLateSuccess",
+        .timeLimit(.minutes(1))
+    )
+    func lateSuccessRunsOnLateSuccess() async throws {
+        let gate = WedgeGate()
+        let lateRan = WedgeGate()
+        do {
+            try await ContainerRuntimeJobRecovery.withHangRecovery(
+                nativeId: "native-late",
+                runtimeHandler: "container-runtime-linux",
+                firstWindowNs: 50_000_000,
+                secondWindowNs: 50_000_000,
+                bootout: { _ in 0 },
+                onLateSuccess: { lateRan.open() }
+            ) {
+                await gate.wait()  // the delete hangs past both windows...
+            }
+            Issue.record("expected runtimeJobWedged")
+        } catch ClientContainerError.runtimeJobWedged {}
+        // ...then the operator restarts the wedged apiserver and the
+        // abandoned delete finally completes — the caller's cleanup must
+        // still run (rename reservations, journals, destroy event).
+        gate.open()
+        await lateRan.wait()  // bounded by the test's time limit, not forever
+    }
+
+    @Test(
+        "a late failure does not run onLateSuccess",
+        .timeLimit(.minutes(1))
+    )
+    func lateFailureSkipsOnLateSuccess() async throws {
+        let gate = WedgeGate()
+        let lateRan = AtomicFlag()
+        do {
+            try await ContainerRuntimeJobRecovery.withHangRecovery(
+                nativeId: "native-late2",
+                runtimeHandler: "container-runtime-linux",
+                firstWindowNs: 50_000_000,
+                secondWindowNs: 50_000_000,
+                bootout: { _ in 0 },
+                onLateSuccess: { lateRan.set() }
+            ) {
+                await gate.wait()
+                // The abandoned delete eventually FAILS (e.g. the container
+                // was removed by another path while this one was stuck).
+                throw ClientContainerError.notFound(id: "native-late2")
+            }
+            Issue.record("expected runtimeJobWedged")
+        } catch ClientContainerError.runtimeJobWedged {}
+        gate.open()
+        // Give the late watcher time to observe the failure.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        #expect(lateRan.isSet() == false, "only a late SUCCESS runs the cleanup hook")
+    }
+
+    @Test("an in-window success never runs onLateSuccess")
+    func inWindowSuccessSkipsOnLateSuccess() async throws {
+        let lateRan = AtomicFlag()
+        try await ContainerRuntimeJobRecovery.withHangRecovery(
+            nativeId: "native-late3",
+            runtimeHandler: "container-runtime-linux",
+            firstWindowNs: 5_000_000_000,
+            secondWindowNs: 5_000_000_000,
+            bootout: { _ in 0 },
+            onLateSuccess: { lateRan.set() }
+        ) {}
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        #expect(lateRan.isSet() == false, "the normal success path owns its own cleanup")
+    }
+
     private static func snapshot(id: String, status: RuntimeStatus) -> ContainerSnapshot {
         let proc = ProcessConfiguration(
             executable: "/bin/sh", arguments: [], environment: [],
@@ -381,5 +683,37 @@ private final class BootoutLog: @unchecked Sendable {
         lock.lock()
         recordedLabels.append(label)
         lock.unlock()
+    }
+}
+
+/// A lock-guarded boolean flag, observable from synchronous closures.
+private final class AtomicFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    func set() {
+        lock.lock()
+        value = true
+        lock.unlock()
+    }
+
+    func isSet() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+/// Polls `condition` until it holds or `timeoutNs` elapses (the recovery
+/// bootout task reaches its hook via a GCD dispatch plus registry hops, so
+/// under parallel-suite load it can trail the deadline error by a moment).
+private func waitForCondition(
+    timeoutNs: UInt64,
+    intervalNs: UInt64 = 25_000_000,
+    _ condition: @Sendable () -> Bool
+) async {
+    let deadline = Date().addingTimeInterval(TimeInterval(timeoutNs) / 1_000_000_000)
+    while !condition() && Date() < deadline {
+        try? await Task.sleep(nanoseconds: intervalNs)
     }
 }

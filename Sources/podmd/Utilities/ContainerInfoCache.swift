@@ -44,6 +44,34 @@ actor ContainerInfoCache {
         }
     }
 
+    /// Instance-scoped `remove` for cleanup that may run AFTER the
+    /// container was deleted: drops this instance's hex key unconditionally
+    /// (a hex id is unique to the instance — it derives from the bundle's
+    /// on-disk creation date) but the native-id key only while it still
+    /// maps to THIS instance. Native ids are reusable names
+    /// (`Utility.createContainerID(name:)` passes the container name
+    /// through), so a same-name replacement may already own the native key
+    /// — its entries must survive this container's cleanup.
+    ///
+    /// `hexId` should be the instance's 64-char Docker id (or, in the
+    /// no-identity fallback, whatever id the caller had — then this behaves
+    /// like `remove(id:)`).
+    func removeInstance(hexId: String, nativeId: String?) {
+        store.removeValue(forKey: hexId)
+        if let nativeId, store[nativeId]?.hexId == hexId {
+            store.removeValue(forKey: nativeId)
+        }
+        // --rm marks die with the instance, same dedup as remove(id:).
+        var keys = [hexId]
+        if let nativeId { keys.append(nativeId) }
+        for key in keys {
+            if let sibling = autoRemoveSibling[key] {
+                autoRemoveSibling.removeValue(forKey: key)
+                autoRemoveSibling.removeValue(forKey: sibling)
+            }
+        }
+    }
+
     /// Records that a container was created with `--rm`, keyed by both ids so either the
     /// hex (attach route) or native (die observer) lookup finds it.
     func markAutoRemove(hexId: String, nativeId: String) {

@@ -179,4 +179,88 @@ struct VMLifecycleAdmissionTests {
     func defaultLimitHasFloor() {
         #expect(VMLifecycleAdmission.defaultLimit >= 2)
     }
+
+    // MARK: bounded queue wait (review round 2 — all-slots-wedged admission)
+
+    @Test(
+        "withSlot(timeoutNs:) fails with a bounded QueueTimeout when every slot stays held",
+        .timeLimit(.minutes(1))
+    )
+    func timeoutThrowsWhenAllSlotsHeld() async throws {
+        let admission = VMLifecycleAdmission(limit: 1)
+
+        // A wedged ordinary stop: holds the only slot forever.
+        let holderAcquired = AsyncStream<Void>.makeStream()
+        let releaseHolder = AsyncStream<Void>.makeStream()
+        let holder = Task {
+            try await admission.withSlot {
+                holderAcquired.continuation.yield(())
+                for await _ in releaseHolder.stream { break }
+            }
+        }
+        var acquiredIterator = holderAcquired.stream.makeAsyncIterator()
+        _ = await acquiredIterator.next()
+
+        // Before the fix this queued forever — before any recovery window
+        // even started. It must now fail with the actionable deadline.
+        let startedAt = Date()
+        await #expect(throws: VMLifecycleAdmission.QueueTimeout.self) {
+            try await admission.withSlot(timeoutNs: 50_000_000) { "never" }
+        }
+        #expect(Date().timeIntervalSince(startedAt) < 5, "the wait must be bounded by the deadline, not the holder")
+
+        // The wedged holder keeps its slot — the deadline must not have
+        // stolen or leaked one: a second bounded wait also times out, and
+        // once the holder releases, a bounded wait succeeds.
+        await #expect(throws: VMLifecycleAdmission.QueueTimeout.self) {
+            try await admission.withSlot(timeoutNs: 50_000_000) { "never" }
+        }
+        releaseHolder.continuation.yield(())
+        releaseHolder.continuation.finish()
+        _ = try await holder.value
+        let result = try await admission.withSlot(timeoutNs: 5_000_000_000) { "admitted" }
+        #expect(result == "admitted")
+    }
+
+    @Test("withSlot(timeoutNs:) runs immediately when a slot is free")
+    func timeoutFastPathAdmits() async throws {
+        let admission = VMLifecycleAdmission(limit: 2)
+        let result = try await admission.withSlot(timeoutNs: 1_000_000) { 7 }
+        #expect(result == 7)
+    }
+
+    @Test("withSlot(timeoutNs:) waits through a healthy backlog instead of timing out")
+    func timeoutWaitsThroughHealthyBacklog() async throws {
+        let admission = VMLifecycleAdmission(limit: 1)
+
+        let holderAcquired = AsyncStream<Void>.makeStream()
+        let releaseHolder = AsyncStream<Void>.makeStream()
+        let holder = Task {
+            try await admission.withSlot {
+                holderAcquired.continuation.yield(())
+                for await _ in releaseHolder.stream { break }
+            }
+        }
+        var acquiredIterator = holderAcquired.stream.makeAsyncIterator()
+        _ = await acquiredIterator.next()
+
+        // The backlog releases at 100 ms; the deadline is 5 s — a healthy
+        // queue must never be mistaken for a wedge.
+        let waiter = Task { try await admission.withSlot(timeoutNs: 5_000_000_000) { "ran" } }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        releaseHolder.continuation.yield(())
+        releaseHolder.continuation.finish()
+        _ = try await holder.value
+        #expect(try await waiter.value == "ran")
+    }
+
+    @Test("withSlot(timeoutNs:) releases its slot when the body throws")
+    func timeoutReleasesOnThrow() async throws {
+        let admission = VMLifecycleAdmission(limit: 1)
+        await #expect(throws: SyntheticError.self) {
+            try await admission.withSlot(timeoutNs: 5_000_000_000) { throw SyntheticError() }
+        }
+        let result = try await admission.withSlot(timeoutNs: 5_000_000_000) { "recovered" }
+        #expect(result == "recovered")
+    }
 }

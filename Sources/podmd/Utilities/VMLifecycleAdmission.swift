@@ -19,6 +19,17 @@ actor VMLifecycleAdmission {
         max(2, ProcessInfo.processInfo.activeProcessorCount / 4)
     }
 
+    /// `withSlot(timeoutNs:)` could not acquire a slot within its deadline:
+    /// every slot in the pool was held for the whole wait. For the delete
+    /// path's force-stop this means the ordinary stops holding the pool are
+    /// themselves wedged (issue #45) — a wedged `stopInternal` holds its
+    /// slot forever, so without this deadline a force-delete would queue
+    /// behind them indefinitely, before its own recovery windows even start.
+    struct QueueTimeout: Error {
+        /// The pool size — how many holders stayed wedged.
+        let limit: Int
+    }
+
     private let limit: Int
     private var available: Int
     private var waiters: [(id: UUID, continuation: CheckedContinuation<Void, Error>)] = []
@@ -40,6 +51,91 @@ actor VMLifecycleAdmission {
         } catch {
             release()
             throw error
+        }
+    }
+
+    /// `withSlot(_:)` with a bounded QUEUE wait: if no slot frees up within
+    /// `timeoutNs`, throws `QueueTimeout` instead of queueing forever. Used
+    /// by the delete path's force-stop, which must fail with an actionable
+    /// error when every slot is held by operations wedged against a stuck
+    /// apiserver (a healthy FIFO backlog still gets the full deadline).
+    /// The acquisition itself runs in a child task so it can be raced
+    /// against the deadline; `acquire()` stays cancellation-correct on both
+    /// sides (a cancelled waiter is removed from the queue, and a waiter
+    /// granted a slot just as cancellation lands hands it back).
+    func withSlot<T: Sendable>(timeoutNs: UInt64, _ body: @Sendable () async throws -> T) async throws -> T {
+        // Fast path: a free slot needs no timer and no child task.
+        try Task.checkCancellation()
+        if available > 0 {
+            available -= 1
+        } else {
+            let acquirer = Task { try await acquire() }
+            do {
+                try await withTaskCancellationHandler {
+                    try await raceAcquisition(acquirer, timeoutNs: timeoutNs)
+                } onCancel: {
+                    acquirer.cancel()
+                }
+            } catch is CancellationError {
+                // The CALLING task was cancelled (not our deadline). The
+                // acquirer was cancelled too; if it nevertheless completed
+                // successfully in the gap, it holds a slot — hand it back.
+                if (try? await acquirer.value) != nil {
+                    release()
+                }
+                throw CancellationError()
+            } catch let timeout as QueueTimeout {
+                acquirer.cancel()
+                // Same gap: the acquirer may have won a slot just before
+                // cancellation was observed. It holds one — hand it back,
+                // then surface the deadline.
+                if (try? await acquirer.value) != nil {
+                    release()
+                }
+                throw timeout
+            }
+        }
+        do {
+            let result = try await body()
+            release()
+            return result
+        } catch {
+            release()
+            throw error
+        }
+    }
+
+    /// The acquisition's outcome if it finished before `timeoutNs`, nil on
+    /// deadline. Same shape as `ContainerRuntimeJobRecovery.race`: the losing
+    /// racer finds its one-shot continuation already consumed and is ignored.
+    private enum AcquisitionOutcome: @unchecked Sendable {
+        case acquired
+        case failed(any Error)
+    }
+
+    private func raceAcquisition(_ acquirer: Task<Void, Error>, timeoutNs: UInt64) async throws {
+        let outcome: AcquisitionOutcome? = await withCheckedContinuation { (cont: CheckedContinuation<AcquisitionOutcome?, Never>) in
+            let once = ResumeOnce(cont)
+            Task {
+                do {
+                    try await acquirer.value
+                    once.resume(returning: .acquired)
+                } catch {
+                    once.resume(returning: .failed(error))
+                }
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: timeoutNs)
+                once.resume(returning: nil)
+            }
+        }
+        switch outcome {
+        case .acquired:
+            return
+        case .failed(let error):
+            throw error
+        case nil:
+            throw QueueTimeout(limit: limit)
         }
     }
 

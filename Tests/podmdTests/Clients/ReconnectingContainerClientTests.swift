@@ -102,6 +102,56 @@ struct ReconnectingContainerClientTests {
         let reconnectCount = await client.reconnectCount
         #expect(reconnectCount == 0)
     }
+
+    // MARK: review round 2 — retry permit (reconnects after the final deadline)
+
+    @Test("A refused retry permit rethrows the stale error without reconnecting")
+    func expiredPermitRefusesRetry() async throws {
+        // Regression (PR #51 review): after a delete was abandoned past its
+        // recovery deadline, a stale-connection retry could re-issue the
+        // delete against a recreated same-name container — native ids are
+        // reusable names. The permit must switch the retry off.
+        let generations = Counter()
+        let client = ReconnectingContainerClient<FakeConnection>(makeClient: {
+            FakeConnection(generation: generations.nextSync())
+        })
+
+        let attempts = Counter()
+        do {
+            _ = try await client.withClient(allowRetry: { false }) { _ -> Int in
+                attempts.nextSync()
+                throw ContainerizationError(.interrupted, message: "XPC connection error: Connection invalid")
+            }
+            Issue.record("expected the stale-connection error to be rethrown")
+        } catch let error as ContainerizationError {
+            #expect(error.code == .interrupted, "the original stale-connection error propagates as-is")
+        }
+
+        #expect(attempts.countSync() == 1, "the expired operation must not be re-issued")
+        let reconnectCount = await client.reconnectCount
+        #expect(reconnectCount == 0, "no reconnection for a refused retry")
+    }
+
+    @Test("A granted retry permit keeps the reconnect-and-retry behavior")
+    func grantedPermitStillRetries() async throws {
+        let generations = Counter()
+        let client = ReconnectingContainerClient<FakeConnection>(makeClient: {
+            FakeConnection(generation: generations.nextSync())
+        })
+
+        let attempts = Counter()
+        let result = try await client.withClient(allowRetry: { true }) { connection -> Int in
+            let attempt = attempts.nextSync()
+            if attempt == 1 {
+                throw ContainerizationError(.interrupted, message: "XPC connection error: Connection invalid")
+            }
+            return connection.generation
+        }
+
+        #expect(result == 2)
+        let reconnectCount = await client.reconnectCount
+        #expect(reconnectCount == 1)
+    }
 }
 
 /// A tiny thread-safe counter used to observe call/reconnect counts from

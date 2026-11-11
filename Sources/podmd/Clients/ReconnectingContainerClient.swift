@@ -43,12 +43,28 @@ actor ReconnectingContainerClient<Client: Sendable> {
         self.client = makeClient()
     }
 
-    func withClient<T>(_ operation: @Sendable (Client) async throws -> T) async throws -> T {
+    /// Runs the operation against the current client and, on a
+    /// stale-connection failure, reconnects and retries exactly once.
+    ///
+    /// `allowRetry` gates that reconnect retry: when it returns false (the
+    /// caller's operation was abandoned past its recovery deadline), the
+    /// stale-connection error is rethrown as-is instead. A retry issued
+    /// after the operation was given up on could land on a recreated
+    /// same-name container — native ids are reusable names — and delete or
+    /// stop the replacement.
+    func withClient<T>(
+        allowRetry: (@Sendable () -> Bool)? = nil,
+        _ operation: @Sendable (Client) async throws -> T
+    ) async throws -> T {
         let currentCount = reconnectCount
         let currentClient = client
         do {
             return try await operation(currentClient)
         } catch let error as ContainerizationError where Self.isStaleConnection(error) {
+            if let allowRetry, !allowRetry() {
+                // The operation expired — never re-issue its call.
+                throw error
+            }
             // Guard against a reconnect storm: if many concurrent callers hit the same
             // stale connection, only the first to reach here (reconnectCount still
             // matches what it observed before the call) recreates the client — the
