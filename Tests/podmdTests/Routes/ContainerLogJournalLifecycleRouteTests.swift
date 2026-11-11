@@ -174,6 +174,87 @@ struct ContainerLogJournalLifecycleRouteTests {
         await ContainerExitCodeStore.shared.remove(id: nativeId)
     }
 
+    // MARK: - /restart fresh-boot semantics
+
+    @Test("a /restart that booted the container resets its log journal")
+    func restartResetsJournalOnRealBoot() async throws {
+        let nativeId = "journal-restart-boot-ctr"
+        let dir = tempDirectory()
+        await seedSharedJournal(dir: dir, nativeId: nativeId, line: "previous boot\n")
+
+        // StaticSnapshotClientMock.restart reports a real boot (true), like
+        // ClientContainerService.restart propagating startInternal's result.
+        let mock = StaticSnapshotClientMock(snapshot: try makeSnapshot(nativeId: nativeId, status: .stopped))
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+            app.storage[EventBroadcasterKey.self] = EventBroadcaster()
+            try app.register(collection: ContainerRestartRoute(client: mock))
+
+            try await app.testing().test(.POST, "/v1.51/containers/\(nativeId)/restart") { res async in
+                #expect(res.status == .noContent)
+            }
+        }
+
+        // The follower arms with a fresh boot, resets the journal, then
+        // winds down on the unavailable log stream.
+        let finished = await waitFor {
+            let armed = await ContainerLogFollowerRegistry.shared.isArmed(nativeId: nativeId)
+            return !armed
+        }
+        #expect(finished)
+
+        let after = await ContainerLogJournal.shared.entries(nativeId: nativeId)
+        #expect(after.isEmpty, "a restart that performed the boot must reset the previous boot's journal")
+
+        await ContainerExitCodeStore.shared.set(id: nativeId, code: 0)
+        await ContainerRestartState.shared.reset(id: nativeId)
+        await ContainerExitCodeStore.shared.remove(id: nativeId)
+    }
+
+    @Test("a /restart that lost a concurrent boot race preserves its log journal")
+    func restartThatLostBootRacePreservesJournal() async throws {
+        let nativeId = "journal-restart-raced-ctr"
+        let dir = tempDirectory()
+        await seedSharedJournal(dir: dir, nativeId: nativeId, line: "current boot\n")
+
+        // The restart succeeds, but its internal start lost the boot race to
+        // a concurrent /start (or the attach route's bootstrap): restart
+        // reports a suppressed no-op. Reading the call's success alone as
+        // "this request booted the container" would cancel the winning
+        // boot's follower and erase/restamp its journal.
+        let mock = SuppressedRestartMock(snapshot: try makeSnapshot(nativeId: nativeId, status: .stopped))
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+            app.storage[EventBroadcasterKey.self] = EventBroadcaster()
+            try app.register(collection: ContainerRestartRoute(client: mock))
+
+            try await app.testing().test(.POST, "/v1.51/containers/\(nativeId)/restart") { res async in
+                #expect(res.status == .noContent)
+            }
+        }
+
+        // The follower resumes the winning boot's journal (no reset) and
+        // winds down on the unavailable log stream.
+        let finished = await waitFor {
+            let armed = await ContainerLogFollowerRegistry.shared.isArmed(nativeId: nativeId)
+            return !armed
+        }
+        #expect(finished)
+
+        let after = await ContainerLogJournal.shared.entries(nativeId: nativeId)
+        #expect(
+            after.map(\.bytes) == [Data("current boot\n".utf8)],
+            "a suppressed no-op restart must not reset the journal of the boot that actually happened")
+
+        await ContainerExitCodeStore.shared.set(id: nativeId, code: 0)
+        await ContainerRestartState.shared.reset(id: nativeId)
+        await ContainerExitCodeStore.shared.remove(id: nativeId)
+    }
+
     /// Mock whose `start` reports a suppressed no-op (this call did not
     /// perform the boot) while the container's observed status was stopped.
     private actor SuppressedStartMock: ClientContainerProtocol {
@@ -189,7 +270,32 @@ struct ContainerLogJournalLifecycleRouteTests {
             return false
         }
         func stop(id: String, signal: String?, timeout: Int?) async throws {}
-        func restart(id: String, signal: String?, timeout: Int?) async throws {}
+        func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool { true }
+        func kill(id: String, signal: String?) async throws {}
+        func delete(id: String) async throws {}
+        func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait {
+            RESTContainerWait(statusCode: 0)
+        }
+        func prune(filters: [String: [String]]) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+            ([], 0)
+        }
+    }
+
+    /// Mock whose `restart` reports a suppressed no-op (the internal start
+    /// lost the boot race to a concurrent caller) while the call itself
+    /// succeeds — the route must key fresh-boot state off this result, not
+    /// off the call succeeding.
+    private actor SuppressedRestartMock: ClientContainerProtocol {
+        private let snapshot: ContainerSnapshot
+        init(snapshot: ContainerSnapshot) {
+            self.snapshot = snapshot
+        }
+        func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { [snapshot] }
+        func getContainer(id: String) async throws -> ContainerSnapshot? { snapshot }
+        nonisolated func enforceContainerRunning(container: ContainerSnapshot) throws {}
+        func start(id: String, detachKeys: String?) async throws -> Bool { true }
+        func stop(id: String, signal: String?, timeout: Int?) async throws {}
+        func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool { false }
         func kill(id: String, signal: String?) async throws {}
         func delete(id: String) async throws {}
         func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait {
@@ -211,7 +317,7 @@ struct ContainerLogJournalLifecycleRouteTests {
         nonisolated func enforceContainerRunning(container: ContainerSnapshot) throws {}
         func start(id: String, detachKeys: String?) async throws -> Bool { true }
         func stop(id: String, signal: String?, timeout: Int?) async throws {}
-        func restart(id: String, signal: String?, timeout: Int?) async throws {}
+        func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool { true }
         func kill(id: String, signal: String?) async throws {}
         func delete(id: String) async throws {}
         func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait {

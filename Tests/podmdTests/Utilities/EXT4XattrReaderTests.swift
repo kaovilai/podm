@@ -20,6 +20,12 @@ struct EXT4XattrReaderTests {
     /// header. Name lengths and padding use UTF-8 BYTE counts — Linux xattr
     /// names need not be ASCII.
     private func inlineRegion(_ attrs: [(index: UInt8, name: String, value: [UInt8])]) -> Data {
+        region(attrs.map { (index: $0.index, nameBytes: Array($0.name.utf8), value: $0.value) })
+    }
+
+    /// Byte-level twin of `inlineRegion` for names that are not valid UTF-8
+    /// (Linux xattr names are arbitrary non-NUL bytes).
+    private func region(_ attrs: [(index: UInt8, nameBytes: [UInt8], value: [UInt8])]) -> Data {
         var buffer = [UInt8](repeating: 0, count: 96)
         func put16(_ value: Int, at index: Int) {
             buffer[index] = UInt8(value & 0xff)
@@ -34,14 +40,14 @@ struct EXT4XattrReaderTests {
         var front = 4
         var end = 96
         for attr in attrs {
-            let nameLength = attr.name.utf8.count
+            let nameLength = attr.nameBytes.count
             let paddedValue = (attr.value.count + 3) & ~3
             end -= paddedValue
             buffer[front] = UInt8(nameLength)
             buffer[front + 1] = attr.index
             put16(end - 4, at: front + 2)  // value offset, relative to magic end
             put32(attr.value.count, at: front + 8)
-            for (i, byte) in attr.name.utf8.enumerated() {
+            for (i, byte) in attr.nameBytes.enumerated() {
                 buffer[front + 16 + i] = byte
             }
             for (i, byte) in attr.value.enumerated() {
@@ -194,6 +200,36 @@ struct EXT4XattrReaderTests {
         let ba = inlineRegion([(index: 1, name: "tägs", value: [2]), (index: 1, name: "étiquette", value: [1])])
         #expect(ab != ba)
         #expect(reader.xattrs(inline: ab, block: 0) == reader.xattrs(inline: ba, block: 0))
+    }
+
+    @Test("non-UTF-8 xattr names decode, and identical raw-byte names do not diverge")
+    func nonUTF8NamesStayByteIdentified() throws {
+        let (fixture, _, reader) = try makeReader()
+        defer { fixture.cleanUp() }
+
+        // A suffix containing 0xFF is not valid UTF-8, but Linux treats it
+        // as an ordinary byte identifier: rejecting it made the whole set
+        // unreadable, so an unchanged attribute was reported as Modified.
+        // `XattrName` keys on the raw bytes, so the name must round-trip
+        // exactly.
+        let suffix: [UInt8] = [0x66, 0x6F, 0x6F, 0xFF]  // "foo" + 0xFF
+        let tagged = region([(index: 1, nameBytes: suffix, value: [1, 2, 3, 4])])
+        #expect(
+            reader.xattrs(inline: tagged, block: 0)
+                == [EXT4XattrReader.XattrName(nameIndex: 1, nameBytes: suffix): Data([1, 2, 3, 4])])
+
+        // Two differently laid-out regions holding the same raw-byte set
+        // decode equal — the walker compares decoded sets, so an unchanged
+        // non-UTF-8 attribute is NOT a change.
+        let other: [UInt8] = [0x62, 0xFF]  // "b" + 0xFF — distinct raw-byte name
+        let ab = region([(index: 1, nameBytes: suffix, value: [1]), (index: 1, nameBytes: other, value: [2])])
+        let ba = region([(index: 1, nameBytes: other, value: [2]), (index: 1, nameBytes: suffix, value: [1])])
+        #expect(ab != ba)
+        #expect(reader.xattrs(inline: ab, block: 0) == reader.xattrs(inline: ba, block: 0))
+
+        // The two distinct raw-byte names stay two entries (a lossy String
+        // decode would have folded or dropped them).
+        #expect(reader.xattrs(inline: ab, block: 0)?.count == 2)
     }
 
     @Test("canonically equivalent Unicode spellings are distinct attributes")

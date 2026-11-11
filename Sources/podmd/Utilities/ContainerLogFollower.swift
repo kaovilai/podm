@@ -218,13 +218,18 @@ enum ContainerLogFollower {
             /// retaining its payload: consume the journal's existing gap
             /// marker (this boot already recorded one — a resume re-reading
             /// the same oversized line), or append a new marker so later
-            /// alignments can consume the line's ordinal.
+            /// alignments can consume the line's ordinal. An EVICTED result
+            /// is equally accounted: the line's marker was evicted by the
+            /// cap, and the evicted-prefix count already covers the line —
+            /// appending a marker here would double-count its ordinal.
             func markOversizedLine() {
-                if alignment.consumeGapMarker() != nil {
-                    // Already accounted by the persisted marker.
-                } else {
+                if case .fresh = alignment.consumeGapMarker() {
                     fresh.append(ContainerLogJournal.Entry.gapMarker(unixNano: ContainerLogJournal.currentUnixNano()))
                 }
+                // .covered and .evicted are both already accounted — by the
+                // persisted marker, or by the evicted prefix the cap took
+                // the marker with; appending a marker here would
+                // double-count the line's ordinal.
                 linesConsumedUnretained += 1
             }
 

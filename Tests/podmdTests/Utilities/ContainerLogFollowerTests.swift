@@ -42,7 +42,7 @@ struct ContainerLogFollowerTests {
         func enforceContainerRunning(container: ContainerSnapshot) throws {}
         func start(id: String, detachKeys: String?) async throws -> Bool { true }
         func stop(id: String, signal: String?, timeout: Int?) async throws {}
-        func restart(id: String, signal: String?, timeout: Int?) async throws {}
+        func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool { true }
         func kill(id: String, signal: String?) async throws {}
         func delete(id: String) async throws {}
         func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait {
@@ -163,12 +163,14 @@ struct ContainerLogFollowerTests {
     /// Seeds `journal` (a fresh instance over `dir`, as after a daemon
     /// restart) with `lines` under epoch 1, then returns the instance a
     /// resumed follower would use.
-    private func seedJournal(dir: URL, nativeId: String, lines: [(nano: UInt64, line: String)]) async
+    private func seedJournal(
+        dir: URL, nativeId: String, lines: [(nano: UInt64, line: String)], droppedLines: Int = 0
+    ) async
         -> ContainerLogJournal
     {
         let seeder = ContainerLogJournal()
         await seeder.configure(storageDirectory: dir)
-        await seeder.beginBoot(nativeId: nativeId, epoch: 1)
+        await seeder.beginBoot(nativeId: nativeId, epoch: 1, droppedLines: droppedLines)
         await seeder.append(
             nativeId: nativeId, epoch: 1,
             lines.map { ContainerLogJournal.Entry(unixNano: $0.nano, streamType: 1, bytes: Data($0.line.utf8)) })
@@ -507,6 +509,52 @@ struct ContainerLogFollowerTests {
         #expect(entries[0].isGapMarker)
         #expect(entries[0].unixNano == 111, "the persisted marker is consumed, not replaced")
         #expect(Array(entries.map(\.bytes).suffix(2)) == [Data("covered\n".utf8), Data("more\n".utf8)])
+    }
+
+    @Test("a resumed follower does not re-mark an oversized line whose marker the cap evicted")
+    func resumeWithEvictedMarkerDoesNotDuplicate() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("output.log")
+        // The boot's output: one oversized line whose gap marker the cap
+        // EVICTED (only the dropped-lines count accounts it) plus one
+        // normal line the journal retains.
+        var contents = Data(repeating: 0x78, count: ContainerLogFollower.maxPendingLineBytes + (1 << 18))
+        contents.append(Data("\ncovered\n".utf8))
+        FileManager.default.createFile(atPath: logFile.path, contents: contents)
+
+        let journal = await seedJournal(
+            dir: dir, nativeId: "resume-evicted-marker-ctr",
+            lines: [(222, "covered\n")], droppedLines: 1)
+
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        await registry.arm(
+            nativeId: "resume-evicted-marker-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: false,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+
+        // The resumed follower re-reads the oversized line: the evicted
+        // prefix already accounts it, so NO marker may be appended — a
+        // duplicate marker would double-count its ordinal and misalign the
+        // covered line behind it. Give the resume a poll pass to process
+        // the stream, then stop the container.
+        try await Task.sleep(for: .milliseconds(600))
+        client.stopContainer()
+        _ = await waitFor {
+            let armed = await registry.isArmed(nativeId: "resume-evicted-marker-ctr")
+            return !armed
+        }
+
+        let entries = await journal.entries(nativeId: "resume-evicted-marker-ctr")
+        #expect(
+            entries.count == 1,
+            "no duplicate marker for the evicted oversized line, no re-journaled covered line")
+        #expect(!entries.contains { $0.isGapMarker }, "the evicted prefix already accounts the oversized line")
+        #expect(entries.first?.bytes == Data("covered\n".utf8))
     }
 
     // MARK: - Stale-journal heal ordering

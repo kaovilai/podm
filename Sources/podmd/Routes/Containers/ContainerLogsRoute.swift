@@ -347,25 +347,189 @@ extension ContainerLogsRoute {
         return Data(remaining)
     }
 
+    /// The `tail` ring of `scanWindowedBacklog`: the last N passing LOGICAL
+    /// lines. A spilled oversized line counts as ONE entry — its fragments
+    /// are written to a lazily-created temp file and the entry holds their
+    /// byte range, so reading the line back at emission keeps memory
+    /// bounded by the retention bound rather than by the (unbounded) length
+    /// of a selected line. While a spilled line is still open (its
+    /// terminating newline has not been scanned yet), continuation
+    /// fragments extend the open entry in place: no other line can arrive
+    /// between a line's fragments, so an oversized line can never evict its
+    /// own head — a selected line is always emitted whole or not at all.
+    private struct WindowTailRing {
+        /// How an accepted line/fragment lands in the ring.
+        enum Position {
+            /// A normal, retention-bounded line held in memory.
+            case inline
+            /// A complete oversized line (newline included) — one entry, closed.
+            case completeSpill
+            /// The first fragment of an oversized line still being spilled.
+            case spillHead
+            /// A later fragment (terminating newline or EOF) of the line
+            /// opened by `spillHead`.
+            case spillContinuation
+        }
+
+        private enum Entry {
+            case inline(Data)
+            /// One logical line's byte range in the spill file.
+            case spilled(offset: Int, length: Int)
+        }
+
+        private var entries: [(line: Entry, unixNano: UInt64)] = []
+        private var head = 0
+        private let limit: Int
+        /// The index of the open spilled entry — the oversized line whose
+        /// fragments are still arriving — nil once it closed, or once the
+        /// cap evicted it (which drops the line's remaining fragments too:
+        /// a partially-evicted line must not be emitted).
+        private var openSpill: Int?
+        private var spill: FileHandle?
+        private var spillURL: URL?
+        private var spillBytes = 0
+
+        /// Reading a spilled line back in chunks keeps the emission path's
+        /// memory bounded too — no frame ever holds a whole oversized line.
+        private static let spillReadChunkBytes = 256 * 1024
+
+        init(limit: Int) {
+            self.limit = limit
+        }
+
+        /// Appends one accepted line (or fragment) as a new logical-line
+        /// entry, or extends the open spilled entry.
+        mutating func append(_ line: Data, unixNano: UInt64, position: Position) throws {
+            switch position {
+            case .inline:
+                entries.append((.inline(line), unixNano))
+                evict()
+            case .completeSpill, .spillHead:
+                let offset = try writeSpill(line)
+                entries.append((.spilled(offset: offset, length: line.count), unixNano))
+                if position == .spillHead {
+                    openSpill = entries.count - 1
+                }
+                evict()
+            case .spillContinuation:
+                // The head fragment may already have been evicted (a tail
+                // count smaller than the number of logical lines): the
+                // selected line is gone, and so are its remaining fragments.
+                guard let open = openSpill, case .spilled(let offset, let length) = entries[open].line else {
+                    return
+                }
+                try writeSpill(line)
+                entries[open].line = .spilled(offset: offset, length: length + line.count)
+            }
+        }
+
+        /// Emits the retained entries — the last `limit` logical lines, the
+        /// spilled ones streamed back from the temp file in bounded chunks
+        /// (timestamped once, on the line's first chunk).
+        mutating func emit(
+            ttyMode: Bool, timestamps: Bool, emit: (ByteBuffer) async throws -> Void
+        ) async throws {
+            guard head < entries.count else { return }
+            // All writes are done: hand the spill file over to reading.
+            if let spill {
+                try spill.close()
+                self.spill = nil
+            }
+            for (line, unixNano) in entries[head...] {
+                switch line {
+                case .inline(let data):
+                    try await emit(stampedFrame(data, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
+                case .spilled(let offset, let length):
+                    let handle = try openSpillForReading()
+                    try handle.seek(toOffset: UInt64(offset))
+                    var remaining = length
+                    var first = true
+                    while remaining > 0 {
+                        let want = min(remaining, Self.spillReadChunkBytes)
+                        guard let chunk = try handle.read(upToCount: want), chunk.count == want else {
+                            throw Abort(.internalServerError, reason: "log tail spill file could not be read back")
+                        }
+                        remaining -= want
+                        try await emit(
+                            stampedFrame(chunk, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps && first))
+                        first = false
+                    }
+                }
+            }
+        }
+
+        /// Closes and removes the spill file, if one was created.
+        mutating func cleanUp() {
+            if let spill { try? spill.close() }
+            spill = nil
+            if let spillURL { try? FileManager.default.removeItem(at: spillURL) }
+            spillURL = nil
+        }
+
+        /// Evicts whole entries past `limit` (the dead prefix is compacted
+        /// in bulk, so a large `tail` over a huge window does not shift the
+        /// window on every accepted line), invalidating an open spill the
+        /// prefix swallowed.
+        private mutating func evict() {
+            if entries.count - head > limit { head += 1 }
+            if let open = openSpill, open < head { openSpill = nil }
+            if head > max(limit, 1024) {
+                let removed = head
+                entries.removeFirst(removed)
+                head = 0
+                openSpill = openSpill.map { $0 - removed }
+            }
+        }
+
+        @discardableResult
+        private mutating func writeSpill(_ fragment: Data) throws -> Int {
+            if spill == nil {
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("podm-log-tail-\(UUID().uuidString)")
+                guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+                    throw Abort(.internalServerError, reason: "could not create log tail spill file")
+                }
+                spill = try FileHandle(forWritingTo: url)
+                spillURL = url
+            }
+            let offset = spillBytes
+            try spill?.write(contentsOf: fragment)
+            spillBytes += fragment.count
+            return offset
+        }
+
+        private mutating func openSpillForReading() throws -> FileHandle {
+            if let spill { return spill }
+            guard let spillURL else {
+                throw Abort(.internalServerError, reason: "log tail spill file is missing")
+            }
+            let handle = try FileHandle(forReadingFrom: spillURL)
+            spill = handle
+            return handle
+        }
+    }
+
     /// Reads the Apple log stream through once, resolving each complete line's
     /// write time from the journal (falling back to read time for lines the
     /// journal does not cover), applying the `since`/`until` window, and
     /// emitting passing lines as framed output. With `tail` set the passing
-    /// lines are kept in a ring and emitted at the end — moby applies `tail` to
-    /// the window-filtered set — bounded by the tail count; without it they are
-    /// emitted as they are scanned, so memory stays bounded by the window
-    /// rather than the whole log. The ring is a head-indexed array (the dead
-    /// prefix is compacted in bulk), so a large `tail` over a huge window does
-    /// not shift the window on every accepted line.
+    /// LOGICAL lines are kept in a ring and emitted at the end — moby applies
+    /// `tail` to the window-filtered set — bounded by the tail count, and
+    /// counting a spilled oversized line as ONE line (see `WindowTailRing`);
+    /// without it they are emitted as they are scanned, so memory stays
+    /// bounded by the window rather than the whole log.
     ///
     /// An unterminated line is spilled at `ContainerLogFollower.maxPendingLineBytes`
     /// — the same bound the journal follower discards at: the accumulated
     /// bytes are emitted (preserving the requested output) instead of
     /// buffered, so a newline-free stream cannot grow memory without limit.
     /// A line beyond the bound is one the journal recorded as a gap marker
-    /// (never its payload): its first fragment consumes the marker and the
-    /// rest bypass alignment, so the lines after it keep their recorded
-    /// timestamps.
+    /// (never its payload): its first fragment consumes the marker — or the
+    /// evicted ordinal, when the cap took the marker — and fixes the line's
+    /// write time AND window decision for the whole logical line, so every
+    /// later fragment (and the terminating fragment, and EOF) is judged by
+    /// the same time: an in-window head can never be followed by a dropped
+    /// tail, which would silently lose the line's remaining bytes.
     ///
     /// Returns the trailing partial line, like `processDockerLogFrames`, so a
     /// follow can carry it onward — unless `streamEnded` is set (no follow will
@@ -387,30 +551,28 @@ extension ContainerLogsRoute {
         emit: (ByteBuffer) async throws -> Void
     ) async throws -> Data {
         var alignment = ContainerLogJournal.Alignment(entries: journal.entries, droppedLines: journal.droppedLines)
-        var ring: [(line: Data, unixNano: UInt64)] = []
-        var ringHead = 0
+        var ring = tail.map { WindowTailRing(limit: $0) }
+        defer { ring?.cleanUp() }
         var pending = Data()
         // True while `pending` holds the continuation of an oversized line
         // whose head bytes were already spilled: every fragment up to (and
         // including) the terminating newline bypasses journal alignment —
-        // the journal holds a gap marker, not content, for that line.
+        // the journal holds a gap marker (or an evicted ordinal), not
+        // content, for that line.
         var inOversizedLine = false
+        // The write time resolved for the logical line currently spilling:
+        // fixed at its first fragment and reused by every later fragment,
+        // so the whole line shares one window decision.
+        var oversizedLineNano: UInt64?
 
         /// Applies the since/until window to one accepted line (or fragment
         /// of an oversized line) and emits it, or holds it in the tail ring.
-        func accept(_ line: Data, unixNano: UInt64) async throws {
+        func accept(_ line: Data, unixNano: UInt64, position: WindowTailRing.Position = .inline) async throws {
             // moby: lines written before `since` or after `until` are dropped.
             if let since, unixNano < since { return }
             if let until, unixNano > until { return }
-            if let tail {
-                ring.append((line, unixNano))
-                if ring.count - ringHead > tail { ringHead += 1 }
-                // Compact the dead prefix in bulk once it outgrows the
-                // live window, so the array stays ~2x tail at most.
-                if ringHead > max(tail, 1024) {
-                    ring.removeFirst(ringHead)
-                    ringHead = 0
-                }
+            if ring != nil {
+                try ring?.append(line, unixNano: unixNano, position: position)
             } else {
                 try await emit(stampedFrame(line, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
             }
@@ -423,20 +585,23 @@ extension ContainerLogsRoute {
                 pending = pending.subdata(in: pending.index(after: newline)..<pending.endIndex)
                 if inOversizedLine {
                     // Final fragment of a spilled oversized line: no journal
-                    // alignment applies — the marker was consumed by the
-                    // line's first fragment.
+                    // alignment applies — the marker (or evicted ordinal) was
+                    // consumed by the line's first fragment — and the window
+                    // decision fixed there holds for this fragment too.
                     inOversizedLine = false
-                    try await accept(line, unixNano: nowNanos())
+                    let unixNano = oversizedLineNano ?? nowNanos()
+                    oversizedLineNano = nil
+                    try await accept(line, unixNano: unixNano, position: .spillContinuation)
                     continue
                 }
                 if line.count > ContainerLogFollower.maxPendingLineBytes {
                     // A complete line beyond the bound (its newline arrived in
                     // the same chunk that crossed it). The journal recorded a
-                    // gap marker, not this payload: consume the marker —
-                    // keeping later lines alignable — and window the line with
-                    // the marker's (or the read) time.
-                    let markerNano = alignment.consumeGapMarker()
-                    try await accept(line, unixNano: markerNano ?? nowNanos())
+                    // gap marker (or an evicted ordinal), not this payload:
+                    // consume it — keeping later lines alignable — and window
+                    // the line with its recorded (or the read) time.
+                    let unixNano = alignment.consumeGapMarker().recordedNano ?? nowNanos()
+                    try await accept(line, unixNano: unixNano, position: .completeSpill)
                     continue
                 }
                 let unixNano = alignment.timestamp(for: line) ?? nowNanos()
@@ -445,11 +610,16 @@ extension ContainerLogsRoute {
             if pending.count > ContainerLogFollower.maxPendingLineBytes {
                 // Spill the head of an unterminated line at the bound: emit
                 // the accumulated bytes instead of buffering them further.
-                // The line's first fragment consumes any journal gap marker;
-                // the rest bypass alignment until the terminating newline.
-                let markerNano = inOversizedLine ? nil : alignment.consumeGapMarker()
-                inOversizedLine = true
-                try await accept(pending, unixNano: markerNano ?? nowNanos())
+                // The line's FIRST fragment fixes the write time and window
+                // decision for the whole logical line.
+                if inOversizedLine {
+                    try await accept(pending, unixNano: oversizedLineNano ?? nowNanos(), position: .spillContinuation)
+                } else {
+                    let unixNano = alignment.consumeGapMarker().recordedNano ?? nowNanos()
+                    oversizedLineNano = unixNano
+                    try await accept(pending, unixNano: unixNano, position: .spillHead)
+                    inOversizedLine = true
+                }
                 pending.removeAll(keepingCapacity: true)
             }
         }
@@ -457,22 +627,17 @@ extension ContainerLogsRoute {
             // The stream genuinely ends here: the unterminated trailing line is
             // the log's final line, not a mid-write gap — window it and count
             // it toward the tail limit before the retained tail is emitted.
-            let unixNano = nowNanos()
-            let passesWindow = (since.map { unixNano >= $0 } ?? true) && (until.map { unixNano <= $0 } ?? true)
-            if passesWindow {
-                if let tail {
-                    ring.append((pending, unixNano))
-                    if ring.count - ringHead > tail { ringHead += 1 }
-                } else {
-                    try await emit(stampedFrame(pending, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
-                }
+            // A spilled line's final fragment keeps the line's fixed write
+            // time and window decision, like every other fragment.
+            if inOversizedLine {
+                try await accept(pending, unixNano: oversizedLineNano ?? nowNanos(), position: .spillContinuation)
+            } else {
+                try await accept(pending, unixNano: nowNanos())
             }
             pending.removeAll()
         }
-        if ringHead < ring.count {
-            for (line, unixNano) in ring[ringHead...] {
-                try await emit(stampedFrame(line, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
-            }
+        if ring != nil {
+            try await ring?.emit(ttyMode: ttyMode, timestamps: timestamps, emit: emit)
         }
         return pending
     }

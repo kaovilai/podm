@@ -177,6 +177,11 @@ actor ContainerLogJournal {
         state.entries = []
         state.totalFramedBytes = 0
         state.droppedLines = droppedLines
+        // The closed handle must NOT survive into the new State: `persist`
+        // would skip reopening and write through the dead descriptor, so
+        // the new boot's entries would live only in memory until a cap
+        // rewrite happened to reopen the file.
+        state.fileHandle = nil
         states[nativeId] = state
         do {
             try FileManager.default.removeItem(at: fileURL(nativeId))
@@ -416,6 +421,12 @@ extension ContainerLogJournal {
             /// failed) — a follower records it, a reader falls back to read
             /// time.
             case fresh
+
+            /// The journal-recorded time, when this line is covered by one.
+            var recordedNano: UInt64? {
+                if case .covered(let unixNano) = self { return unixNano }
+                return nil
+            }
         }
 
         mutating func classify(_ line: Data) -> Coverage {
@@ -449,14 +460,28 @@ extension ContainerLogJournal {
         /// the payload, so the entries behind it stay aligned. Without the
         /// consumption, the oversized stream line would be compared against
         /// the NEXT retained entry, fail, and disable timestamp recovery for
-        /// every later line. Returns the marker's recorded time, or nil when
-        /// no marker is at the head (the journal does not cover this line —
-        /// follower behind, or a pre-marker journal).
-        mutating func consumeGapMarker() -> UInt64? {
-            guard usable, index < entries.count, entries[index].isGapMarker else { return nil }
+        /// every later line.
+        ///
+        /// The oversized line may instead sit in the EVICTED prefix — the
+        /// cap evicted its marker along with it. That ordinal is consumed
+        /// here too (classify never sees this line), or the next retained
+        /// line would classify as evicted and lose its recorded timestamp,
+        /// and a resumed follower would append a duplicate marker for a
+        /// line the evicted prefix already accounts. Returns `.covered`
+        /// with the marker's recorded time, `.evicted` when the line was in
+        /// the evicted prefix (already accounted, no time recoverable), or
+        /// `.fresh` when no marker is at the head (the journal does not
+        /// cover this line — follower behind, or a pre-marker journal).
+        mutating func consumeGapMarker() -> Coverage {
+            guard usable else { return .fresh }
+            if skipped < droppedLines {
+                skipped += 1
+                return .evicted
+            }
+            guard index < entries.count, entries[index].isGapMarker else { return .fresh }
             let unixNano = entries[index].unixNano
             index += 1
-            return unixNano
+            return .covered(unixNano)
         }
 
         /// Whether a content mismatch has disabled matching — the journal is

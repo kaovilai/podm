@@ -57,7 +57,7 @@ struct ContainerTopRouteTests {
         }
         func start(id: String, detachKeys: String?) async throws -> Bool { true }
         func stop(id: String, signal: String?, timeout: Int?) async throws {}
-        func restart(id: String, signal: String?, timeout: Int?) async throws {}
+        func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool { true }
         func kill(id: String, signal: String?) async throws {}
         func delete(id: String) async throws {}
         func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait {

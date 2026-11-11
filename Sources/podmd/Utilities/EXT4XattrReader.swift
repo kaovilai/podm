@@ -209,15 +209,12 @@ final class EXT4XattrReader {
             guard nameEnd <= buffer.count else {
                 throw Error.malformed("xattr name overruns region")
             }
-            // Linux xattr names are arbitrary non-NUL bytes and need not be
-            // ASCII (`user.étiquette` is a legal name). UTF-8 keeps the name
-            // byte-preserving for every valid sequence — two files with the
-            // same name decode equal, so an unchanged non-ASCII attribute is
-            // not reported as Modified. Bytes that are not valid UTF-8 cannot
-            // round-trip through String; surface those as unreadable.
-            guard String(bytes: buffer[nameStart..<nameEnd], encoding: .utf8) != nil else {
-                throw Error.malformed("xattr name is not valid UTF-8")
-            }
+            // Linux xattr names are arbitrary non-NUL bytes: they need not
+            // be ASCII (`user.étiquette` is legal) nor valid UTF-8 at all.
+            // `XattrName` keys on the RAW bytes, so every byte spelling —
+            // including invalid-UTF-8 ones like a 0xFF suffix — round-trips
+            // exactly: two files with the same raw-byte name decode equal,
+            // and an unchanged attribute is not reported as Modified.
             if valueInum != 0 {
                 // Large values in dedicated inodes (ext4 ea_inode feature).
                 // The package cannot read these either; surface as unreadable

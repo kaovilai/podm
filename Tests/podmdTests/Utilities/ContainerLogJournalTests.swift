@@ -178,6 +178,29 @@ struct ContainerLogJournalTests {
         #expect(afterReload.isEmpty)
     }
 
+    @Test("an append after a same-instance beginBoot persists through a reopened handle")
+    func appendAfterBeginBootPersists() async {
+        let dir = tempDirectory()
+        let journal = ContainerLogJournal()
+        await journal.configure(storageDirectory: dir)
+        await journal.beginBoot(nativeId: "ctr", epoch: 1)
+        await journal.append(nativeId: "ctr", epoch: 1, [entry(100, "first boot\n")])
+
+        // A new boot on the SAME journal instance: the reset closes the old
+        // write handle, and the new State must not carry the closed handle
+        // over — or the new boot's appends write through a dead descriptor
+        // and survive only in memory until a cap rewrite.
+        await journal.beginBoot(nativeId: "ctr", epoch: 2)
+        await journal.append(nativeId: "ctr", epoch: 2, [entry(200, "second boot\n")])
+
+        let reloaded = ContainerLogJournal()
+        await reloaded.configure(storageDirectory: dir)
+        let replayed = await reloaded.entries(nativeId: "ctr")
+        #expect(
+            replayed.map(\.bytes) == [Data("second boot\n".utf8)],
+            "the new boot's entries must hit disk, not just the in-memory state")
+    }
+
     @Test("resumeBoot adopts the persisted journal without dropping entries")
     func resumeBootPreserves() async {
         let dir = tempDirectory()
@@ -306,5 +329,39 @@ struct ContainerLogJournalTests {
             Issue.record("the retained suffix line must classify as covered with its timestamp")
             return
         }
+    }
+
+    @Test("consumeGapMarker consumes evicted ordinals and distinguishes them from fresh lines")
+    func consumeGapMarkerEvictedPrefix() {
+        // The cap evicted the oversized line's gap marker: droppedLines
+        // accounts the line, and the retained suffix starts at a normal
+        // entry. The oversized line's consumption must take the evicted
+        // ordinal — or the NEXT retained line would classify as evicted and
+        // lose its recorded timestamp.
+        let retained = [entry(300, "c\n")]
+        var evicted = ContainerLogJournal.Alignment(entries: retained, droppedLines: 1)
+        guard case .evicted = evicted.consumeGapMarker() else {
+            Issue.record("an oversized line in the evicted prefix must be reported evicted, not fresh")
+            return
+        }
+        #expect(!evicted.failed)
+        #expect(evicted.timestamp(for: Data("c\n".utf8)) == 300, "the retained line behind the evicted marker must stay covered")
+
+        // A retained marker at the head still reports its recorded time.
+        var withMarker = ContainerLogJournal.Alignment(
+            entries: [ContainerLogJournal.Entry.gapMarker(unixNano: 100)] + retained)
+        guard case .covered(100) = withMarker.consumeGapMarker() else {
+            Issue.record("the retained gap marker must report its recorded time")
+            return
+        }
+        #expect(withMarker.timestamp(for: Data("c\n".utf8)) == 300)
+
+        // Nothing at the head (follower behind): fresh, alignment usable.
+        var uncovered = ContainerLogJournal.Alignment(entries: retained)
+        guard case .fresh = uncovered.consumeGapMarker() else {
+            Issue.record("an uncovered oversized line must be reported fresh")
+            return
+        }
+        #expect(!uncovered.failed)
     }
 }

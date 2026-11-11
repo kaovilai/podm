@@ -356,6 +356,149 @@ struct ContainerLogsWindowTests {
         #expect(!payloads.isEmpty, "the oversized line's spilled bytes are still emitted (marker time 100)")
     }
 
+    /// `tail` counts LOGICAL lines: a spilled oversized line is ONE tail
+    /// entry whose complete bytes are emitted when it is the selected line
+    /// — counting each spilled fragment as its own tail line evicted the
+    /// line's head and returned only its final fragment.
+    @Test("tail counts a spilled oversized line as one logical line, emitted whole")
+    func tailCountsSpilledLineAsOne() async throws {
+        let bound = ContainerLogFollower.maxPendingLineBytes
+        var line = Data(repeating: 0x78, count: bound + (1 << 18))  // no newline inside
+        line.append(Data("\n".utf8))
+        var stream = Data("before\n".utf8)
+        stream.append(line)
+
+        var offset = 0
+        var payloads: [Data] = []
+        _ = try await ContainerLogsRoute.scanWindowedBacklog(
+            read: {
+                guard offset < stream.count else { return nil }
+                let next = min(offset + 4096, stream.count)
+                defer { offset = next }
+                return stream[offset..<next]
+            },
+            journal: ContainerLogJournal.Contents(),
+            since: nil,
+            until: nil,
+            tail: 1,
+            ttyMode: true,
+            timestamps: false,
+            nowNanos: { 999 },
+            streamEnded: true
+        ) { frame in
+            var frame = frame
+            payloads.append(frame.readData(length: frame.readableBytes)!)
+        }
+
+        // The oversized line is the last logical line, so tail=1 selects it
+        // in full — head fragment, middle fragments, terminating newline —
+        // and the earlier "before" line is evicted as a whole line.
+        #expect(
+            payloads.reduce(0) { $0 + $1.count } == line.count,
+            "the whole selected line must be emitted byte for byte, not just its final fragment")
+        #expect(payloads.last?.last == 0x0A, "the selected line's terminating newline must be emitted")
+        #expect(payloads.count >= 2, "the line was spilled across fragments, not buffered whole")
+    }
+
+    /// The whole spilled line shares ONE window decision, fixed at its
+    /// first fragment: later fragments, the terminating fragment and the
+    /// EOF tail must not be restamped with read time — restamping dropped
+    /// them (newline included) whenever the read time fell outside the
+    /// window.
+    @Test("a spilled line keeps its first fragment's window decision across all fragments and EOF")
+    func spilledLineKeepsOneWindowDecision() async throws {
+        let bound = ContainerLogFollower.maxPendingLineBytes
+        // The journal recorded the oversized line as a gap marker at 100;
+        // the marker time is in-window, the read time (999) is not.
+        let fixture = ContainerLogJournal.Contents(
+            entries: [ContainerLogJournal.Entry.gapMarker(unixNano: 100)])
+
+        func scan(_ stream: Data) async throws -> [Data] {
+            var offset = 0
+            var payloads: [Data] = []
+            _ = try await ContainerLogsRoute.scanWindowedBacklog(
+                read: {
+                    guard offset < stream.count else { return nil }
+                    let next = min(offset + 4096, stream.count)
+                    defer { offset = next }
+                    return stream[offset..<next]
+                },
+                journal: fixture,
+                since: nil,
+                until: 250,
+                tail: nil,
+                ttyMode: true,
+                timestamps: false,
+                nowNanos: { 999 },
+                streamEnded: true
+            ) { frame in
+                var frame = frame
+                payloads.append(frame.readData(length: frame.readableBytes)!)
+            }
+            return payloads
+        }
+
+        // Terminated line: every fragment INCLUDING the terminating newline
+        // passes the window on the marker's time (100), never read time.
+        var terminated = Data(repeating: 0x78, count: bound + (1 << 18))
+        terminated.append(Data("\n".utf8))
+        let terminatedPayloads = try await scan(terminated)
+        #expect(
+            terminatedPayloads.reduce(0) { $0 + $1.count } == terminated.count,
+            "no byte of the in-window line may be dropped, its newline included")
+        #expect(terminatedPayloads.last?.last == 0x0A, "the terminating newline must be emitted")
+
+        // Unterminated final line: the stream ends while the line is open —
+        // its EOF fragment is judged by the same fixed time, not flush time.
+        let open = Data(repeating: 0x78, count: bound + (1 << 18))
+        let openPayloads = try await scan(open)
+        #expect(
+            openPayloads.reduce(0) { $0 + $1.count } == open.count,
+            "the EOF fragment keeps the line's fixed window decision")
+    }
+
+    /// The oversized line may sit in the journal's EVICTED prefix (the cap
+    /// evicted its marker): consuming that ordinal keeps the next retained
+    /// line aligned — without it, the retained line classified as evicted,
+    /// lost its recorded timestamp, and fell to read time.
+    @Test("an evicted oversized line consumes its ordinal so the next retained line keeps its timestamp")
+    func evictedOversizedLineConsumesItsOrdinal() async throws {
+        let bound = ContainerLogFollower.maxPendingLineBytes
+        var stream = Data(repeating: 0x78, count: bound + (1 << 18))
+        stream.append(Data("\nafter\n".utf8))
+        // The cap evicted the oversized line's gap marker: droppedLines
+        // accounts it, and only the following line is retained.
+        let fixture = ContainerLogJournal.Contents(
+            entries: [ContainerLogJournal.Entry(unixNano: 200, streamType: 1, bytes: Data("after\n".utf8))],
+            droppedLines: 1)
+
+        var offset = 0
+        var payloads: [Data] = []
+        _ = try await ContainerLogsRoute.scanWindowedBacklog(
+            read: {
+                guard offset < stream.count else { return nil }
+                let next = min(offset + 4096, stream.count)
+                defer { offset = next }
+                return stream[offset..<next]
+            },
+            journal: fixture,
+            since: nil,
+            until: 250,  // journal time 200 passes; read time 999 would not
+            tail: nil,
+            ttyMode: true,
+            timestamps: false,
+            nowNanos: { 999 },
+            streamEnded: true
+        ) { frame in
+            var frame = frame
+            payloads.append(frame.readData(length: frame.readableBytes)!)
+        }
+
+        #expect(
+            payloads == [Data("after\n".utf8)],
+            "the retained line behind the evicted oversized one must keep its journal time (200)")
+    }
+
     @Test("a follow batch spills an oversized unterminated line instead of buffering it")
     func followBatchSpillsOversizedLine() throws {
         let bound = ContainerLogFollower.maxPendingLineBytes
@@ -452,7 +595,7 @@ private struct WindowContainerMock: ClientContainerProtocol {
     func enforceContainerRunning(container: ContainerSnapshot) throws {}
     func start(id: String, detachKeys: String?) async throws -> Bool { true }
     func stop(id: String, signal: String?, timeout: Int?) async throws {}
-    func restart(id: String, signal: String?, timeout: Int?) async throws {}
+    func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool { true }
     func kill(id: String, signal: String?) async throws {}
     func delete(id: String) async throws {}
     func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait {
