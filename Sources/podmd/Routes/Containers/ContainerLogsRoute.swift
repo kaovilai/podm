@@ -358,6 +358,15 @@ extension ContainerLogsRoute {
     /// prefix is compacted in bulk), so a large `tail` over a huge window does
     /// not shift the window on every accepted line.
     ///
+    /// An unterminated line is spilled at `ContainerLogFollower.maxPendingLineBytes`
+    /// — the same bound the journal follower discards at: the accumulated
+    /// bytes are emitted (preserving the requested output) instead of
+    /// buffered, so a newline-free stream cannot grow memory without limit.
+    /// A line beyond the bound is one the journal recorded as a gap marker
+    /// (never its payload): its first fragment consumes the marker and the
+    /// rest bypass alignment, so the lines after it keep their recorded
+    /// timestamps.
+    ///
     /// Returns the trailing partial line, like `processDockerLogFrames`, so a
     /// follow can carry it onward — unless `streamEnded` is set (no follow will
     /// run), in which case the partial line is a genuine final line: it passes
@@ -381,27 +390,67 @@ extension ContainerLogsRoute {
         var ring: [(line: Data, unixNano: UInt64)] = []
         var ringHead = 0
         var pending = Data()
+        // True while `pending` holds the continuation of an oversized line
+        // whose head bytes were already spilled: every fragment up to (and
+        // including) the terminating newline bypasses journal alignment —
+        // the journal holds a gap marker, not content, for that line.
+        var inOversizedLine = false
+
+        /// Applies the since/until window to one accepted line (or fragment
+        /// of an oversized line) and emits it, or holds it in the tail ring.
+        func accept(_ line: Data, unixNano: UInt64) async throws {
+            // moby: lines written before `since` or after `until` are dropped.
+            if let since, unixNano < since { return }
+            if let until, unixNano > until { return }
+            if let tail {
+                ring.append((line, unixNano))
+                if ring.count - ringHead > tail { ringHead += 1 }
+                // Compact the dead prefix in bulk once it outgrows the
+                // live window, so the array stays ~2x tail at most.
+                if ringHead > max(tail, 1024) {
+                    ring.removeFirst(ringHead)
+                    ringHead = 0
+                }
+            } else {
+                try await emit(stampedFrame(line, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
+            }
+        }
+
         while let chunk = try read(), !chunk.isEmpty {
             pending.append(chunk)
             while let newline = pending.firstIndex(of: 0x0A) {
                 let line = pending.subdata(in: pending.startIndex..<pending.index(after: newline))
                 pending = pending.subdata(in: pending.index(after: newline)..<pending.endIndex)
-                let unixNano = alignment.timestamp(for: line) ?? nowNanos()
-                // moby: lines written before `since` or after `until` are dropped.
-                if let since, unixNano < since { continue }
-                if let until, unixNano > until { continue }
-                if let tail {
-                    ring.append((line, unixNano))
-                    if ring.count - ringHead > tail { ringHead += 1 }
-                    // Compact the dead prefix in bulk once it outgrows the
-                    // live window, so the array stays ~2x tail at most.
-                    if ringHead > max(tail, 1024) {
-                        ring.removeFirst(ringHead)
-                        ringHead = 0
-                    }
-                } else {
-                    try await emit(stampedFrame(line, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
+                if inOversizedLine {
+                    // Final fragment of a spilled oversized line: no journal
+                    // alignment applies — the marker was consumed by the
+                    // line's first fragment.
+                    inOversizedLine = false
+                    try await accept(line, unixNano: nowNanos())
+                    continue
                 }
+                if line.count > ContainerLogFollower.maxPendingLineBytes {
+                    // A complete line beyond the bound (its newline arrived in
+                    // the same chunk that crossed it). The journal recorded a
+                    // gap marker, not this payload: consume the marker —
+                    // keeping later lines alignable — and window the line with
+                    // the marker's (or the read) time.
+                    let markerNano = alignment.consumeGapMarker()
+                    try await accept(line, unixNano: markerNano ?? nowNanos())
+                    continue
+                }
+                let unixNano = alignment.timestamp(for: line) ?? nowNanos()
+                try await accept(line, unixNano: unixNano)
+            }
+            if pending.count > ContainerLogFollower.maxPendingLineBytes {
+                // Spill the head of an unterminated line at the bound: emit
+                // the accumulated bytes instead of buffering them further.
+                // The line's first fragment consumes any journal gap marker;
+                // the rest bypass alignment until the terminating newline.
+                let markerNano = inOversizedLine ? nil : alignment.consumeGapMarker()
+                inOversizedLine = true
+                try await accept(pending, unixNano: markerNano ?? nowNanos())
+                pending.removeAll(keepingCapacity: true)
             }
         }
         if streamEnded, !pending.isEmpty {
@@ -428,6 +477,14 @@ extension ContainerLogsRoute {
         return pending
     }
 
+    /// One follow batch reads at most this many bytes before returning, so the
+    /// caller writes the accumulated frames and re-checks the client
+    /// connection and the `until` deadline between reads. Without the budget,
+    /// a container writing faster than the reader is drained keeps the batch
+    /// loop reading indefinitely — output is delayed, frames accumulate
+    /// without bound, and a client disconnect is never observed.
+    static let followBatchMaxBytes = 64 * 1024
+
     /// One pass of the windowed follow loop: reads whatever is currently
     /// available from the log stream, stamps each complete line with its
     /// arrival time and applies the `since`/`until` window. Returns the framed
@@ -436,6 +493,13 @@ extension ContainerLogsRoute {
     /// in-window output that already passed the window check), and whether any
     /// bytes were read. `buffer` carries the trailing partial line across
     /// passes.
+    ///
+    /// An unterminated line is spilled at
+    /// `ContainerLogFollower.maxPendingLineBytes` — the accumulated bytes are
+    /// emitted instead of buffered — and the batch yields after
+    /// `followBatchMaxBytes` of input even when the stream still has data, so
+    /// neither memory nor output latency can grow without bound while
+    /// following a noisy container.
     static func readWindowedFollowBatch(
         from buffer: inout Data,
         read: () throws -> Data?,
@@ -448,9 +512,11 @@ extension ContainerLogsRoute {
         var frames: [ByteBuffer] = []
         var gotData = false
         var reachedUntil = false
+        var batchBytes = 0
         readLoop: while let data = try read(), !data.isEmpty {
             gotData = true
             buffer.append(data)
+            batchBytes += data.count
             while let newline = buffer.firstIndex(of: 0x0A) {
                 let line = buffer.subdata(in: buffer.startIndex..<buffer.index(after: newline))
                 buffer = buffer.subdata(in: buffer.index(after: newline)..<buffer.endIndex)
@@ -462,6 +528,24 @@ extension ContainerLogsRoute {
                 }
                 frames.append(stampedFrame(line, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
             }
+            if buffer.count > ContainerLogFollower.maxPendingLineBytes {
+                // Spill the head of an unterminated line at the bound: emit
+                // the accumulated bytes (preserving the requested output)
+                // instead of buffering a newline-free stream without limit.
+                let unixNano = nowNanos()
+                if let since, unixNano < since {
+                    buffer.removeAll(keepingCapacity: true)
+                } else if let until, unixNano > until {
+                    reachedUntil = true
+                    break
+                } else {
+                    frames.append(stampedFrame(buffer, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
+                    buffer.removeAll(keepingCapacity: true)
+                }
+            }
+            // Yield after a bounded amount of input so the caller can write
+            // and check the deadline between reads.
+            if batchBytes >= ContainerLogsRoute.followBatchMaxBytes { break }
         }
         return (frames, reachedUntil, gotData)
     }

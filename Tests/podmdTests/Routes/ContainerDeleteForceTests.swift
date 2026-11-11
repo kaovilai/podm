@@ -114,7 +114,7 @@ private struct RecordingDeleteMock: ClientContainerProtocol {
     func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { [snapshot] }
     func getContainer(id: String) async throws -> ContainerSnapshot? { snapshot }
     func enforceContainerRunning(container: ContainerSnapshot) throws {}
-    func start(id: String, detachKeys: String?) async throws {}
+    func start(id: String, detachKeys: String?) async throws -> Bool { true }
     func stop(id: String, signal: String?, timeout: Int?) async throws { await log.add("stop") }
     func restart(id: String, signal: String?, timeout: Int?) async throws {}
     func kill(id: String, signal: String?) async throws {}

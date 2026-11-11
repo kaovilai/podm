@@ -16,8 +16,9 @@ actor StaticSnapshotClientMock: ClientContainerProtocol {
     func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { [snapshot] }
     func getContainer(id: String) async throws -> ContainerSnapshot? { snapshot }
     nonisolated func enforceContainerRunning(container: ContainerSnapshot) throws {}
-    func start(id: String, detachKeys: String?) async throws {
+    func start(id: String, detachKeys: String?) async throws -> Bool {
         await ContainerExitCodeStore.shared.remove(id: id)
+        return true
     }
     func stop(id: String, signal: String?, timeout: Int?) async throws {}
     func restart(id: String, signal: String?, timeout: Int?) async throws {}

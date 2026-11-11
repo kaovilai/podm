@@ -181,9 +181,20 @@ enum ContainerLogFollower {
         let bootJournal = await journal.contents(nativeId: nativeId)
         var alignment = ContainerLogJournal.Alignment(entries: bootJournal.entries, droppedLines: bootJournal.droppedLines)
         var pending = Data()
-        // Set once a misaligned (different-boot) journal has been reset; the
-        // empty replacement alignment can never fail again.
-        var healedStaleJournal = false
+        // True while `pending` holds the continuation of an oversized line
+        // whose head bytes were already discarded: everything up to (and
+        // including) the terminating newline belongs to that line. The flag
+        // lives HERE, beside `pending`, not inside `readAvailable` — a line
+        // spanning a read gap (temporary EOF, then more bytes) must still be
+        // recognized as a discard tail by the next poll, or its last fragment
+        // would be journaled as a complete line.
+        var discardingPartialLine = false
+        // Stream lines consumed against the CURRENT journal generation
+        // without being retained in it (covered/evicted/marker ordinals of a
+        // journal that turns out stale). The first content mismatch passes
+        // this count to `beginBoot(droppedLines:)`, so the reset accounts the
+        // already-consumed prefix and the retained suffix still aligns.
+        var linesConsumedUnretained = 0
 
         /// Reads everything currently available, journaling each complete line
         /// (skipping lines already covered by the journal) with the arrival
@@ -195,13 +206,39 @@ enum ContainerLogFollower {
         func readAvailable() async -> Bool {
             var gotData = false
             var fresh: [ContainerLogJournal.Entry] = []
-            var discardingPartialLine = false
 
             func flushBatch() async {
                 guard !fresh.isEmpty else { return }
                 await journal.append(nativeId: nativeId, epoch: epoch, fresh)
                 fresh.removeAll(keepingCapacity: true)
                 ContainerLogFollower.onBatchFlush?(nativeId)
+            }
+
+            /// Records that one oversized stream line was consumed without
+            /// retaining its payload: consume the journal's existing gap
+            /// marker (this boot already recorded one — a resume re-reading
+            /// the same oversized line), or append a new marker so later
+            /// alignments can consume the line's ordinal.
+            func markOversizedLine() {
+                if alignment.consumeGapMarker() != nil {
+                    // Already accounted by the persisted marker.
+                } else {
+                    fresh.append(ContainerLogJournal.Entry.gapMarker(unixNano: ContainerLogJournal.currentUnixNano()))
+                }
+                linesConsumedUnretained += 1
+            }
+
+            /// Heals a journal that provably belongs to a different boot:
+            /// reset it on the FIRST alignment failure — before this batch's
+            /// replacement entries flush — so the stale entries cannot leak
+            /// wrong timestamps into --since/--until, and so no replacement
+            /// line is flushed into the stale journal only to be wiped a
+            /// batch later. The lines already consumed against the stale
+            /// journal are accounted as dropped, keeping the suffix aligned.
+            func healStaleJournal() async {
+                await journal.beginBoot(nativeId: nativeId, epoch: epoch, droppedLines: linesConsumedUnretained)
+                alignment = ContainerLogJournal.Alignment(entries: [])
+                linesConsumedUnretained = 0
             }
 
             while let chunk = try? handle.read(upToCount: 4096), !chunk.isEmpty {
@@ -211,14 +248,35 @@ enum ContainerLogFollower {
                     let line = pending.subdata(in: pending.startIndex..<pending.index(after: newline))
                     pending = pending.subdata(in: pending.index(after: newline)..<pending.endIndex)
                     if discardingPartialLine {
-                        // Tail of an oversized line: not journalable.
+                        // Tail of an oversized line: not journalable, but its
+                        // ordinal still consumes a gap marker (or records one).
                         discardingPartialLine = false
+                        markOversizedLine()
+                        continue
+                    }
+                    if line.count > ContainerLogFollower.maxPendingLineBytes {
+                        // A complete line beyond the bound (its newline landed
+                        // in the same chunk that crossed the bound): same
+                        // treatment as the mid-line discard — marker, no
+                        // payload — so the journal never retains a line the
+                        // windowed readers would have to spill.
+                        markOversizedLine()
                         continue
                     }
                     switch alignment.classify(line) {
                     case .covered, .evicted:
-                        continue  // already journaled this boot (or since evicted)
+                        // Already journaled this boot (or since evicted): if
+                        // the journal later proves stale, this consumed line
+                        // must be accounted as dropped after the reset.
+                        linesConsumedUnretained += 1
+                        continue
                     case .fresh:
+                        if alignment.failed {
+                            // First mismatch: reset now, before appending or
+                            // flushing anything, so this line and the rest of
+                            // the read land in the replacement journal.
+                            await healStaleJournal()
+                        }
                         fresh.append(
                             ContainerLogJournal.Entry(
                                 unixNano: ContainerLogJournal.currentUnixNano(),
@@ -234,17 +292,6 @@ enum ContainerLogFollower {
                     pending.removeAll(keepingCapacity: false)
                     discardingPartialLine = true
                 }
-            }
-            if !healedStaleJournal, alignment.failed {
-                // The journal provably does not belong to this boot (content
-                // mismatch against the current stream) — an unknowing resume
-                // of a bootstrapped-but-never-armed container. Reset it BEFORE
-                // this batch's flush so the stale entries cannot leak wrong
-                // timestamps into --since/--until, and this batch's lines land
-                // in the fresh journal.
-                healedStaleJournal = true
-                await journal.beginBoot(nativeId: nativeId, epoch: epoch)
-                alignment = ContainerLogJournal.Alignment(entries: [])
             }
             await flushBatch()
             return gotData

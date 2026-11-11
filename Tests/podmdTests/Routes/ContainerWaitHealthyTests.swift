@@ -82,7 +82,7 @@ private struct MockWaitClient: ClientContainerProtocol {
         return container
     }
     func enforceContainerRunning(container: ContainerSnapshot) throws {}
-    func start(id: String, detachKeys: String?) async throws {}
+    func start(id: String, detachKeys: String?) async throws -> Bool { true }
     func stop(id: String, signal: String?, timeout: Int?) async throws {}
     func restart(id: String, signal: String?, timeout: Int?) async throws {}
     func kill(id: String, signal: String?) async throws {}

@@ -20,7 +20,7 @@ private struct MockContainerClient: ClientContainerProtocol {
     func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { containers }
     func getContainer(id: String) async throws -> ContainerSnapshot? { containers.first { $0.id == id } }
     func enforceContainerRunning(container: ContainerSnapshot) throws {}
-    func start(id: String, detachKeys: String?) async throws {}
+    func start(id: String, detachKeys: String?) async throws -> Bool { true }
     func stop(id: String, signal: String?, timeout: Int?) async throws {}
     func restart(id: String, signal: String?, timeout: Int?) async throws {}
     func kill(id: String, signal: String?) async throws {}
@@ -420,7 +420,7 @@ private struct EmptyContainerClient: ClientContainerProtocol {
     func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { [] }
     func getContainer(id: String) async throws -> ContainerSnapshot? { nil }
     func enforceContainerRunning(container: ContainerSnapshot) throws {}
-    func start(id: String, detachKeys: String?) async throws {}
+    func start(id: String, detachKeys: String?) async throws -> Bool { true }
     func stop(id: String, signal: String?, timeout: Int?) async throws {}
     func restart(id: String, signal: String?, timeout: Int?) async throws {}
     func kill(id: String, signal: String?) async throws {}
@@ -442,7 +442,7 @@ private struct InspectMock: ClientContainerProtocol {
     func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { [snapshot] }
     func getContainer(id: String) async throws -> ContainerSnapshot? { snapshot }
     func enforceContainerRunning(container: ContainerSnapshot) throws {}
-    func start(id: String, detachKeys: String?) async throws {}
+    func start(id: String, detachKeys: String?) async throws -> Bool { true }
     func stop(id: String, signal: String?, timeout: Int?) async throws {}
     func restart(id: String, signal: String?, timeout: Int?) async throws {}
     func kill(id: String, signal: String?) async throws {}

@@ -55,10 +55,19 @@ extension ContainerStartRoute {
                 if container.status == .running {
                     req.logger.debug("Container \(id) is already running")
                 } else {
-                    // Try to start the container
-                    try await client.start(id: id, detachKeys: detachKeys)
-                    startedByThisCall = true
-                    req.logger.debug("Started container \(id)")
+                    // Try to start the container. The service reports whether
+                    // THIS call performed the boot: a concurrent /start (or
+                    // the attach route's bootstrap) winning the race makes
+                    // ours a suppressed no-op that returns normally — which
+                    // must not be mistaken for a fresh boot below, or the
+                    // real boot's follower would be cancelled and its journal
+                    // erased and restamped.
+                    startedByThisCall = try await client.start(id: id, detachKeys: detachKeys)
+                    if startedByThisCall {
+                        req.logger.debug("Started container \(id)")
+                    } else {
+                        req.logger.debug("Container \(id) was already booted by a concurrent caller")
+                    }
                 }
 
             } catch {
@@ -285,8 +294,12 @@ extension ContainerStartRoute {
             // /start or /restart landing during the backoff sleep above must not inflate
             // RestartCount for a restart that the generation check just aborted.
             let attempt = await ContainerRestartState.shared.nextAttempt(id: nativeId)
+            // Whether THIS restart performed the boot (a concurrent /start
+            // winning the race makes ours a suppressed no-op — see the /start
+            // handler): only a real transition resets the log journal.
+            var restartedByThisCall = false
             do {
-                try await client.start(id: nativeId, detachKeys: nil)
+                restartedByThisCall = try await client.start(id: nativeId, detachKeys: nil)
             } catch {
                 await ContainerRestartState.shared.clearPendingRestart(id: nativeId)
                 logger.warning("restart-policy: failed to restart \(nativeId) (attempt \(attempt)): \(error)")
@@ -315,7 +328,7 @@ extension ContainerStartRoute {
                 healthManager: healthManager,
                 client: client,
                 logger: logger,
-                freshLogBoot: true
+                freshLogBoot: restartedByThisCall
             )
             if let snap = restartedSnapshot ?? exitSnapshot {
                 await VolumeMountEvents.broadcastMounts(for: snap, containerId: eventId, broadcaster: broadcaster)

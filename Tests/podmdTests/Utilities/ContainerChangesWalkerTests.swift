@@ -422,6 +422,92 @@ struct ContainerChangesWalkerTests {
         #expect(changes == [ContainerFileChange(path: "/file", kind: .modified)])
     }
 
+    @Test("replacing an xattr with a canonically equivalent Unicode spelling reports Modified")
+    func xattrNormalizationSpellingChange() async throws {
+        let baseline = Ext4TreeFixture(name: "baseline")
+        let current = Ext4TreeFixture(name: "current")
+        defer {
+            baseline.cleanUp()
+            current.cleanUp()
+        }
+        // `user.é` precomposed (UTF-8 C3 A9) vs `user.e` + U+0301 decomposed
+        // (UTF-8 65 CC 81): the same value under the other byte spelling.
+        // Linux xattr names are byte identifiers, so this is a rename — but
+        // Swift String equality folds the two spellings together, which made
+        // the decoded sets compare equal and hid the change. The formatter's
+        // writer rejects non-ASCII names, so each side is written with a
+        // unique ASCII placeholder of the SAME BYTE LENGTH and the name
+        // bytes are patched in the device image afterwards.
+        let value = Data("same value".utf8)
+        let baselineDevice = try baseline.write(
+            files: ["/file": "bytes"],
+            xattrs: ["/file": ["user.qZ": value]])
+        let currentDevice = try current.write(
+            files: ["/file": "bytes"],
+            xattrs: ["/file": ["user.qYx": value]])
+        try Self.patchFirstXattrName(
+            in: baselineDevice, of: "/file", from: "qZ", to: [0xC3, 0xA9])  // é precomposed
+        try Self.patchFirstXattrName(
+            in: currentDevice, of: "/file", from: "qYx", to: [0x65, 0xCC, 0x81])  // e + U+0301
+
+        let changes = try await ContainerChangesWalker.changes(
+            baselineBlockDevice: baselineDevice,
+            currentBlockDevice: currentDevice)
+
+        #expect(changes == [ContainerFileChange(path: "/file", kind: .modified)])
+    }
+
+    /// Rewrites one inline xattr entry's name bytes in a formatted device:
+    /// walks the inode's inline region entry by entry (16-byte headers,
+    /// names padded to 4 — the layout EXT4XattrReader decodes; the first
+    /// entry is typically the formatter's `system.data` marker, so the
+    /// target is found by name) and replaces the placeholder-length name in
+    /// place, leaving the on-disk layout untouched. The ext4 reader does
+    /// not verify checksums on read, so the patched device stays readable.
+    private static func patchFirstXattrName(
+        in device: URL, of path: String, from placeholder: String, to replacement: [UInt8]
+    ) throws {
+        let reader = try EXT4.EXT4Reader(blockDevice: FilePath(device.path))
+        let (_, inode) = try reader.stat(FilePath(path))
+        guard let region = EXT4XattrReader.inlineRegion(of: inode) else {
+            throw NSError(
+                domain: "patch", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "no inline xattr region on \(path)"])
+        }
+        let regionBytes = [UInt8](region)
+        guard let located = (try Data(contentsOf: device)).range(of: region) else {
+            throw NSError(
+                domain: "patch", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "inline xattr region not found in device image"])
+        }
+
+        // Walk the entries to find the placeholder name's offset in the region.
+        var entry = 4
+        var nameOffset: Int?
+        while entry + 16 <= regionBytes.count {
+            if regionBytes[entry] == 0 { break }  // zeroed slot terminates the list
+            let nameLength = Int(regionBytes[entry])
+            let nameStart = entry + 16
+            guard nameStart + nameLength <= regionBytes.count else { break }
+            if regionBytes[nameStart..<(nameStart + nameLength)].elementsEqual(placeholder.utf8) {
+                nameOffset = nameStart
+                break
+            }
+            entry = nameStart + ((nameLength + 3) & ~3)
+        }
+        guard let offset = nameOffset else {
+            throw NSError(
+                domain: "patch", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "placeholder xattr name not found in region"])
+        }
+
+        var data = try Data(contentsOf: device)
+        let nameStart = data.index(located.lowerBound, offsetBy: offset)
+        let nameEnd = data.index(nameStart, offsetBy: replacement.count)
+        data.replaceSubrange(nameStart..<nameEnd, with: Data(replacement))
+        try data.write(to: device)
+    }
+
     @Test("identical xattrs report nothing, including block-backed ones")
     func identicalXattrsAreQuiet() async throws {
         let baseline = Ext4TreeFixture(name: "baseline")

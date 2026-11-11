@@ -40,7 +40,7 @@ struct ContainerLogFollowerTests {
         func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { [snapshot] }
         func getContainer(id: String) async throws -> ContainerSnapshot? { snapshot }
         func enforceContainerRunning(container: ContainerSnapshot) throws {}
-        func start(id: String, detachKeys: String?) async throws {}
+        func start(id: String, detachKeys: String?) async throws -> Bool { true }
         func stop(id: String, signal: String?, timeout: Int?) async throws {}
         func restart(id: String, signal: String?, timeout: Int?) async throws {}
         func kill(id: String, signal: String?) async throws {}
@@ -382,13 +382,247 @@ struct ContainerLogFollowerTests {
             await journal.entries(nativeId: "oversize-ctr").count >= 1
         }
         #expect(journaled)
-        #expect(
-            await journal.entries(nativeId: "oversize-ctr").map(\.bytes) == [Data("after\n".utf8)],
-            "the oversized line must not be journaled; the following line must be")
+        let entries = await journal.entries(nativeId: "oversize-ctr")
+        #expect(entries.count == 2, "one gap marker plus the following line")
+        #expect(entries[0].isGapMarker, "the oversized line's payload is never retained — only a gap marker")
+        #expect(entries[1].bytes == Data("after\n".utf8), "the following line must be journaled")
 
         client.stopContainer()
         _ = await waitFor {
             let armed = await registry.isArmed(nativeId: "oversize-ctr")
+            return !armed
+        }
+    }
+
+    // MARK: - Oversized-line gap markers
+
+    /// Seeds `journal` with mixed entries (lines and gap markers) under
+    /// epoch 1, then returns the instance a resumed follower would use.
+    private func seedJournal(dir: URL, nativeId: String, entries: [ContainerLogJournal.Entry]) async
+        -> ContainerLogJournal
+    {
+        let seeder = ContainerLogJournal()
+        await seeder.configure(storageDirectory: dir)
+        await seeder.beginBoot(nativeId: nativeId, epoch: 1)
+        await seeder.append(nativeId: nativeId, epoch: 1, entries)
+        let resumed = ContainerLogJournal()
+        await resumed.configure(storageDirectory: dir)
+        return resumed
+    }
+
+    @Test("an oversized line spanning a read gap journals one gap marker, not a bogus tail line")
+    func oversizedLineAcrossReadGapRecordsMarker() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("output.log")
+        FileManager.default.createFile(atPath: logFile.path, contents: nil)
+        let writer = try FileHandle(forWritingTo: logFile)
+
+        let journal = ContainerLogJournal()
+        await journal.configure(storageDirectory: dir)
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+
+        // Head of an oversized line: written alone so the follower's first
+        // read pass consumes and discards it, then hits a read gap (empty
+        // read) before the line's tail arrives — the discard state must
+        // survive the gap (it used to reset per read pass, which journaled
+        // the later tail fragment as a complete line).
+        try writer.write(contentsOf: Data(repeating: 0x78, count: ContainerLogFollower.maxPendingLineBytes + (1 << 18)))
+
+        await registry.arm(
+            nativeId: "gap-marker-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: true,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+        // Let at least one full poll pass consume the head (the follower
+        // polls every 150ms; a pass that read data re-polls immediately, so
+        // a gap of several poll intervals guarantees the read gap happened).
+        try await Task.sleep(for: .milliseconds(600))
+        try writer.write(contentsOf: Data("tail-fragment\nafter\n".utf8))
+
+        let journaled = await waitFor {
+            await journal.entries(nativeId: "gap-marker-ctr").contains { $0.bytes == Data("after\n".utf8) }
+        }
+        #expect(journaled, "the line after the oversized one must be journaled")
+
+        let entries = await journal.entries(nativeId: "gap-marker-ctr")
+        #expect(entries.count == 2, "exactly one gap marker plus the following line — no bogus tail-fragment line")
+        #expect(entries[0].isGapMarker, "the discarded oversized line is recorded as a gap marker")
+        #expect(entries[1].bytes == Data("after\n".utf8))
+        #expect(!entries.contains { $0.bytes == Data("tail-fragment\n".utf8) })
+
+        client.stopContainer()
+        _ = await waitFor {
+            let armed = await registry.isArmed(nativeId: "gap-marker-ctr")
+            return !armed
+        }
+    }
+
+    @Test("a resumed follower consumes the persisted gap marker without duplicating it")
+    func resumeConsumesPersistedGapMarker() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("output.log")
+        // The whole current boot's output: one oversized line (discarded,
+        // recorded as a gap marker before the daemon restart) plus two
+        // normal lines the journal already covers.
+        var contents = Data(repeating: 0x78, count: ContainerLogFollower.maxPendingLineBytes + (1 << 18))
+        contents.append(Data("\ncovered\nmore\n".utf8))
+        FileManager.default.createFile(atPath: logFile.path, contents: contents)
+
+        let journal = await seedJournal(
+            dir: dir, nativeId: "resume-marker-ctr",
+            entries: [
+                ContainerLogJournal.Entry.gapMarker(unixNano: 111),
+                ContainerLogJournal.Entry(unixNano: 222, streamType: 1, bytes: Data("covered\n".utf8)),
+                ContainerLogJournal.Entry(unixNano: 333, streamType: 1, bytes: Data("more\n".utf8)),
+            ])
+
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        await registry.arm(
+            nativeId: "resume-marker-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: false,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+
+        // The resumed follower re-reads the oversized line, must consume the
+        // persisted marker (not append a second one, not misalign the
+        // covered entries behind it) and journal nothing new. Give the
+        // resume a poll pass to process the stream, then stop the container.
+        try await Task.sleep(for: .milliseconds(600))
+        client.stopContainer()
+        _ = await waitFor {
+            let armed = await registry.isArmed(nativeId: "resume-marker-ctr")
+            return !armed
+        }
+
+        let entries = await journal.entries(nativeId: "resume-marker-ctr")
+        #expect(entries.count == 3, "one marker plus the two covered lines — no duplicate marker, no re-journaled lines")
+        #expect(entries[0].isGapMarker)
+        #expect(entries[0].unixNano == 111, "the persisted marker is consumed, not replaced")
+        #expect(Array(entries.map(\.bytes).suffix(2)) == [Data("covered\n".utf8), Data("more\n".utf8)])
+    }
+
+    // MARK: - Stale-journal heal ordering
+
+    @Test("a stale journal is reset on first mismatch, so no replacement line is lost to the wipe")
+    func staleJournalHealKeepsEveryReplacementLine() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("output.log")
+        // 300 lines none of which match the stale journal's entry: the old
+        // end-of-read heal flushed the first 256 into the stale journal,
+        // wiped them with beginBoot, and kept only the last 44 — losing
+        // historical timestamp filtering for the rest.
+        let lines = (1...300).map { "line\($0)\n" }
+        FileManager.default.createFile(atPath: logFile.path, contents: Data(lines.joined().utf8))
+        let journal = await seedJournal(
+            dir: dir, nativeId: "heal-order-ctr",
+            entries: [
+                ContainerLogJournal.Entry(unixNano: 111, streamType: 1, bytes: Data("stale boot\n".utf8))
+            ])
+
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        await registry.arm(
+            nativeId: "heal-order-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: false,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+
+        let journaled = await waitFor {
+            await journal.entries(nativeId: "heal-order-ctr").count >= 300
+        }
+        #expect(journaled, "every line of the read must land in the replacement journal")
+        let entries = await journal.entries(nativeId: "heal-order-ctr")
+        #expect(entries.map(\.bytes) == lines.map { Data($0.utf8) }, "no line may be flushed into the stale journal and wiped")
+
+        client.stopContainer()
+        _ = await waitFor {
+            let armed = await registry.isArmed(nativeId: "heal-order-ctr")
+            return !armed
+        }
+    }
+
+    @Test("a stale journal with a matching prefix accounts the consumed prefix as dropped")
+    func staleJournalHealAccountsConsumedPrefix() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("output.log")
+        // The stale journal's first line coincidentally matches this boot's
+        // first line (identical boot banners are common); the second does
+        // not. The heal must reset on the mismatch AND account the consumed
+        // prefix line as dropped, so a scan from byte zero still aligns the
+        // retained suffix.
+        let stream = Data("same banner\ndiverges\nthird\n".utf8)
+        FileManager.default.createFile(atPath: logFile.path, contents: stream)
+        let journal = await seedJournal(
+            dir: dir, nativeId: "heal-prefix-ctr",
+            entries: [
+                ContainerLogJournal.Entry(unixNano: 100, streamType: 1, bytes: Data("same banner\n".utf8)),
+                ContainerLogJournal.Entry(unixNano: 111, streamType: 1, bytes: Data("stale boot\n".utf8)),
+            ])
+
+        let stampBefore = ContainerLogJournal.currentUnixNano()
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        await registry.arm(
+            nativeId: "heal-prefix-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: false,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+
+        let journaled = await waitFor {
+            await journal.entries(nativeId: "heal-prefix-ctr").map(\.bytes)
+                == [Data("diverges\n".utf8), Data("third\n".utf8)]
+        }
+        #expect(journaled)
+        let stampAfter = ContainerLogJournal.currentUnixNano()
+        let contents = await journal.contents(nativeId: "heal-prefix-ctr")
+        #expect(contents.droppedLines == 1, "the covered prefix line is accounted as dropped, not silently orphaned")
+
+        // End to end: a windowed scan over the same stream recovers the
+        // replacement entries' timestamps (their real arrival times, inside
+        // [stampBefore, stampAfter]) — without the accounted prefix the
+        // first retained entry would be matched against the banner, fail,
+        // and disable recovery for everything after it (all lines would
+        // fall back to read time 999, which `since` drops).
+        var offset = 0
+        var payloads: [String] = []
+        _ = try await ContainerLogsRoute.scanWindowedBacklog(
+            read: {
+                guard offset < stream.count else { return nil }
+                let next = min(offset + 16, stream.count)
+                defer { offset = next }
+                return stream[offset..<next]
+            },
+            journal: ContainerLogJournal.Contents(entries: contents.entries, droppedLines: contents.droppedLines),
+            since: stampBefore - 1,
+            until: stampAfter,
+            tail: nil,
+            ttyMode: true,
+            timestamps: false,
+            nowNanos: { 999 },
+            streamEnded: true
+        ) { frame in
+            var frame = frame
+            payloads.append(String(decoding: frame.readData(length: frame.readableBytes)!, as: UTF8.self))
+        }
+        #expect(payloads == ["diverges\n", "third\n"], "the retained suffix must stay timestamp-recoverable after the heal")
+
+        client.stopContainer()
+        _ = await waitFor {
+            let armed = await registry.isArmed(nativeId: "heal-prefix-ctr")
             return !armed
         }
     }

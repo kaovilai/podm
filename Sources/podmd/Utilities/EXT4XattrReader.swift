@@ -37,6 +37,41 @@ import SystemPackage
 /// as an inline-data marker whenever it writes any xattr, and the package's
 /// own export skips it — it is on-disk representation, not a user attribute.
 final class EXT4XattrReader {
+    /// A byte-identified extended-attribute name: the ext4 namespace index
+    /// plus the RAW name bytes. Linux xattr names are byte identifiers —
+    /// `user.é` (precomposed) and `user.e\u{301}` (decomposed) are two
+    /// DIFFERENT attributes — but Swift `String` equates canonically
+    /// equivalent spellings, so a `[String: Data]` collapses them into one
+    /// entry and masks a one-spelling-to-the-other rename as unchanged.
+    /// The key therefore hashes and compares bytes only (namespace index +
+    /// name bytes), the same rationale as `SecretStore.sameName`'s
+    /// byte-wise UTF-8 comparison.
+    struct XattrName: Hashable, Sendable {
+        let nameIndex: Int
+        let nameBytes: [UInt8]
+
+        init(nameIndex: Int, nameBytes: [UInt8]) {
+            self.nameIndex = nameIndex
+            self.nameBytes = nameBytes
+        }
+
+        /// Splits a display name the way the ext4 writer would (longest
+        /// matching namespace prefix) — for tests and expected-value
+        /// literals.
+        init(fullName: String) {
+            let (index, suffix) = EXT4.ExtendedAttribute.compressName(fullName)
+            self.init(nameIndex: Int(index), nameBytes: Array(suffix.utf8))
+        }
+
+        /// The decompressed display name ("user.étiquette") — for
+        /// diagnostics and test failure messages only, never for identity.
+        var displayName: String {
+            EXT4.ExtendedAttribute.decompressName(
+                id: nameIndex,
+                suffix: String(bytes: nameBytes, encoding: .utf8) ?? "")
+        }
+    }
+
     /// `EXT4.XAttrHeaderMagic` (kernel `EXT4_XATTR_MAGIC`) — internal in the
     /// package, restated here.
     private static let headerMagic: UInt32 = 0xEA02_0000
@@ -70,7 +105,7 @@ final class EXT4XattrReader {
 
     /// The full xattr set for an inode whose cached signals are
     /// `inline` (raw inode-body region, nil when all zeros) and `block`
-    /// (xattr block pointer, 0 = none).
+    /// (xattr block pointer, 0 = none), keyed by byte-identified name.
     ///
     /// Returns nil when the set cannot be read (I/O failure, malformed
     /// region, external-inode values) — callers treat that as "equality
@@ -79,9 +114,9 @@ final class EXT4XattrReader {
     /// error: real filesystems only write the header once the first
     /// attribute lands, so leftover non-zero bytes there simply mean no
     /// inline xattrs (any block-backed set is still decoded).
-    func xattrs(inline: Data?, block: UInt64) -> [String: Data]? {
+    func xattrs(inline: Data?, block: UInt64) -> [XattrName: Data]? {
         onDecode?()
-        var result: [String: Data] = [:]
+        var result: [XattrName: Data] = [:]
 
         if let inline {
             let bytes = [UInt8](inline)
@@ -109,7 +144,7 @@ final class EXT4XattrReader {
             }
         }
 
-        result.removeValue(forKey: "system.data")
+        result.removeValue(forKey: XattrName(fullName: "system.data"))
         return result
     }
 
@@ -154,7 +189,7 @@ final class EXT4XattrReader {
         from buffer: [UInt8],
         entriesStart: Int,
         valueBase: Int,
-        into result: inout [String: Data]
+        into result: inout [XattrName: Data]
     ) throws {
         var i = entriesStart
         while i + entryHeaderSize <= buffer.count {
@@ -180,7 +215,7 @@ final class EXT4XattrReader {
             // same name decode equal, so an unchanged non-ASCII attribute is
             // not reported as Modified. Bytes that are not valid UTF-8 cannot
             // round-trip through String; surface those as unreadable.
-            guard let name = String(bytes: buffer[nameStart..<nameEnd], encoding: .utf8) else {
+            guard String(bytes: buffer[nameStart..<nameEnd], encoding: .utf8) != nil else {
                 throw Error.malformed("xattr name is not valid UTF-8")
             }
             if valueInum != 0 {
@@ -203,10 +238,11 @@ final class EXT4XattrReader {
                 value = Data(buffer[valueStart..<valueStart + valueSize])
             }
 
-            // Name prefixes are stored as an index; decompress via the
-            // package's own public map (e.g. 6 + "capability" ->
-            // "security.capability").
-            result[EXT4.ExtendedAttribute.decompressName(id: nameIndex, suffix: name)] = value
+            // Name prefixes are stored as an index (e.g. 6 + "capability"
+            // is "security.capability"): the key keeps the namespace index
+            // and the RAW name bytes — never a String, whose canonical
+            // Unicode equality would fold distinct byte spellings together.
+            result[XattrName(nameIndex: nameIndex, nameBytes: Array(buffer[nameStart..<nameEnd]))] = value
 
             i = nameStart + ((nameLength + 3) & ~3)
         }

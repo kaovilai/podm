@@ -74,7 +74,7 @@ struct EXT4XattrReaderTests {
 
         #expect(
             reader.xattrs(inline: region, block: 0)
-                == ["user.a": Data([1, 2, 3, 4]), "security.capability": Data(Array(0..<20))])
+                == [EXT4XattrReader.XattrName(fullName: "user.a"): Data([1, 2, 3, 4]), EXT4XattrReader.XattrName(fullName: "security.capability"): Data(Array(0..<20))])
     }
 
     @Test("two differently laid-out regions holding the same set decode equal")
@@ -115,7 +115,7 @@ struct EXT4XattrReaderTests {
 
         #expect(
             reader.xattrs(inline: Data(repeating: 0xAA, count: 96), block: UInt64(inode.xattrBlockLow))
-                == ["user.big": Data(repeating: 0x42, count: 256)])
+                == [EXT4XattrReader.XattrName(fullName: "user.big"): Data(repeating: 0x42, count: 256)])
     }
 
     @Test("a truncated device yields an unreadable set, not an array-bounds crash")
@@ -185,7 +185,7 @@ struct EXT4XattrReaderTests {
         // made every file carrying one "unreadable", so an unchanged
         // non-ASCII attribute was reported as Modified.
         let tagged = inlineRegion([(index: 1, name: "étiquette", value: [1, 2, 3, 4])])
-        #expect(reader.xattrs(inline: tagged, block: 0) == ["user.étiquette": Data([1, 2, 3, 4])])
+        #expect(reader.xattrs(inline: tagged, block: 0) == [EXT4XattrReader.XattrName(fullName: "user.étiquette"): Data([1, 2, 3, 4])])
 
         // Two differently laid-out regions holding the same non-ASCII set
         // decode equal — the walker compares decoded sets, so identical
@@ -194,6 +194,36 @@ struct EXT4XattrReaderTests {
         let ba = inlineRegion([(index: 1, name: "tägs", value: [2]), (index: 1, name: "étiquette", value: [1])])
         #expect(ab != ba)
         #expect(reader.xattrs(inline: ab, block: 0) == reader.xattrs(inline: ba, block: 0))
+    }
+
+    @Test("canonically equivalent Unicode spellings are distinct attributes")
+    func normalizationSpellingsStayDistinct() throws {
+        let (fixture, _, reader) = try makeReader()
+        defer { fixture.cleanUp() }
+
+        // `user.é` precomposed (C3 A9) and `user.e` + U+0301 decomposed
+        // (65 CC 81) in ONE region: Linux treats them as two attributes,
+        // but Swift String keys fold them together — the set must keep
+        // both entries, each with its own value.
+        let both = inlineRegion([
+            (index: 1, name: "é", value: [1]),
+            (index: 1, name: "e\u{301}", value: [2]),
+        ])
+        let decoded = reader.xattrs(inline: both, block: 0)
+        #expect(decoded?.count == 2, "the two byte spellings must not collapse into one attribute")
+        #expect(
+            decoded?[EXT4XattrReader.XattrName(fullName: "user.é")] == Data([1]),
+            "the precomposed spelling keeps its own value")
+        #expect(
+            decoded?[EXT4XattrReader.XattrName(fullName: "user.e\u{301}")] == Data([2]),
+            "the decomposed spelling keeps its own value")
+
+        // A one-spelling-to-the-other swap (same value) is therefore a
+        // change: the decoded sets differ even though a String-keyed
+        // dictionary would call them equal.
+        let precomposedOnly = inlineRegion([(index: 1, name: "é", value: [1])])
+        let decomposedOnly = inlineRegion([(index: 1, name: "e\u{301}", value: [1])])
+        #expect(reader.xattrs(inline: precomposedOnly, block: 0) != reader.xattrs(inline: decomposedOnly, block: 0))
     }
 
     @Test("a block pointer past the end of the device is unreadable")
@@ -280,11 +310,11 @@ struct EXT4XattrReaderTests {
                 inline: EXT4XattrReader.inlineRegion(of: inlineInode),
                 block: UInt64(inlineInode.xattrBlockLow)
             )
-                == ["user.small": Data("fits".utf8)])
+                == [EXT4XattrReader.XattrName(fullName: "user.small"): Data("fits".utf8)])
 
         let big = reader.xattrs(
             inline: EXT4XattrReader.inlineRegion(of: blockInode),
             block: UInt64(blockInode.xattrBlockLow))
-        #expect(big == ["user.big": Data(repeating: 0x42, count: 256)])
+        #expect(big == [EXT4XattrReader.XattrName(fullName: "user.big"): Data(repeating: 0x42, count: 256)])
     }
 }

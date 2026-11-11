@@ -271,6 +271,147 @@ struct ContainerLogsWindowTests {
         #expect(frames.count == 1)
     }
 
+    // MARK: - Oversized-line bounds
+
+    /// A newline-free stream beyond the retention bound must not accumulate
+    /// without limit: the scanner spills the incomplete line's bytes as they
+    /// cross the bound (preserving the requested output) instead of
+    /// buffering the whole line, and the lines after it still flow.
+    @Test("a windowed backlog scan spills an oversized unterminated line instead of buffering it")
+    func oversizedBacklogLineSpills() async throws {
+        let bound = ContainerLogFollower.maxPendingLineBytes
+        var stream = Data(repeating: 0x78, count: bound + (1 << 18))  // no newline
+        stream.append(Data("\nafter\n".utf8))
+
+        var offset = 0
+        var payloads: [Data] = []
+        let remainder = try await ContainerLogsRoute.scanWindowedBacklog(
+            read: {
+                guard offset < stream.count else { return nil }
+                let next = min(offset + 4096, stream.count)
+                defer { offset = next }
+                return stream[offset..<next]
+            },
+            journal: ContainerLogJournal.Contents(),
+            since: nil,
+            until: nil,
+            tail: nil,
+            ttyMode: true,
+            timestamps: false,
+            nowNanos: { 999 },
+            streamEnded: true
+        ) { frame in
+            var frame = frame
+            payloads.append(frame.readData(length: frame.readableBytes)!)
+        }
+
+        // Every input byte is still emitted (output preserved) — as a spilled
+        // head fragment, the terminating fragment, and the following line —
+        // and nothing is left buffered in the returned remainder.
+        #expect(payloads.reduce(0) { $0 + $1.count } == stream.count, "no byte may be dropped by the spill")
+        #expect(payloads.count >= 3, "the oversized line is split across frames, not buffered whole")
+        #expect(payloads.last == Data("after\n".utf8))
+        #expect(payloads[0].last != 0x0A, "the first spilled fragment is an unterminated line head")
+        #expect(remainder.isEmpty)
+    }
+
+    /// The journal records an oversized line as a gap marker, never its
+    /// payload: the scanner must consume the marker for the oversized line
+    /// (instead of comparing it against the next retained entry) so the
+    /// lines AFTER it keep their recorded timestamps.
+    @Test("a journal gap marker keeps later lines aligned across an oversized line")
+    func gapMarkerPreservesAlignment() async throws {
+        let bound = ContainerLogFollower.maxPendingLineBytes
+        var stream = Data(repeating: 0x78, count: bound + (1 << 18))
+        stream.append(Data("\nafter\n".utf8))
+        let fixture = ContainerLogJournal.Contents(
+            entries: [
+                ContainerLogJournal.Entry.gapMarker(unixNano: 100),
+                ContainerLogJournal.Entry(unixNano: 200, streamType: 1, bytes: Data("after\n".utf8)),
+            ])
+
+        var offset = 0
+        var payloads: [String] = []
+        _ = try await ContainerLogsRoute.scanWindowedBacklog(
+            read: {
+                guard offset < stream.count else { return nil }
+                let next = min(offset + 4096, stream.count)
+                defer { offset = next }
+                return stream[offset..<next]
+            },
+            journal: fixture,
+            since: nil,
+            until: 250,  // journal time 200 passes; read-time 999 would not
+            tail: nil,
+            ttyMode: true,
+            timestamps: false,
+            nowNanos: { 999 },
+            streamEnded: true
+        ) { frame in
+            var frame = frame
+            payloads.append(String(decoding: frame.readData(length: frame.readableBytes)!, as: UTF8.self))
+        }
+
+        #expect(payloads.last == "after\n", "the line after the oversized one must keep its journal timestamp")
+        #expect(!payloads.isEmpty, "the oversized line's spilled bytes are still emitted (marker time 100)")
+    }
+
+    @Test("a follow batch spills an oversized unterminated line instead of buffering it")
+    func followBatchSpillsOversizedLine() throws {
+        let bound = ContainerLogFollower.maxPendingLineBytes
+        let stream = Data(repeating: 0x61, count: bound + (1 << 18))  // no newline at all
+        // One read delivers the whole newline-free burst, as a fast writer
+        // can: the batch must spill what crosses the bound, not buffer it.
+        var delivered = false
+        var buffer = Data()
+        let (frames, reachedUntil, gotData) = ContainerLogsRoute.readWindowedFollowBatch(
+            from: &buffer,
+            read: {
+                guard !delivered else { return nil }
+                delivered = true
+                return stream
+            },
+            since: nil,
+            until: nil,
+            ttyMode: true,
+            timestamps: false,
+            nowNanos: { 999 }
+        )
+        #expect(gotData)
+        #expect(!reachedUntil)
+        let emitted = frames.reduce(0) { $0 + $1.readableBytes }
+        #expect(emitted + buffer.count == stream.count, "no byte may be dropped by the spill")
+        #expect(buffer.count <= bound, "the carried partial line stays bounded")
+    }
+
+    @Test("a follow batch yields after a bounded amount of input")
+    func followBatchYieldsAfterBoundedInput() throws {
+        // A read that ALWAYS has more data (a container writing faster than
+        // the reader is drained): the batch must return after a bounded
+        // amount of input so the caller can write and check the deadline —
+        // without the budget this call never returns.
+        let chunk = Data(String(repeating: "line\n", count: 819).utf8)  // ~4 KiB per read
+        var reads = 0
+        var buffer = Data()
+        let (frames, reachedUntil, gotData) = ContainerLogsRoute.readWindowedFollowBatch(
+            from: &buffer,
+            read: {
+                reads += 1
+                return chunk
+            },
+            since: nil,
+            until: nil,
+            ttyMode: true,
+            timestamps: false,
+            nowNanos: { 999 }
+        )
+        #expect(gotData, "data was available")
+        #expect(!reachedUntil)
+        #expect(!frames.isEmpty)
+        let maxReads = ContainerLogsRoute.followBatchMaxBytes / chunk.count + 2
+        #expect(reads <= maxReads, "the batch must stop reading after a bounded amount of input")
+    }
+
     // MARK: - HTTP level
 
     @Test(
@@ -309,7 +450,7 @@ private struct WindowContainerMock: ClientContainerProtocol {
     func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { [snapshot] }
     func getContainer(id: String) async throws -> ContainerSnapshot? { snapshot }
     func enforceContainerRunning(container: ContainerSnapshot) throws {}
-    func start(id: String, detachKeys: String?) async throws {}
+    func start(id: String, detachKeys: String?) async throws -> Bool { true }
     func stop(id: String, signal: String?, timeout: Int?) async throws {}
     func restart(id: String, signal: String?, timeout: Int?) async throws {}
     func kill(id: String, signal: String?) async throws {}

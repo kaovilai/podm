@@ -42,6 +42,21 @@ actor ContainerLogJournal {
 
         static let headerByteCount = 13
         var framedByteCount: Int { Entry.headerByteCount + bytes.count }
+
+        /// A gap marker: records that ONE stream line was consumed without
+        /// retaining its bytes — the follower's oversized-line discard path.
+        /// Encoded as an entry with an EMPTY payload (a real line always
+        /// carries at least its trailing `\n`), so alignment can consume the
+        /// skipped line's ordinal — and its discard time — without ever
+        /// holding the oversized payload.
+        static func gapMarker(unixNano: UInt64) -> Entry {
+            // streamType is meaningless for a marker (no payload is framed);
+            // stdin's raw value keeps the encoding uniform.
+            Entry(unixNano: unixNano, streamType: 0, bytes: Data())
+        }
+
+        /// Whether this entry is a gap marker rather than a retained line.
+        var isGapMarker: Bool { bytes.isEmpty }
     }
 
     /// The journal's current-boot view of one container: the retained
@@ -132,8 +147,15 @@ actor ContainerLogJournal {
     /// new stream and are dropped instead of risking false timestamp matches.
     /// Epoch-gated inside the actor: a superseded (older-epoch) follower can
     /// never wipe its replacement's entries.
-    func beginBoot(nativeId: String, epoch: UInt64) {
-        activate(nativeId: nativeId, epoch: epoch, reset: true)
+    ///
+    /// `droppedLines` accounts stream lines that were already consumed
+    /// against the wiped journal (covered/evicted by it) but are not
+    /// retained in the replacement: a later scan from byte zero skips
+    /// exactly that prefix, so the retained suffix still aligns. The stale
+    /// journal's self-heal path uses this so a mid-read reset does not
+    /// orphan the lines read before the mismatch was detected.
+    func beginBoot(nativeId: String, epoch: UInt64, droppedLines: Int = 0) {
+        activate(nativeId: nativeId, epoch: epoch, reset: true, droppedLines: droppedLines)
     }
 
     /// Adopts the persisted journal for the container's CURRENT boot — the
@@ -144,22 +166,27 @@ actor ContainerLogJournal {
         activate(nativeId: nativeId, epoch: epoch, reset: false)
     }
 
-    private func activate(nativeId: String, epoch: UInt64, reset: Bool) {
+    private func activate(nativeId: String, epoch: UInt64, reset: Bool, droppedLines: Int = 0) {
         guard epoch > tombstoneEpochs[nativeId] ?? 0 else { return }
         guard epoch >= writerEpochs[nativeId] ?? 0 else { return }
         writerEpochs[nativeId] = epoch
         guard reset else { return }
         loadIfNeeded(nativeId)
-        guard states[nativeId] != nil else { return }
         try? states[nativeId]?.fileHandle?.close()
-        states[nativeId]?.fileHandle = nil
-        states[nativeId]?.entries = []
-        states[nativeId]?.totalFramedBytes = 0
-        states[nativeId]?.droppedLines = 0
+        var state = states[nativeId] ?? State()
+        state.entries = []
+        state.totalFramedBytes = 0
+        state.droppedLines = droppedLines
+        states[nativeId] = state
         do {
             try FileManager.default.removeItem(at: fileURL(nativeId))
         } catch {
             // A missing file is the common case (first boot of this container).
+        }
+        if droppedLines > 0 {
+            // Persist the accounted prefix: a reload must keep the count, or
+            // the retained suffix stops aligning with a scan from byte zero.
+            rewriteFile(fileURL(nativeId), entries: [], droppedLines: droppedLines)
         }
     }
 
@@ -359,7 +386,9 @@ extension ContainerLogJournal {
     /// every completed line of a boot in order, so while the journal covers
     /// the stream, the k-th stream line equals the k-th entry — except for
     /// the `droppedLines` the cap evicted, which are skipped up front so the
-    /// retained suffix still lines up with a stream read from byte zero. The
+    /// retained suffix still lines up with a stream read from byte zero, and
+    /// for oversized lines, which the journal records as gap markers (empty
+    /// payload) consumed via `consumeGapMarker` rather than compared. The
     /// first mismatch (journal stale relative to the stream, a superseded
     /// boot, corruption) disables matching for the rest of the scan instead
     /// of returning wrong times for coincidentally identical lines.
@@ -411,6 +440,23 @@ extension ContainerLogJournal {
         mutating func timestamp(for line: Data) -> UInt64? {
             if case .covered(let unixNano) = classify(line) { return unixNano }
             return nil
+        }
+
+        /// Consumes the gap marker recording one oversized stream line the
+        /// journal skipped without retaining. Readers call this INSTEAD of
+        /// `classify`/`timestamp` for a line beyond the retention bound: the
+        /// marker holds the line's ordinal (and its discard time) without
+        /// the payload, so the entries behind it stay aligned. Without the
+        /// consumption, the oversized stream line would be compared against
+        /// the NEXT retained entry, fail, and disable timestamp recovery for
+        /// every later line. Returns the marker's recorded time, or nil when
+        /// no marker is at the head (the journal does not cover this line —
+        /// follower behind, or a pre-marker journal).
+        mutating func consumeGapMarker() -> UInt64? {
+            guard usable, index < entries.count, entries[index].isGapMarker else { return nil }
+            let unixNano = entries[index].unixNano
+            index += 1
+            return unixNano
         }
 
         /// Whether a content mismatch has disabled matching — the journal is
