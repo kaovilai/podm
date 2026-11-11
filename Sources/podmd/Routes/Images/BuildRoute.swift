@@ -585,6 +585,8 @@ extension BuildRoute {
 
         let builtReference: String
         let builtDigest: String
+        // The ID docker clients should record (aux / quiet / --iidfile):
+        let builtConfigID: String?
 
         if rosettaPlatforms.isEmpty || qemuPlatforms.isEmpty {
             // Not a mixed request — single build, exactly as before.
@@ -599,6 +601,7 @@ extension BuildRoute {
             )
             builtReference = result.reference
             builtDigest = result.digest
+            builtConfigID = result.configID
         } else {
             sendStreamMessage(
                 " ---> Splitting build: \(rosettaPlatforms.map(\.description).joined(separator: ",")) via Rosetta, "
@@ -637,9 +640,9 @@ extension BuildRoute {
             // circuits on the first throw, without waiting for the other side, which could
             // still be mid-build (and mid-tagging `qemuTag`/`rosettaTag`) by the time cleanup
             // below runs, racing a delete against a still-in-progress create.
-            let rosettaOutcome: Result<(reference: String, digest: String), Error>
+            let rosettaOutcome: Result<(reference: String, digest: String, configID: String?), Error>
             do { rosettaOutcome = .success(try await rosettaResult) } catch { rosettaOutcome = .failure(error) }
-            let qemuOutcome: Result<(reference: String, digest: String), Error>
+            let qemuOutcome: Result<(reference: String, digest: String, configID: String?), Error>
             do { qemuOutcome = .success(try await qemuResult) } catch { qemuOutcome = .failure(error) }
 
             switch (rosettaOutcome, qemuOutcome) {
@@ -647,11 +650,13 @@ extension BuildRoute {
                 sendStreamMessage(" ---> Merging split builds into \(imageName)")
                 do {
                     builtDigest = try await manifestClient.mergeAndTag(name: imageName, images: [rosetta.reference, qemu.reference], logger: logger)
-                    // Every ADDITIONAL requested tag gets the same merged
-                    // manifest (issue #52) — mergeAndTag is create-or-update
-                    // per name, so repeating it per tag is idempotent.
+                    // Every ADDITIONAL requested tag gets the SAME index via a
+                    // true retag (issue #52) — re-running mergeAndTag per name
+                    // would carry each destination's pre-existing annotations
+                    // and could produce a DIFFERENT index for a tag that
+                    // already existed with different annotations.
                     for extraTag in allTags.dropFirst() {
-                        _ = try await manifestClient.mergeAndTag(name: extraTag, images: [rosetta.reference, qemu.reference], logger: logger)
+                        _ = try await manifestClient.retag(from: imageName, to: extraTag)
                     }
                 } catch {
                     // Both halves succeeded and are still tagged — clean up regardless of
@@ -663,6 +668,9 @@ extension BuildRoute {
                 try? await manifestClient.delete(name: rosettaTag)
                 try? await manifestClient.delete(name: qemuTag)
                 builtReference = imageName
+                // A merged multi-arch index has no single config digest; the
+                // index digest is the ID clients record for manifest lists.
+                builtConfigID = nil
             case (.failure(let rosettaError), .failure(let qemuError)):
                 // Both halves failed — the thrown error only ever carries one of them
                 // (matching the single-failure case below), so log the other rather than
@@ -699,13 +707,21 @@ extension BuildRoute {
         // this response) genuinely succeeded. Real buildah/podman builds emit
         // the bare image ID as its own stream line for exactly this reason;
         // mirror that here so the client recognizes success.
-        let bareID = builtDigest.hasPrefix("sha256:") ? String(builtDigest.dropFirst("sha256:".count)) : builtDigest
+        // The ID clients record: the SELECTED manifest's config digest (what
+        // `docker image inspect` reports as Id) for a normal build, the
+        // index digest for a merged multi-arch manifest list. Using the
+        // index digest for single-platform builds made --iidfile disagree
+        // with inspect (review of #56).
+        let recordedImageID = builtConfigID ?? builtDigest
+        let bareID =
+            recordedImageID.hasPrefix("sha256:")
+            ? String(recordedImageID.dropFirst("sha256:".count)) : recordedImageID
 
         // The docker CLI's classic builder captures the image ID for
         // --iidfile ONLY from the aux message (issue #53); podman clients
         // ignore unknown message types. Sent UNGATED — quiet mode must
         // still carry it.
-        sendAuxImageID(builtDigest)
+        sendAuxImageID(recordedImageID)
 
         // Real podman clients (pkg/bindings/images/build.go) only treat a clean
         // stream EOF as success if they've already seen a "stream" line whose
@@ -721,7 +737,7 @@ extension BuildRoute {
         // Send success message in Docker API format (progress — suppressed
         // in quiet mode), one line per requested tag like the real daemons.
         sendStreamMessage("Successfully built \(imageName)")
-        for tag in allTags.dropFirst() {
+        for tag in allTags {
             sendStreamMessage("Successfully tagged \(tag)")
         }
 
@@ -751,7 +767,7 @@ extension BuildRoute {
         systemConfig: ContainerSystemConfig,
         sendStreamMessage: @escaping @Sendable (String) -> Void,
         logger: Logger
-    ) async throws -> (reference: String, digest: String) {
+    ) async throws -> (reference: String, digest: String, configID: String?) {
         let timeout: Duration = .seconds(300)
 
         sendStreamMessage(" ---> Connecting to build daemon (\(qemu ? "QEMU" : "Rosetta") builder)")
@@ -848,6 +864,16 @@ extension BuildRoute {
         guard let firstImage = loaded.images.first else {
             throw ContainerizationError(.internalError, message: "Build produced no image")
         }
-        return (reference: firstImage.reference, digest: firstImage.digest)
+        // The inspect-style image ID (`docker image inspect`'s Id): the
+        // SELECTED manifest's CONFIG digest, not the index digest — docker
+        // build --iidfile records this, so aux.ID and the quiet ID must
+        // match it or --iidfile and inspect disagree (review of #56).
+        let configID: String?
+        if let firstPlatform = platforms.first {
+            configID = (try? await firstImage.manifest(for: firstPlatform))?.config.digest
+        } else {
+            configID = nil
+        }
+        return (reference: firstImage.reference, digest: firstImage.digest, configID: configID)
     }
 }

@@ -36,6 +36,7 @@ struct MockManifestClient: ClientManifestServiceProtocol {
     var inspectHandler: (@Sendable (String) async throws -> Index)?
     var createHandler: (@Sendable (String, [String], Bool) async throws -> String)?
     var mergeAndTagHandler: (@Sendable (String, [String]) async throws -> String)?
+    var retagHandler: (@Sendable (String, String) async throws -> String)?
     var addHandler: (@Sendable (String, [String]) async throws -> String)?
     var removeDigestHandler: (@Sendable (String, String) async throws -> String)?
     var removeDigestsHandler: (@Sendable (String, [String]) async throws -> String)?
@@ -73,6 +74,12 @@ struct MockManifestClient: ClientManifestServiceProtocol {
         await recorder?.record("mergeAndTag(\(name), \(images))")
         guard let mergeAndTagHandler else { throw Unconfigured(method: "mergeAndTag") }
         return try await mergeAndTagHandler(name, images)
+    }
+
+    func retag(from: String, to: String) async throws -> String {
+        await recorder?.record("retag(\(from) -> \(to))")
+        guard let retagHandler else { throw Unconfigured(method: "retag") }
+        return try await retagHandler(from, to)
     }
 
     func add(name: String, images: [String], logger: Logger) async throws -> String {
