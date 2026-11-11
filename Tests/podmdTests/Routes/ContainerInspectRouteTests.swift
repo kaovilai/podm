@@ -454,3 +454,82 @@ private struct InspectMock: ClientContainerProtocol {
         ([], 0)
     }
 }
+
+// MARK: - Size reporting (`docker inspect --size` / ?size=1)
+
+/// Scripted per-container disk usage: a fixed byte count, or a simulated
+/// lookup failure when `fails` is set.
+private struct InspectSizeDiskUsageProvider: ContainerDiskUsageProviding {
+    let bytes: UInt64
+    var fails = false
+
+    func diskUsage(id: String) async throws -> UInt64 {
+        if fails {
+            throw Abort(.internalServerError, reason: "simulated disk usage lookup failure")
+        }
+        return bytes
+    }
+}
+
+@Suite("ContainerInspectRoute size reporting")
+struct ContainerInspectRouteSizeTests {
+
+    private func withRoute(
+        container: ContainerSnapshot,
+        diskUsageProvider: ContainerDiskUsageProviding,
+        test: @escaping (Application) async throws -> Void
+    ) async throws {
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+
+            try app.register(
+                collection: ContainerInspectRoute(client: InspectMock(snapshot: container), diskUsageProvider: diskUsageProvider))
+            try await test(app)
+        }
+    }
+
+    private func makeRunning(id: String) -> ContainerSnapshot {
+        makeSnapshot(id: id, status: .running, configuredNetworks: [], liveNetworks: [])
+    }
+
+    @Test("?size=1 reports Apple's aggregate usage as SizeRootFs and omits SizeRw")
+    func sizeParamPopulatesSizeRootFs() async throws {
+        let container = makeRunning(id: "c1")
+        try await withRoute(container: container, diskUsageProvider: InspectSizeDiskUsageProvider(bytes: 1_048_576)) { app in
+            try await app.testing().test(.GET, "/v1.51/containers/c1/json?size=1") { res async throws in
+                let inspect = try res.content.decode(RESTContainerInspect.self)
+                #expect(inspect.SizeRootFs == 1_048_576)
+                // Apple exposes one aggregate figure, not Docker's rw/rootfs
+                // split — SizeRw stays omitted rather than duplicating it.
+                #expect(inspect.SizeRw == nil)
+            }
+        }
+    }
+
+    @Test("Without the size param both size fields stay omitted")
+    func noSizeParamOmitsSizes() async throws {
+        let container = makeRunning(id: "c1")
+        try await withRoute(container: container, diskUsageProvider: InspectSizeDiskUsageProvider(bytes: 1_048_576)) { app in
+            try await app.testing().test(.GET, "/v1.51/containers/c1/json") { res async throws in
+                let inspect = try res.content.decode(RESTContainerInspect.self)
+                #expect(inspect.SizeRootFs == nil)
+                #expect(inspect.SizeRw == nil)
+            }
+        }
+    }
+
+    @Test("A failed usage lookup still inspects, with sizes omitted")
+    func failedLookupStillInspects() async throws {
+        let container = makeRunning(id: "c1")
+        try await withRoute(container: container, diskUsageProvider: InspectSizeDiskUsageProvider(bytes: 0, fails: true)) { app in
+            try await app.testing().test(.GET, "/v1.51/containers/c1/json?size=1") { res async throws in
+                #expect(res.status == .ok)
+                let inspect = try res.content.decode(RESTContainerInspect.self)
+                #expect(inspect.SizeRootFs == nil)
+                #expect(inspect.SizeRw == nil)
+            }
+        }
+    }
+}

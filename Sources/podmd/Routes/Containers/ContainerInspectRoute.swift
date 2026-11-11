@@ -3,10 +3,26 @@ import ContainerResource
 import Containerization
 import Vapor
 
+struct ContainerInspectQuery: Content {
+    var size: Bool?
+}
+
 struct ContainerInspectRoute: RouteCollection {
     let client: ClientContainerProtocol
+    let diskUsageProvider: ContainerDiskUsageProviding
+
+    init(
+        client: ClientContainerProtocol,
+        diskUsageProvider: ContainerDiskUsageProviding = ContainerClientDiskUsageProvider()
+    ) {
+        self.client = client
+        self.diskUsageProvider = diskUsageProvider
+    }
+
     func boot(routes: RoutesBuilder) throws {
-        try routes.registerVersionedRoute(.GET, pattern: "/containers/{id}/json", use: ContainerInspectRoute.handler(client: client))
+        try routes.registerVersionedRoute(
+            .GET, pattern: "/containers/{id}/json",
+            use: ContainerInspectRoute.handler(client: client, diskUsageProvider: diskUsageProvider))
     }
 }
 
@@ -45,7 +61,10 @@ extension ContainerInspectRoute {
         )
     }
 
-    static func handler(client: ClientContainerProtocol) -> @Sendable (Request) async throws -> RESTContainerInspect {
+    static func handler(
+        client: ClientContainerProtocol,
+        diskUsageProvider: ContainerDiskUsageProviding = ContainerClientDiskUsageProvider()
+    ) -> @Sendable (Request) async throws -> RESTContainerInspect {
         { req in
             guard let id = req.parameters.get("id") else {
                 throw Abort(.badRequest, reason: "Missing container ID")
@@ -206,6 +225,21 @@ extension ContainerInspectRoute {
                 Health: health
             )
 
+            // `docker inspect --size` / ?size=1: Apple exposes a single
+            // aggregate disk-usage figure (no rw-vs-rootfs split), so it is
+            // reported as SizeRootFs and SizeRw stays omitted rather than
+            // duplicating the number into both fields. A failed lookup (e.g.
+            // the container is being torn down) logs and leaves both omitted
+            // instead of failing the whole inspect.
+            var sizeRootFs: Int64?
+            if try req.query.decode(ContainerInspectQuery.self).size == true {
+                do {
+                    sizeRootFs = Int64(clamping: try await diskUsageProvider.diskUsage(id: container.id))
+                } catch {
+                    req.logger.warning("container disk usage lookup failed for \(container.id): \(error)")
+                }
+            }
+
             return RESTContainerInspect(
                 Id: DockerContainerID.hexId(for: container),
                 Created: AppleContainerTimestampResolver.iso8601Timestamp(createdAt),
@@ -228,8 +262,10 @@ extension ContainerInspectRoute {
                 ExecIDs: nil,
                 HostConfig: hostConfig,
                 GraphDriver: ContainerDriverData(Name: "", Data: [:]),
+                // Same aggregate-vs-split policy as the list route: Apple's one
+                // figure lands in SizeRootFs, SizeRw stays omitted.
                 SizeRw: nil,
-                SizeRootFs: nil,
+                SizeRootFs: sizeRootFs,
                 Mounts: mounts,
                 Config: containerConfig,
                 NetworkSettings: networkSettings

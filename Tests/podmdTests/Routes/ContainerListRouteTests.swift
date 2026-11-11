@@ -132,3 +132,103 @@ struct ContainerListRouteNetworkSettingsTests {
         }
     }
 }
+
+/// Scripted per-container disk usage for the size-reporting suites: fixed byte
+/// counts by native id, with opt-in simulated lookup failures.
+private struct ScriptedDiskUsageProvider: ContainerDiskUsageProviding {
+    let bytesById: [String: UInt64]
+    var failingIds: Set<String> = []
+
+    func diskUsage(id: String) async throws -> UInt64 {
+        if failingIds.contains(id) {
+            throw Abort(.internalServerError, reason: "simulated disk usage lookup failure")
+        }
+        return bytesById[id] ?? 0
+    }
+}
+
+@Suite("ContainerListRoute size reporting")
+struct ContainerListRouteSizeTests {
+
+    private func withRoute(
+        containers: [ContainerSnapshot],
+        diskUsageProvider: ContainerDiskUsageProviding,
+        test: @escaping (Application) async throws -> Void
+    ) async throws {
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+
+            let client = MockContainerClient(containers: containers)
+            try app.register(
+                collection: ContainerListRoute(client: client, diskUsageProvider: diskUsageProvider))
+            try await test(app)
+        }
+    }
+
+    @Test("?size=1 reports Apple's aggregate usage as SizeRootFs and omits SizeRw")
+    func sizeParamPopulatesSizeRootFs() async throws {
+        let containers = [
+            makeRunningSnapshot(id: "c1", networks: []),
+            makeRunningSnapshot(id: "c2", networks: []),
+        ]
+        let provider = ScriptedDiskUsageProvider(bytesById: ["c1": 4096, "c2": 1_048_576])
+        try await withRoute(containers: containers, diskUsageProvider: provider) { app in
+            try await app.testing().test(.GET, "/v1.51/containers/json?size=1") { res async throws in
+                let summaries = try res.content.decode([RESTContainerSummary].self)
+                let byName = Dictionary(uniqueKeysWithValues: summaries.map { ($0.Names.first ?? "", $0) })
+                #expect(byName["/c1"]?.SizeRootFs == 4096)
+                #expect(byName["/c2"]?.SizeRootFs == 1_048_576)
+                // Apple exposes one aggregate figure, not Docker's rw/rootfs
+                // split — SizeRw stays omitted rather than duplicating it.
+                #expect(byName["/c1"]?.SizeRw == nil)
+                #expect(byName["/c2"]?.SizeRw == nil)
+            }
+        }
+    }
+
+    @Test("Without the size param both size fields stay omitted")
+    func noSizeParamOmitsSizes() async throws {
+        let container = makeRunningSnapshot(id: "c1", networks: [])
+        let provider = ScriptedDiskUsageProvider(bytesById: ["c1": 4096])
+        try await withRoute(containers: [container], diskUsageProvider: provider) { app in
+            try await app.testing().test(.GET, "/v1.51/containers/json") { res async throws in
+                let summaries = try res.content.decode([RESTContainerSummary].self)
+                #expect(summaries.first?.SizeRootFs == nil)
+                #expect(summaries.first?.SizeRw == nil)
+            }
+        }
+    }
+
+    @Test("size=false behaves like no size param")
+    func sizeFalseOmitsSizes() async throws {
+        let container = makeRunningSnapshot(id: "c1", networks: [])
+        let provider = ScriptedDiskUsageProvider(bytesById: ["c1": 4096])
+        try await withRoute(containers: [container], diskUsageProvider: provider) { app in
+            try await app.testing().test(.GET, "/v1.51/containers/json?size=false") { res async throws in
+                let summaries = try res.content.decode([RESTContainerSummary].self)
+                #expect(summaries.first?.SizeRootFs == nil)
+                #expect(summaries.first?.SizeRw == nil)
+            }
+        }
+    }
+
+    @Test("A failed usage lookup skips that container's size instead of failing the listing")
+    func failedLookupKeepsListing() async throws {
+        let containers = [
+            makeRunningSnapshot(id: "c1", networks: []),
+            makeRunningSnapshot(id: "c2", networks: []),
+        ]
+        let provider = ScriptedDiskUsageProvider(bytesById: ["c1": 4096], failingIds: ["c2"])
+        try await withRoute(containers: containers, diskUsageProvider: provider) { app in
+            try await app.testing().test(.GET, "/v1.51/containers/json?size=1") { res async throws in
+                #expect(res.status == .ok)
+                let summaries = try res.content.decode([RESTContainerSummary].self)
+                let byName = Dictionary(uniqueKeysWithValues: summaries.map { ($0.Names.first ?? "", $0) })
+                #expect(byName["/c1"]?.SizeRootFs == 4096)
+                #expect(byName["/c2"]?.SizeRootFs == nil)
+            }
+        }
+    }
+}
