@@ -101,6 +101,15 @@ protocol ClientContainerProtocol: Sendable {
     @discardableResult
     func start(id: String, detachKeys: String?) async throws -> Bool
     func stop(id: String, signal: String?, timeout: Int?) async throws
+    /// The delete path's stop of a running container being force-removed.
+    /// Same stop semantics as `stop(id:signal:timeout:)` with default
+    /// signal/timeout, but the runtime-job wedge guard (issue #45) is scoped
+    /// INSIDE the `VMLifecycleAdmission` slot `stop` takes: its timer starts
+    /// only once the stop is actually executing, never while it queues
+    /// behind healthy concurrent VM transitions. Force-remove semantics make
+    /// booting the runtime job out of launchd (killing the runtime)
+    /// legitimate.
+    func stopForForceRemoval(id: String) async throws
     /// Restarts a container (stop, then start). The return value is whether
     /// THIS call performed the boot transition — `start`'s semantics: false
     /// when the internal start raced another caller that booted the
@@ -117,11 +126,25 @@ protocol ClientContainerProtocol: Sendable {
     func prune(filters: [String: [String]]) async throws -> (deletedContainers: [String], spaceReclaimed: Int64)
 }
 
+extension ClientContainerProtocol {
+    /// Default `stopForForceRemoval`: the plain stop. The production
+    /// `ClientContainerService` overrides this with the admission-scoped
+    /// wedge guard; test mocks (which model neither admission queues nor
+    /// wedges) inherit the passthrough.
+    func stopForForceRemoval(id: String) async throws {
+        try await stop(id: id, signal: nil, timeout: nil)
+    }
+}
+
 enum ClientContainerError: Error {
     case notFound(id: String)
     case notRunning(id: String)
     case ambiguousId(reference: String, matches: [String])
     case unsupportedCondition(ContainerWaitCondition)
+    /// The operation never completed even after the container's wedged
+    /// runtime job was booted out of launchd — the Apple Container
+    /// apiserver itself is stuck (issue #45, apple/container#1884).
+    case runtimeJobWedged(nativeId: String, label: String)
 }
 
 struct ClientContainerService: ClientContainerProtocol {
@@ -399,6 +422,46 @@ struct ClientContainerService: ClientContainerProtocol {
         }
     }
 
+    func stopForForceRemoval(id: String) async throws {
+        guard let container = try await getContainer(id: id) else {
+            throw ClientContainerError.notFound(id: id)
+        }
+        await ContainerRestartState.shared.markExplicitlyStopped(id: container.id)
+        try await Self.withAdmissionScopedRecovery(container: container) {
+            try await self.stopInternal(container: container, signal: nil, timeout: nil)
+        }
+    }
+
+    /// The delete path's force-stop: the runtime-job wedge guard (issue #45)
+    /// wraps only the native stop, INSIDE the `VMLifecycleAdmission` slot
+    /// `stop` acquires — the wedge timer starts once the stop is executing,
+    /// not while it is still queued behind healthy concurrent VM transitions
+    /// (a healthy boot/stop backlog must never be mistaken for a wedge, and
+    /// a bootout must never fire outside the limiter).
+    ///
+    /// Static with injected `stop`/`bootout`/windows so tests exercise the
+    /// admission/recovery composition without a live apiserver.
+    static func withAdmissionScopedRecovery(
+        container: ContainerSnapshot,
+        admission: VMLifecycleAdmission = .shared,
+        firstWindowNs: UInt64 = ContainerRuntimeJobRecovery.firstWindowNs,
+        secondWindowNs: UInt64 = ContainerRuntimeJobRecovery.secondWindowNs,
+        bootout: @escaping @Sendable (_ domainQualifiedLabel: String) -> Int32 = ContainerRuntimeJobRecovery.liveBootout,
+        stop: @escaping @Sendable () async throws -> Void
+    ) async throws {
+        try await admission.withSlot {
+            try await ContainerRuntimeJobRecovery.withHangRecovery(
+                nativeId: container.id,
+                runtimeHandler: container.configuration.runtimeHandler,
+                firstWindowNs: firstWindowNs,
+                secondWindowNs: secondWindowNs,
+                bootout: bootout
+            ) {
+                try await stop()
+            }
+        }
+    }
+
     private func stopInternal(container: ContainerSnapshot, signal: String?, timeout: Int?) async throws {
         let signal = signal ?? "SIGTERM"
         let options = ContainerStopOptions(timeoutInSeconds: Int32(timeout ?? 5), signal: signal)
@@ -449,7 +512,15 @@ struct ClientContainerService: ClientContainerProtocol {
         guard let container = try await getContainer(id: id) else {
             throw ClientContainerError.notFound(id: id)
         }
-        try await containerClient.withClient { try await $0.delete(id: container.id) }
+        // The apiserver's delete can hang forever when the container's
+        // runtime job is wedged in launchd (issue #45) — bound it, boot the
+        // job out on timeout, then give it a second window.
+        try await ContainerRuntimeJobRecovery.withHangRecovery(
+            nativeId: container.id,
+            runtimeHandler: container.configuration.runtimeHandler
+        ) {
+            try await self.containerClient.withClient { try await $0.delete(id: container.id) }
+        }
     }
 
     // Poll until the container is no longer running, then return the real exit
@@ -585,7 +656,14 @@ struct ClientContainerService: ClientContainerProtocol {
                 // container is deleted — computing it after would produce a
                 // different key and miss the persisted override.
                 let hexId = DockerContainerID.hexId(for: container)
-                try await containerClient.withClient { try await $0.delete(id: container.id) }
+                // Same wedge guard as delete(id:) — one wedged container
+                // must not hang the whole prune loop forever (issue #45).
+                try await ContainerRuntimeJobRecovery.withHangRecovery(
+                    nativeId: container.id,
+                    runtimeHandler: container.configuration.runtimeHandler
+                ) {
+                    try await self.containerClient.withClient { try await $0.delete(id: container.id) }
+                }
                 deletedIds.append(container.id)
                 // A renamed container's override dies with it — otherwise the
                 // name stays reserved (create/rename 409) forever, even across
