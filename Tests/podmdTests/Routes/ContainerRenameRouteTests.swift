@@ -130,7 +130,9 @@ struct ContainerRenameRouteTests {
             try await app.testing().test(.POST, "/v1.51/containers/\(id)/rename?name=bad%20name!") { res async throws in
                 #expect(res.status == .badRequest)
                 let body = try res.content.decode(RenameErrorBody.self)
-                #expect(body.reason.contains("invalid container name"))
+                // moby's reserveName message shape (daemon/names.go).
+                #expect(body.reason.contains("Invalid container name (bad name!)"))
+                #expect(body.reason.contains("[a-zA-Z0-9][a-zA-Z0-9_.-] are allowed"))
             }
         }
         let hexId = DockerContainerID.hexId(for: snapshot)
@@ -154,15 +156,22 @@ struct ContainerRenameRouteTests {
         #expect(stored == nil)
     }
 
-    @Test("a name taken by another container's native id answers 409")
+    @Test("a name taken by another container's native id answers 409 with moby's conflict message")
     func conflictWithNativeName() async throws {
         let first = try makeStoppedSnapshot(id: "rename-owner-\(UUID().uuidString.prefix(6).lowercased())")
         let second = try makeStoppedSnapshot(id: "rename-taker-\(UUID().uuidString.prefix(6).lowercased())")
+        let firstHex = DockerContainerID.hexId(for: first)
         try await withRenameApp([first, second]) { app in
             try await app.testing().test(.POST, "/v1.51/containers/\(second.id)/rename?name=\(first.id)") { res async throws in
                 #expect(res.status == .conflict)
                 let body = try res.content.decode(RenameErrorBody.self)
-                #expect(body.reason.contains("already in use"))
+                // moby's nameConflictError shape (daemon/errors.go): the
+                // taken name (canonicalized with a leading slash) and the
+                // full Docker id of the container that holds it.
+                #expect(
+                    body.reason
+                        == "Conflict. The container name \"/\(first.id)\" is already in use by container \"\(firstHex)\". You have to remove (or rename) that container to be able to reuse that name."
+                )
             }
         }
         let hexId = DockerContainerID.hexId(for: second)
@@ -178,9 +187,15 @@ struct ContainerRenameRouteTests {
         await ContainerNameOverrideStore.shared.set(hexId: firstHex, name: "\(first.id)-renamed")
         defer { Task { await ContainerNameOverrideStore.shared.remove(hexId: firstHex) } }
         try await withRenameApp([first, second]) { app in
-            // The overridden name is taken.
-            try await app.testing().test(.POST, "/v1.51/containers/\(second.id)/rename?name=\(first.id)-renamed") { res async in
+            // The overridden name is taken — and the 409 names the override's
+            // owner, like moby's nameConflictError.
+            try await app.testing().test(.POST, "/v1.51/containers/\(second.id)/rename?name=\(first.id)-renamed") { res async throws in
                 #expect(res.status == .conflict)
+                let body = try res.content.decode(RenameErrorBody.self)
+                #expect(
+                    body.reason
+                        == "Conflict. The container name \"/\(first.id)-renamed\" is already in use by container \"\(firstHex)\". You have to remove (or rename) that container to be able to reuse that name."
+                )
             }
             // The shadowed native id is still resolvable, so it stays reserved
             // — unlike moby, a rename cannot free a native id.
@@ -193,7 +208,7 @@ struct ContainerRenameRouteTests {
         #expect(stored == nil)
     }
 
-    @Test("a rename emits a container 'rename' event with old_name and new name")
+    @Test("a rename emits a container 'rename' event with oldName and new name")
     func renameEmitsEvent() async throws {
         let id = "rename-evt-\(UUID().uuidString.prefix(8).lowercased())"
         let snapshot = try makeStoppedSnapshot(id: id)
@@ -219,7 +234,9 @@ struct ContainerRenameRouteTests {
         #expect(event?.Type == "container")
         #expect(event?.Actor.ID == hexId)
         #expect(event?.Actor.Attributes["name"] == "\(id)-renamed")
-        #expect(event?.Actor.Attributes["old_name"] == id)
+        // moby's attribute key is "oldName" (daemon/rename.go
+        // LogContainerEventWithAttributes), not snake_case.
+        #expect(event?.Actor.Attributes["oldName"] == id)
     }
 
     @Test("a running container's DNS alias swaps from the old name to the new one")
