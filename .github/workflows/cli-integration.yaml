@@ -318,6 +318,15 @@ jobs:
           EOF
           sudo -E podman build -t cli-int-podman-build /tmp/testbuild-podman
           sudo -E podman image ls | grep 'cli-int-podman-build'
+      - name: podman build -f (absolute dockerfile wire format)
+        if: inputs.enable-vm-steps == true
+        run: |
+          # Issue #49: real podman clients send `-f` as an ABSOLUTE path
+          # (dockerfile=["/abs/…/Dockerfile"]); without this step the wire
+          # format was never exercised and a regression that rejects it
+          # passes the no--f smoke test above.
+          sudo -E podman build -f /tmp/testbuild-podman/Dockerfile -t cli-int-podman-build-f /tmp/testbuild-podman
+          sudo -E podman image ls | grep 'cli-int-podman-build-f'
 
       # Manifest workflow mirrored from pr-check.yaml's integration-test job:
       # create/add/inspect/exists need no running container or BuildKit VM.

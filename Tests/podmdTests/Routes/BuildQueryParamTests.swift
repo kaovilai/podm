@@ -94,10 +94,28 @@ struct BuildDockerfileQueryParamTests {
         }
     }
 
-    @Test("An absolute dockerfile path is rejected with a client error, not silently substituted")
-    func absolutePathIsRejected() throws {
+    /// Issue #49: real podman clients send `-f` as an ABSOLUTE path (podman 6.1.4,
+    /// reproduced: `podman build -f Dockerfile .` arrives as
+    /// `dockerfile=["/abs/…/Dockerfile"]`), and podman's daemon accepts absolute
+    /// paths as-is (pkg/api/handlers/compat/images_build.go). This test previously
+    /// enshrined the wrong rule — absolute-rejected — which is exactly why the bug
+    /// shipped: unit tests passed while every real `podman build -f …` failed.
+    @Test("An absolute dockerfile path is accepted — podman's -f wire format")
+    func absolutePathIsAccepted() throws {
+        #expect(try BuildRoute.parseDockerfileQueryParam("/Users/me/proj/Dockerfile") == "/Users/me/proj/Dockerfile")
+    }
+
+    @Test("A JSON-array-encoded absolute path (real podman's exact format) is accepted")
+    func jsonArrayAbsolutePathIsAccepted() throws {
+        #expect(
+            try BuildRoute.parseDockerfileQueryParam(#"["/Users/me/proj/Dockerfile"]"#)
+                == "/Users/me/proj/Dockerfile")
+    }
+
+    @Test("An absolute path containing '..' is still rejected — no real client sends traversal")
+    func absoluteTraversalPathIsRejected() throws {
         do {
-            _ = try BuildRoute.parseDockerfileQueryParam("/etc/passwd")
+            _ = try BuildRoute.parseDockerfileQueryParam("/safe/../../etc/passwd")
             Issue.record("expected parseDockerfileQueryParam to throw")
         } catch let abort as Abort {
             #expect(abort.status == .badRequest)
@@ -114,14 +132,27 @@ struct BuildDockerfileQueryParamTests {
         }
     }
 
-    @Test("A JSON-array-encoded escaping path is also rejected")
+    @Test("A JSON-array-encoded relative traversal path is also rejected")
     func jsonArrayEscapingPathIsRejected() throws {
         do {
-            _ = try BuildRoute.parseDockerfileQueryParam(#"["/etc/passwd"]"#)
+            _ = try BuildRoute.parseDockerfileQueryParam(#"["../../etc/passwd"]"#)
             Issue.record("expected parseDockerfileQueryParam to throw")
         } catch let abort as Abort {
             #expect(abort.status == .badRequest)
         }
+    }
+
+    @Test("Absolute dockerfile params resolve to their own host path; relative ones join the extracted context")
+    func dockerfilePathResolution() {
+        #expect(
+            BuildRoute.resolvedDockerfilePath("/Users/me/proj/Dockerfile", contextDir: "/tmp/ctx123")
+                == "/Users/me/proj/Dockerfile")
+        #expect(
+            BuildRoute.resolvedDockerfilePath("Dockerfile", contextDir: "/tmp/ctx123")
+                == "/tmp/ctx123/Dockerfile")
+        #expect(
+            BuildRoute.resolvedDockerfilePath("sub/dir/Containerfile", contextDir: "/tmp/ctx123")
+                == "/tmp/ctx123/sub/dir/Containerfile")
     }
 
     @Test("An empty scalar dockerfile value falls back to the default Dockerfile name, matching an omitted param")
