@@ -25,11 +25,16 @@ enum PodmanConnectionRegistrar {
     /// Production wraps `ProcessSpawn.run`; tests inject a recorder.
     typealias Spawn = (_ executable: String, _ arguments: [String]) -> (exitStatus: Int32, output: String?)
 
-    /// Default seam over the real process spawn.
-    private static func realSpawn(_ executable: String, _ arguments: [String]) -> (
+    /// Default seam over the real process spawn. Output capture is ON: the
+    /// JSON listing must be readable in production (ProcessSpawn.run
+    /// defaults to discarding both streams, which would make every listing
+    /// parse as nil — "unknown" status and a skipped uninstall — while the
+    /// injected test fixtures, which hand back strings directly, bypassed
+    /// exactly that).
+    static func realSpawn(_ executable: String, _ arguments: [String]) -> (
         exitStatus: Int32, output: String?
     ) {
-        ProcessSpawn.run(executable, arguments)
+        ProcessSpawn.run(executable, arguments, captureOutput: true)
     }
 
     /// One entry of `podman system connection list --format json`.

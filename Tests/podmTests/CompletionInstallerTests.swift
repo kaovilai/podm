@@ -132,6 +132,30 @@ struct CompletionInstallerTests {
         }
     }
 
+    /// Review round 2: a `_podm` DIRECTORY is not podm's either — install
+    /// must refuse it, and uninstall must never `removeItem` a directory
+    /// (which would recurse into the user's files).
+    @Test("a directory named _podm is refused by install and preserved by uninstall")
+    func directoryIsPreserved() throws {
+        let userDir = tempDir("user")
+        let fallbackDir = tempDir("fallback")
+        let dirPath = userDir.appendingPathComponent("_podm")
+        try FileManager.default.createDirectory(at: dirPath, withIntermediateDirectories: true)
+        try "user's own file".write(
+            to: dirPath.appendingPathComponent("keep.txt"), atomically: true, encoding: .utf8)
+
+        #expect(throws: (any Error).self) {
+            try CompletionInstaller.installZsh(userCompletionsDir: userDir, fallbackDir: fallbackDir)
+        }
+
+        let removed = CompletionInstaller.uninstallZsh(
+            userCompletionsDir: userDir, fallbackDir: fallbackDir)
+        #expect(removed.isEmpty, "a directory must not be removed")
+        #expect(
+            FileManager.default.fileExists(atPath: dirPath.appendingPathComponent("keep.txt").path),
+            "the directory's contents must survive")
+    }
+
     /// Review round 1: install refuses a symlinked `_podm`, so uninstall must
     /// not delete one either — that would remove the user's own completion
     /// setup, which podm never installed.

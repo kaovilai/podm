@@ -133,6 +133,18 @@ struct PodmanConnectionRegistrarTests {
         #expect(!PodmanConnectionRegistrar.unregister(podmanPath: "/podman", spawn: recorder.spawn))
     }
 
+    /// Review round 2: the production seam used to spawn WITHOUT output
+    /// capture, so `list --format json` came back nil in production while
+    /// the injected fixtures (which hand back strings) bypassed the bug —
+    /// status always printed "unknown" and uninstall never removed the
+    /// connection. Echo proves the seam captures stdout end-to-end.
+    @Test("the production spawn seam captures output")
+    func realSpawnCapturesOutput() {
+        let result = PodmanConnectionRegistrar.realSpawn("/bin/echo", ["captured-marker"])
+        #expect(result.exitStatus == 0)
+        #expect(result.output?.contains("captured-marker") == true, "output must be captured, got nil")
+    }
+
     @Test("listConnections decodes entries and distinguishes CLI failure")
     func listConnectionsDecoding() {
         let recorder = SpawnRecorder(
