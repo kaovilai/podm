@@ -6,6 +6,6 @@ struct PluginsPrivilegesRoute: RouteCollection {
     }
 
     static func handler(_ req: Request) async throws -> Response {
-        NotImplemented.respond("/plugins/privileges", req.method.rawValue)
+        DeliberateStubResponse.notImplemented("/plugins/privileges", req.method.rawValue)
     }
 }

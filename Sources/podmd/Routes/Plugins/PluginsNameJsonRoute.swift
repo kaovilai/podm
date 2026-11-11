@@ -6,6 +6,6 @@ struct PluginsNameJsonRoute: RouteCollection {
     }
 
     static func handler(_ req: Request) async throws -> Response {
-        NotImplemented.respond("/plugins/{name}/json", req.method.rawValue)
+        DeliberateStubResponse.notImplemented("/plugins/{name}/json", req.method.rawValue)
     }
 }

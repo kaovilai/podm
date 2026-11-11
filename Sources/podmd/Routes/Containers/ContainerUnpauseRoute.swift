@@ -6,6 +6,6 @@ struct ContainerUnpauseRoute: RouteCollection {
     }
 
     static func handler(_ req: Request) async throws -> Response {
-        NotImplemented.respond("/containers/{id}/unpause", req.method.rawValue)
+        DeliberateStubResponse.pauseUnavailable()
     }
 }

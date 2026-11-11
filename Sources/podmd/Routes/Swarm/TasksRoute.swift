@@ -6,6 +6,6 @@ struct TasksRoute: RouteCollection {
     }
 
     static func handler(_ req: Request) async throws -> Response {
-        AppleContainerNotSupported.respond("Swarm")
+        DeliberateStubResponse.notInSwarm()
     }
 }

@@ -6,6 +6,6 @@ struct PluginsNameEnableRoute: RouteCollection {
     }
 
     static func handler(_ req: Request) async throws -> Response {
-        NotImplemented.respond("/plugins/{name}/enable", req.method.rawValue)
+        DeliberateStubResponse.notImplemented("/plugins/{name}/enable", req.method.rawValue)
     }
 }

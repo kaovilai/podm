@@ -350,7 +350,7 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `GET` | `/containers/{id}/json` | docker |  |
 | ✅ | `POST` | `/containers/{id}/kill` | docker |  |
 | ✅ | `GET` | `/containers/{id}/logs` | docker |  |
-| 🚫 | `POST` | `/containers/{id}/pause` | docker | Apple container has no pause primitive for a microVM. |
+| 🚫 | `POST` | `/containers/{id}/pause` | docker | Blocked upstream: apple/container exposes no pause XPC route, and containerization's VZ pause/resume was removed pending a vsock lifetime fix (apple/containerization#998). |
 | ✅ | `POST` | `/containers/{id}/rename` | docker |  |
 | ✅ | `POST` | `/containers/{id}/resize` | docker |  |
 | ✅ | `POST` | `/containers/{id}/restart` | docker |  |
@@ -358,7 +358,7 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `GET` | `/containers/{id}/stats` | docker |  |
 | ✅ | `POST` | `/containers/{id}/stop` | docker |  |
 | ✅ | `GET` | `/containers/{id}/top` | docker |  |
-| 🚫 | `POST` | `/containers/{id}/unpause` | docker | Apple container has no pause primitive for a microVM. |
+| 🚫 | `POST` | `/containers/{id}/unpause` | docker | Blocked upstream: apple/container exposes no pause XPC route, and containerization's VZ pause/resume was removed pending a vsock lifetime fix (apple/containerization#998). |
 | ✅ | `POST` | `/containers/{id}/update` | docker |  |
 | ✅ | `POST` | `/containers/{id}/wait` | docker |  |
 | ✅ | `GET` | `/distribution/{name:.*}/json` | docker |  |
@@ -419,9 +419,9 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | 🚫 | `GET` | `/swarm/unlockkey` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
 | 🚫 | `POST` | `/swarm/update` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
 | ✅ | `GET` | `/system/df` | docker |  |
-| 🚫 | `GET` | `/tasks` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `GET` | `/tasks/{id}` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `GET` | `/tasks/{id}/logs` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
+| 🚫 | `GET` | `/tasks` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
+| 🚫 | `GET` | `/tasks/{id}` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
+| 🚫 | `GET` | `/tasks/{id}/logs` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
 | ✅ | `GET` | `/version` | docker |  |
 | ✅ | `GET` | `/volumes` | docker |  |
 | ✅ | `POST` | `/volumes/create` | docker |  |
@@ -449,14 +449,14 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `GET` | `/libpod/containers/{id}/json` | libpod |  |
 | ✅ | `POST` | `/libpod/containers/{id}/kill` | libpod |  |
 | ✅ | `GET` | `/libpod/containers/{id}/logs` | libpod |  |
-| 🚫 | `POST` | `/libpod/containers/{id}/pause` | libpod | Apple container has no pause primitive for a microVM. |
+| 🚫 | `POST` | `/libpod/containers/{id}/pause` | libpod | Blocked upstream: apple/container exposes no pause XPC route, and containerization's VZ pause/resume was removed pending a vsock lifetime fix (apple/containerization#998). |
 | ✅ | `POST` | `/libpod/containers/{id}/rename` | libpod |  |
 | ✅ | `POST` | `/libpod/containers/{id}/restart` | libpod |  |
 | ✅ | `POST` | `/libpod/containers/{id}/start` | libpod |  |
 | ✅ | `GET` | `/libpod/containers/{id}/stats` | libpod |  |
 | ✅ | `POST` | `/libpod/containers/{id}/stop` | libpod |  |
 | ✅ | `GET` | `/libpod/containers/{id}/top` | libpod |  |
-| 🚫 | `POST` | `/libpod/containers/{id}/unpause` | libpod | Apple container has no pause primitive for a microVM. |
+| 🚫 | `POST` | `/libpod/containers/{id}/unpause` | libpod | Blocked upstream: apple/container exposes no pause XPC route, and containerization's VZ pause/resume was removed pending a vsock lifetime fix (apple/containerization#998). |
 | ✅ | `POST` | `/libpod/containers/{id}/update` | libpod |  |
 | ✅ | `POST` | `/libpod/containers/{id}/wait` | libpod |  |
 | ✅ | `GET` | `/libpod/containers/{name}/healthcheck` | libpod |  |
