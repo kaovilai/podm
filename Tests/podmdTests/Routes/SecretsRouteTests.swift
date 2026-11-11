@@ -380,6 +380,136 @@ struct SecretsRouteTests {
         }
     }
 
+    // MARK: - Review round 1 regressions
+
+    /// Review r1: map-form filter values decode strictly as booleans, and
+    /// their KEYS count regardless of the boolean (moby's `Args.Get` walks
+    /// the map's keys only — `{"names":{"alpha":false}}` still selects
+    /// alpha). A non-boolean value is a 400, never a silently-empty
+    /// selector that returns everything.
+    @Test("map-form filters: non-boolean values are 400s; keys count regardless of the boolean")
+    func mapFormFilterValues() async throws {
+        try await withSecretsApp { app in
+            _ = try await createSecret(app, name: "alpha", payload: "x")
+            _ = try await createSecret(app, name: "beta", payload: "y")
+
+            func filteredNames(_ json: String) async throws -> [String] {
+                let encoded =
+                    json.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+                var names: [String] = []
+                try await app.testing().test(.GET, "/v1.51/secrets?filters=\(encoded)") {
+                    res async throws in
+                    let reports = try JSONDecoder().decode(
+                        [DockerSecretReport].self, from: Data(buffer: res.body))
+                    names = reports.map(\.Spec.Name)
+                }
+                return names
+            }
+
+            // A STRING "true" (Go's map[string]bool decode failure) — and
+            // a number — are client errors, not "no filter".
+            for bad in [#"{"names":{"alpha":"true"}}"#, #"{"names":{"alpha":1}}"#] {
+                let encoded = bad.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+                try await app.testing().test(.GET, "/v1.51/secrets?filters=\(encoded)") {
+                    res async in
+                    #expect(res.status == .badRequest, "\(bad) must be a 400, got \(res.status)")
+                }
+            }
+            // false does NOT disable the key: alpha is still selected.
+            #expect(try await filteredNames(#"{"names":{"alpha":false}}"#) == ["alpha"])
+        }
+    }
+
+    /// Review r1: `id` filters match only IDs and `names`/`name` only
+    /// names — a selector never leaks onto the other field, even when a
+    /// name resembles an ID prefix ("alph" can never be a 25-hex ID
+    /// prefix: 'l' and 'p' are not hex digits).
+    @Test("selectors stay on their own field: id never matches a name, names never matches an ID")
+    func selectorFieldScoping() async throws {
+        try await withSecretsApp { app in
+            let a = try await createSecret(app, name: "alpha", payload: "x")
+            let b = try await createSecret(app, name: "beta", payload: "y")
+            // "alph" prefixes alpha's NAME only — an id filter must not match it.
+            try await expectNames(app, filters: ["id": ["alph"]], names: [])
+            // A names filter equal to another secret's ID prefix must not
+            // match that secret by ID.
+            try await expectNames(app, filters: ["names": [String(a.ID.prefix(10))]], names: [])
+            // A name prefix filter must not match an ID either.
+            try await expectNames(app, filters: ["name": [String(b.ID.prefix(10))]], names: [])
+            // Each field still matches its own selector.
+            try await expectNames(app, filters: ["id": [String(a.ID.prefix(8))]], names: ["alpha"])
+            try await expectNames(app, filters: ["name": ["bet"]], names: ["beta"])
+            // OR across keys composes the field-scoped results.
+            try await expectNames(
+                app, filters: ["names": ["zzz"], "id": [String(b.ID.prefix(8))]], names: ["beta"])
+        }
+    }
+
+    /// Review r1: Swift `==`/`hasPrefix` fold canonically equivalent
+    /// Unicode, but the store keeps NFC/NFD names byte-distinct
+    /// (`sameName`) — name filtering must compare UTF-8 bytes so each
+    /// spelling matches only itself.
+    @Test("NFC and NFD name spellings stay byte-distinct through names/name filters")
+    func unicodeByteDistinctFilters() async throws {
+        try await withSecretsApp { app in
+            let nfc = try await createSecret(app, name: "caf\u{E9}", payload: "x")
+            let nfd = try await createSecret(app, name: "cafe\u{301}", payload: "y")
+            #expect(nfc.ID != nfd.ID, "the byte-distinct store must hold both spellings")
+            // names (exact): each form matches only itself.
+            try await expectNames(app, filters: ["names": ["caf\u{E9}"]], names: ["caf\u{E9}"])
+            try await expectNames(app, filters: ["names": ["cafe\u{301}"]], names: ["cafe\u{301}"])
+            // name (prefix): an NFD prefix must not match the NFC spelling.
+            try await expectNames(app, filters: ["name": ["caf\u{E9}"]], names: ["caf\u{E9}"])
+            try await expectNames(app, filters: ["name": ["cafe\u{301}"]], names: ["cafe\u{301}"])
+        }
+    }
+
+    /// Review r1: this endpoint's swarm path (newListSecretsFilters →
+    /// convertKVStringsToMap → swarmkit filterMatchLabels) treats an empty
+    /// label filter value as PRESENCE-only — `team=` selects any secret
+    /// carrying `team`, whatever its value (unlike the non-swarm
+    /// MatchKVList, which would require an exactly-empty stored value).
+    @Test("label=team= is presence-only (swarm filterMatchLabels), not an exact-empty match")
+    func labelEmptyValueIsPresence() async throws {
+        try await withSecretsApp { app in
+            _ = try await createSecret(app, name: "dbpw", payload: "x", labels: ["team": "db"])
+            _ = try await createSecret(app, name: "blank", payload: "x", labels: ["team": ""])
+            // "team=" requires only the key: both team=db and team="" match.
+            try await expectNames(app, filters: ["label": ["team="]], names: ["dbpw", "blank"])
+            // Bare key and k=v keep their existing semantics.
+            try await expectNames(app, filters: ["label": ["team"]], names: ["dbpw", "blank"])
+            try await expectNames(app, filters: ["label": ["team=db"]], names: ["dbpw"])
+            try await expectNames(app, filters: ["label": ["team=web"]], names: [])
+        }
+    }
+
+    /// Review r1 (delete TOCTOU): the docker delete resolves a snapshot,
+    /// then removes by exact ID inside one actor hop. Between a snapshot
+    /// resolve and a name-or-ID remove, a libpod replace can retire the
+    /// ID and a create can recycle it as a NAME — the name fallback would
+    /// then delete the unrelated secret and answer 204 instead of 404.
+    @Test("store remove(id:) is exact — an ID recycled as a name is not deleted (delete TOCTOU)")
+    func removeExactIDDoesNotFallBackToName() async throws {
+        let dir = uniqueTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = SecretStore(storageDirectory: dir)
+        let victim = try await store.create(
+            name: "victim", data: Data("x".utf8), driver: nil, labels: [:], driverOptions: [:],
+            replace: false, ignore: false)
+        // The guarded race: the resolved ID is retired and recycled as a
+        // new secret's NAME before the removal runs.
+        _ = try await store.remove(nameOrID: victim.id)
+        let recycled = try await store.create(
+            name: victim.id, data: Data("y".utf8), driver: nil, labels: [:], driverOptions: [:],
+            replace: false, ignore: false)
+        // Exact-ID removal finds no such ID → nil (the route's 404).
+        let removed = try await store.remove(id: victim.id)
+        #expect(removed == nil, "no secret carries the ID — nil (404), never the name-matched secret")
+        // The unrelated secret whose NAME is the recycled ID survives.
+        let survivor = await store.lookup(nameOrID: victim.id)
+        #expect(survivor?.id == recycled.id)
+    }
+
     // MARK: - Helpers
 
     /// Boots a VaporTesting app with BOTH secret dialects registered against
@@ -487,6 +617,63 @@ func dockerSecretsParseFiltersUnit() throws {
     #expect(throws: Abort.self) {
         _ = try SecretsRoute.parseFilters("[]")
     }
+}
+
+@Test("docker filter parsing unit: map values must be booleans; keys retained regardless of value")
+func dockerSecretsParseFiltersMapUnit() throws {
+    // Go decodes the map form into map[string]bool — a string or number
+    // value fails the decode (moby 500s; podm's deviation is a 400).
+    #expect(throws: Abort.self) {
+        _ = try SecretsRoute.parseFilters(#"{"names":{"alpha":"true"}}"#)
+    }
+    #expect(throws: Abort.self) {
+        _ = try SecretsRoute.parseFilters(#"{"names":{"alpha":1}}"#)
+    }
+    // Args.Get keeps every key regardless of its boolean.
+    let retained = try SecretsRoute.parseFilters(#"{"names":{"alpha":false},"name":{"be":true}}"#)
+    #expect(Set(retained["names"] ?? []) == ["alpha"])
+    #expect(Set(retained["name"] ?? []) == ["be"])
+}
+
+@Test("docker passesFilters unit: field scoping, NFC/NFD byte equality, swarm label presence")
+func dockerSecretsPassesFiltersUnit() {
+    let nfc = StoredSecret(
+        id: "aaaaaaaaaaaaaaaaaaaaaaaa1", name: "caf\u{E9}", createdAt: Date(), updatedAt: Date(),
+        labels: [:], driver: "file", driverOptions: [:])
+    let nfd = StoredSecret(
+        id: "aaaaaaaaaaaaaaaaaaaaaaaa2", name: "cafe\u{301}", createdAt: Date(), updatedAt: Date(),
+        labels: [:], driver: "file", driverOptions: [:])
+    // names (exact): byte-wise — each spelling matches only itself.
+    #expect(SecretsRoute.passesFilters(nfc, filters: ["names": ["caf\u{E9}"]]))
+    #expect(!SecretsRoute.passesFilters(nfc, filters: ["names": ["cafe\u{301}"]]))
+    #expect(SecretsRoute.passesFilters(nfd, filters: ["names": ["cafe\u{301}"]]))
+    #expect(!SecretsRoute.passesFilters(nfd, filters: ["names": ["caf\u{E9}"]]))
+    // name (prefix): byte-wise prefix — an NFD prefix must not match NFC.
+    #expect(SecretsRoute.passesFilters(nfd, filters: ["name": ["cafe\u{301}"]]))
+    #expect(!SecretsRoute.passesFilters(nfc, filters: ["name": ["cafe\u{301}"]]))
+
+    // Field scoping: a name that looks like an ID prefix must not match an
+    // id filter, and an ID-shaped names value must not match by ID.
+    let namedLikeID = StoredSecret(
+        id: "bbbbbbbbbbbbbbbbbbbbbbbb1", name: "aaaa-suffix", createdAt: Date(), updatedAt: Date(),
+        labels: [:], driver: "file", driverOptions: [:])
+    #expect(!SecretsRoute.passesFilters(namedLikeID, filters: ["id": ["aaaa"]]))
+    #expect(!SecretsRoute.passesFilters(namedLikeID, filters: ["names": ["bbbb"]]))
+    #expect(SecretsRoute.passesFilters(namedLikeID, filters: ["id": ["bbbb"]]))
+    #expect(SecretsRoute.passesFilters(namedLikeID, filters: ["name": ["aaaa"]]))
+    // OR across keys composes the field-scoped results.
+    #expect(SecretsRoute.passesFilters(namedLikeID, filters: ["names": ["zzz"], "id": ["bbbb"]]))
+
+    // Label: swarm presence-only for "k=" and bare "k"; exact for "k=v".
+    let labeled = StoredSecret(
+        id: "cccccccccccccccccccccccc1", name: "labeled", createdAt: Date(), updatedAt: Date(),
+        labels: ["team": "db"], driver: "file", driverOptions: [:])
+    #expect(SecretsRoute.passesFilters(labeled, filters: ["label": ["team="]]))
+    #expect(SecretsRoute.passesFilters(labeled, filters: ["label": ["team"]]))
+    #expect(SecretsRoute.passesFilters(labeled, filters: ["label": ["team=db"]]))
+    #expect(!SecretsRoute.passesFilters(labeled, filters: ["label": ["team=web"]]))
+    #expect(!SecretsRoute.passesFilters(labeled, filters: ["label": ["missing"]]))
+    #expect(!SecretsRoute.passesFilters(labeled, filters: ["label": ["missing="]]))
 }
 
 @Test("docker secret resolution unit: ID, name, prefix, ambiguity")

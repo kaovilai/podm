@@ -427,7 +427,31 @@ actor SecretStore {
         guard let secret = lookup(nameOrID: nameOrID),
             let index = secrets.firstIndex(where: { $0.id == secret.id })
         else { return nil }
-        // Reads (the 404 above) still work on a blocked store; the
+        return try removeSecret(at: index, nameOrID: nameOrID)
+    }
+
+    /// Removes the secret with EXACTLY this full ID — no name fallback, no
+    /// prefix resolution — nil when no such ID exists. For callers that
+    /// resolved an ID from an earlier `list()` SNAPSHOT (the docker
+    /// dialect's delete): with `remove(nameOrID:)` a concurrent replace can
+    /// retire the resolved ID and a create can recycle it as a NAME between
+    /// the snapshot and the removal, so the name fallback would delete the
+    /// UNRELATED secret and report success (204 instead of 404). Checking
+    /// `$0.id == id` and deleting inside this one actor hop closes that
+    /// window.
+    @discardableResult
+    func remove(id: String) throws -> StoredSecret? {
+        guard let index = secrets.firstIndex(where: { $0.id == id }) else { return nil }
+        return try removeSecret(at: index, nameOrID: id)
+    }
+
+    /// Shared body of both removal entry points — the index is already
+    /// resolved, so check-and-delete is atomic within the actor hop.
+    /// Metadata is persisted BEFORE the payload trim so a crash between the
+    /// two renames leaves an orphan payload entry (garbage, pruned on load),
+    /// never metadata referencing a deleted payload.
+    private func removeSecret(at index: Int, nameOrID: String) throws -> StoredSecret {
+        // Reads (the callers' nil → 404) still work on a blocked store; the
         // mutation does not — persisting would overwrite the only copy of
         // the unreadable file.
         try ensureNotBlocked()

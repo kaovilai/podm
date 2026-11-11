@@ -30,8 +30,9 @@ import Vapor
 ///   - `GET /secrets` — moby's swarm list filters
 ///     (`daemon/cluster/filters.go` `newListSecretsFilters`):
 ///     `names` (exact), `name` (prefix), `id` (prefix) — OR'd together,
-///     per swarmkit `ListSecrets`' `store.Or` — and `label` (`k=v` exact /
-///     bare `k` presence), AND'd on top (`filterMatchLabels`). Reports are
+///     per swarmkit `ListSecrets`' `store.Or`, each scoped to its own field
+///     — and `label` (`k=v` exact / bare `k` or `k=` presence, swarmkit
+///     `filterMatchLabels`) AND'd on top. Reports are
 ///     moby's `swarm.Secret` shape, metadata only — `Data` is NEVER
 ///     returned (swarmkit nils it before responding).
 ///   - `GET /secrets/{id}` — moby's resolution order
@@ -182,11 +183,14 @@ extension SecretsRoute {
             }
             let removed: StoredSecret
             do {
-                // Remove by the RESOLVED full ID: the snapshot above may be
-                // stale by the time the actor runs, and store.remove
-                // re-resolves internally (nil → 404, exactly like podman's
-                // ErrNoSuchSecret on a lost race).
-                guard let found = try await store.remove(nameOrID: resolved.id) else {
+                // Remove by EXACT ID, atomically inside the store: between
+                // the snapshot above and this actor hop a libpod replacement
+                // can retire the resolved ID and a create can recycle it as
+                // a NAME, which remove(nameOrID:)'s name fallback would then
+                // delete (the unrelated secret, 204 instead of 404).
+                // remove(id:) never falls back to a name; nil → 404, exactly
+                // like podman's ErrNoSuchSecret on a lost race.
+                guard let found = try await store.remove(id: resolved.id) else {
                     throw Abort(.notFound, reason: "secret \(input) not found")
                 }
                 removed = found
@@ -268,7 +272,25 @@ extension SecretsRoute {
             if let arr = value as? [String] {
                 filters[key] = arr
             } else if let dict = value as? [String: Any] {
-                filters[key] = dict.compactMap { (key, value) in (value as? Bool == true) ? key : nil }
+                // Go's map form decodes into map[string]bool, so a
+                // non-boolean value (e.g. the STRING "true") fails the
+                // decode — a client error here, like the array form's
+                // non-string elements. Keys are retained regardless of
+                // their boolean: moby's `Args.Get` walks the map's keys
+                // only, so {"names":{"alpha":false}} still selects alpha.
+                // The bool check uses CFBoolean identity: JSONSerialization
+                // hands back NSNumber for BOTH JSON booleans and numbers,
+                // and Swift's NSNumber→Bool bridge makes even `1 is Bool`
+                // true — only the CFBoolean-backed singletons discriminate.
+                for mapValue in dict.values {
+                    guard Self.isJSONBoolean(mapValue) else {
+                        throw Abort(
+                            .badRequest,
+                            reason: "invalid filter value for \(key): map values must be booleans"
+                        )
+                    }
+                }
+                filters[key] = Array(dict.keys)
             } else {
                 throw Abort(
                     .badRequest,
@@ -279,34 +301,54 @@ extension SecretsRoute {
         return filters
     }
 
+    /// True only for a JSONSerialization-produced JSON boolean. JSON booleans
+    /// arrive as NSNumber backed by the CFBoolean singletons; JSON numbers
+    /// are CFNumber-backed NSNumbers that Swift's `is Bool` / `as? Bool`
+    /// bridge happily accepts (an `NSNumber(value: 1)` answers `is Bool`),
+    /// so identity against `kCFBooleanTrue`/`kCFBooleanFalse` is the only
+    /// reliable discriminator. Non-NSNumber values (strings, arrays…) fail
+    /// the cast and report false.
+    private static func isJSONBoolean(_ value: Any) -> Bool {
+        guard let number = value as? NSNumber else { return false }
+        return number === kCFBooleanTrue || number === kCFBooleanFalse
+    }
+
     /// moby/swarmkit list semantics (`manager/controlapi/secret.go`
     /// `ListSecrets`): `names`/`name`/`id` are OR'd together (one
-    /// `store.Or` of exact-name, name-prefix, and ID-prefix lookups — a
-    /// secret matching ANY value qualifies when any of the three keys is
-    /// present), and `label` entries are AND'd on top
-    /// (`filterMatchLabels`: every filter label must be present; a value
-    /// requires an exact match, an empty value only presence).
+    /// `store.Or` of exact-name, name-prefix, and ID-prefix lookups), and
+    /// `label` entries are AND'd on top. Each selector applies to its OWN
+    /// field only — `names`/`name` against `secret.name`, `id` against
+    /// `secret.id` — so an `id` filter that happens to equal (or prefix) a
+    /// secret's NAME must not match it, and vice versa.
     static func passesFilters(_ secret: StoredSecret, filters: [String: [String]]) -> Bool {
-        var keySelectors: [(String) -> Bool] = []
-        for name in filters["names"] ?? [] {
-            keySelectors.append { $0 == name }
-        }
-        for prefix in filters["name"] ?? [] {
-            keySelectors.append { $0.hasPrefix(prefix) }
-        }
-        for prefix in filters["id"] ?? [] {
-            keySelectors.append { $0.hasPrefix(prefix) }
-        }
-        if !keySelectors.isEmpty, !keySelectors.contains(where: { $0(secret.name) || $0(secret.id) }) {
-            return false
+        let exactNames = filters["names"] ?? []
+        let namePrefixes = filters["name"] ?? []
+        let idPrefixes = filters["id"] ?? []
+        if !(exactNames.isEmpty && namePrefixes.isEmpty && idPrefixes.isEmpty) {
+            // Name comparisons are byte-wise UTF-8 (Go string semantics,
+            // like the store's sameName): Swift's == / hasPrefix fold
+            // canonically equivalent Unicode, which would conflate the
+            // byte-distinct NFC/NFD names the store deliberately keeps
+            // separate.
+            let nameMatch =
+                exactNames.contains { secret.name.utf8.elementsEqual($0.utf8) }
+                || namePrefixes.contains { secret.name.utf8.starts(with: $0.utf8) }
+            let idMatch = idPrefixes.contains { secret.id.utf8.starts(with: $0.utf8) }
+            if !nameMatch && !idMatch {
+                return false
+            }
         }
         for entry in filters["label"] ?? [] {
-            // convertKVStringsToMap: "k=v" → exact value, bare "k" (or
-            // "k=") → presence only.
+            // This endpoint's swarm path (moby's newListSecretsFilters →
+            // convertKVStringsToMap → swarmkit's filterMatchLabels): "k=v"
+            // requires an exact value; bare "k" or "k=" (an empty map
+            // value) is PRESENCE-only — a secret labeled team=db matches
+            // "team=" (note: NOT filters.MatchKVList, which the non-swarm
+            // endpoints use and which treats "k=" as an exact empty value).
             if let eq = entry.firstIndex(of: "=") {
                 let key = String(entry[entry.startIndex..<eq])
                 let value = String(entry[entry.index(after: eq)...])
-                guard let actual = secret.labels[key], !value.isEmpty || actual.isEmpty else { return false }
+                guard let actual = secret.labels[key] else { return false }
                 if !value.isEmpty, actual != value { return false }
             } else {
                 guard secret.labels[entry] != nil else { return false }
