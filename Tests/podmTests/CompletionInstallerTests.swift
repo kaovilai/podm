@@ -90,6 +90,25 @@ struct CompletionInstallerTests {
             "the symlink must be untouched")
     }
 
+    /// Review round 1: `fileExists` follows symlinks, so a DANGLING `_podm`
+    /// link slipped past the old guard and the write replaced the link.
+    @Test("a dangling symlink is refused too — fileExists would miss it")
+    func refusesDanglingSymlink() throws {
+        let userDir = tempDir("user")
+        let fallbackDir = tempDir("fallback")
+        // Points at a path that does not exist.
+        try FileManager.default.createSymbolicLink(
+            atPath: userDir.appendingPathComponent("_podm").path,
+            withDestinationPath: userDir.appendingPathComponent("no-such-target").path)
+
+        #expect(throws: (any Error).self) {
+            try CompletionInstaller.installZsh(userCompletionsDir: userDir, fallbackDir: fallbackDir)
+        }
+        #expect(
+            FileSystem.isSymlink(userDir.appendingPathComponent("_podm").path),
+            "the dangling symlink must be untouched")
+    }
+
     @Test("uninstall removes from both locations")
     func uninstallRemovesBoth() throws {
         let userDir = tempDir("user-absent")
@@ -111,6 +130,30 @@ struct CompletionInstallerTests {
         for path in removed {
             #expect(!FileManager.default.fileExists(atPath: path.path))
         }
+    }
+
+    /// Review round 1: install refuses a symlinked `_podm`, so uninstall must
+    /// not delete one either — that would remove the user's own completion
+    /// setup, which podm never installed.
+    @Test("uninstall skips a symlinked _podm it would have refused to install")
+    func uninstallSkipsSymlink() throws {
+        let userDir = tempDir("user")
+        let fallbackDir = tempDir("fallback")
+        let elsewhere = tempDir("elsewhere")
+        let realFile = elsewhere.appendingPathComponent("users-own")
+        try "user's own completion".write(to: realFile, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(
+            atPath: userDir.appendingPathComponent("_podm").path,
+            withDestinationPath: realFile.path)
+
+        let removed = CompletionInstaller.uninstallZsh(
+            userCompletionsDir: userDir, fallbackDir: fallbackDir)
+
+        #expect(removed.isEmpty, "a symlink must not be removed")
+        #expect(
+            FileSystem.isSymlink(userDir.appendingPathComponent("_podm").path),
+            "the user's symlink must survive")
+        #expect(FileManager.default.fileExists(atPath: realFile.path), "the target must survive")
     }
 
     @Test("the completion delegates the mirrored surface to _podman and names podm's own commands")

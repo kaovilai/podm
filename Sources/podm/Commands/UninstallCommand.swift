@@ -41,11 +41,18 @@ struct UninstallCommand: ParsableCommand {
         }
 
         // 4. Podman connection (issue #47). Uses the recorded real CLI;
-        //    without it there is nothing registered to remove.
-        if let podmanPath = ClientPaths.read()["podman"] {
-            if PodmanConnectionRegistrar.isRegistered(podmanPath: podmanPath) {
-                _ = PodmanConnectionRegistrar.unregister(podmanPath: podmanPath)
+        //    without it there is nothing registered to remove. The result is
+        //    checked — a failed removal must not print success while the
+        //    connection stays behind.
+        if let podmanPath = ClientPaths.read()["podman"],
+            PodmanConnectionRegistrar.isRegistered(podmanPath: podmanPath) == true
+        {
+            if PodmanConnectionRegistrar.unregister(podmanPath: podmanPath) {
                 print("Removed podman connection '\(PodmanConnectionRegistrar.connectionName)'")
+            } else {
+                print(
+                    "warning: could not remove the '\(PodmanConnectionRegistrar.connectionName)' podman connection (podman CLI failed; remove it with: podman system connection remove \(PodmanConnectionRegistrar.connectionName))"
+                )
             }
         }
 

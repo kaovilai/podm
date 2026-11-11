@@ -65,8 +65,8 @@ struct InstallCommand: ParsableCommand {
                 print("Installed zsh completion: \(dir.path)/_podm")
                 print(
                     """
-                    Add it to zsh's fpath (e.g. in ~/.zshrc, BEFORE compinit):
-                        fpath="\(dir.path):$fpath"
+                    Add it to zsh's fpath (e.g. in ~/.zshrc, BEFORE compinit — fpath is an ARRAY):
+                        fpath=("\(dir.path)" $fpath)
                     """)
             }
         } catch {

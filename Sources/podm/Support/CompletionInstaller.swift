@@ -125,8 +125,10 @@ enum CompletionInstaller {
         case .podmFallback(let dir): targetURL = dir.appendingPathComponent("_podm")
         }
         // An existing file that is not ours to manage: refuse rather than
-        // clobber (same rule as the shim links).
-        if fileManager.fileExists(atPath: targetURL.path) && FileSystem.isSymlink(targetURL.path) {
+        // clobber (same rule as the shim links). isSymlink uses lstat, so a
+        // DANGLING _podm link is refused too — fileExists follows symlinks
+        // and would miss it, letting the write below replace the link.
+        if FileSystem.isSymlink(targetURL.path) {
             throw InstallError.refusingToReplaceSymlink(targetURL.path)
         }
         let existing = try? String(contentsOf: targetURL, encoding: .utf8)
@@ -140,17 +142,26 @@ enum CompletionInstaller {
         return Outcome(destination: destination, updated: true)
     }
 
-    /// Removes `_podm` from both possible locations. Returns the paths that
-    /// were actually removed (empty when nothing was installed).
+    /// Removes `_podm` from both possible locations. Only REGULAR files are
+    /// removed — installation refuses to replace a symlinked `_podm`, so
+    /// uninstall must not delete one either (the user's own completion
+    /// setup, which podm never installed). Returns the paths that were
+    /// actually removed; a removal that fails (e.g. a read-only directory)
+    /// is reported by its absence from the result, not as success.
     static func uninstallZsh(
         userCompletionsDir: URL, fallbackDir: URL, fileManager: FileManager = .default
     ) -> [URL] {
         var removed: [URL] = []
         for dir in [userCompletionsDir, fallbackDir] {
             let targetURL = dir.appendingPathComponent("_podm")
-            if fileManager.fileExists(atPath: targetURL.path) {
-                try? fileManager.removeItem(at: targetURL)
+            guard !FileSystem.isSymlink(targetURL.path),
+                fileManager.fileExists(atPath: targetURL.path)
+            else { continue }
+            do {
+                try fileManager.removeItem(at: targetURL)
                 removed.append(targetURL)
+            } catch {
+                continue
             }
         }
         return removed

@@ -11,6 +11,12 @@ import Foundation
 /// Registration shells out to the real podman CLI (the one whose path
 /// `podm install` records) rather than writing containers.conf directly —
 /// podman owns that file's format and merge semantics.
+///
+/// podman 6.1.4's subcommands (verified against the installed CLI): `add`
+/// (updates an existing name IN PLACE — no remove needed, and a remove
+/// would clear the user's default selection), `default`, `list` (supports
+/// `--format json`), `remove`, `rename`. There is NO `show` subcommand —
+/// existence checks parse `list --format json`.
 enum PodmanConnectionRegistrar {
     /// The connection name podm registers. Matches the docker context name.
     static let connectionName = "podm"
@@ -26,11 +32,37 @@ enum PodmanConnectionRegistrar {
         ProcessSpawn.run(executable, arguments)
     }
 
-    /// Registers (or refreshes) the connection. Idempotent: an existing
-    /// `podm` connection is removed first — `system connection add` refuses
-    /// duplicate names, and a stale URI must be replaced, not reported as
-    /// an error. Does NOT change the default connection: primacy stays the
-    /// user's decision (`podman system connection default podm`).
+    /// One entry of `podman system connection list --format json`.
+    struct ConnectionEntry: Equatable {
+        let name: String
+        let uri: String
+        let isDefault: Bool
+    }
+
+    /// Lists the registered connections. Nil when podman itself failed to
+    /// answer (CLI error) — distinct from an empty list, so callers never
+    /// mistake "could not ask" for "nothing registered".
+    static func listConnections(
+        podmanPath: String, spawn: Spawn = realSpawn
+    ) -> [ConnectionEntry]? {
+        let result = spawn(podmanPath, ["system", "connection", "list", "--format", "json"])
+        guard result.exitStatus == 0, let output = result.output, let data = output.data(using: .utf8),
+            let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return nil }
+        return array.compactMap { entry in
+            guard let name = entry["Name"] as? String, let uri = entry["URI"] as? String else {
+                return nil
+            }
+            return ConnectionEntry(name: name, uri: uri, isDefault: (entry["Default"] as? Bool) ?? false)
+        }
+    }
+
+    /// Registers (or refreshes) the connection. Idempotent WITHOUT a
+    /// remove first: podman 6's `system connection add` updates an existing
+    /// name in place, and removing would clear the user's default selection
+    /// (remove of the default connection leaves no default; the re-add does
+    /// not restore it). Does NOT change the default either way — primacy
+    /// stays the user's decision (`podman system connection default podm`).
     ///
     /// Returns true when the connection is registered after the call.
     @discardableResult
@@ -38,32 +70,39 @@ enum PodmanConnectionRegistrar {
         podmanPath: String, uri: String, connectionName: String = connectionName,
         spawn: Spawn = realSpawn
     ) -> Bool {
-        // remove-then-add: a failure to remove (nothing registered yet) is
-        // expected and ignored.
-        _ = spawn(podmanPath, ["system", "connection", "remove", connectionName])
-        // podman's syntax takes the destination POSITIONALLY
-        // (podman-system-connection(1): "add [options] NAME DESTINATION").
-        let add = spawn(podmanPath, ["system", "connection", "add", connectionName, uri])
-        return add.exitStatus == 0
+        // The destination is POSITIONAL (podman-system-connection(1):
+        // "add [options] NAME DESTINATION").
+        spawn(podmanPath, ["system", "connection", "add", connectionName, uri]).exitStatus == 0
     }
 
-    /// Removes the connection (idempotent — removing an unregistered name
-    /// is not an error). Returns true when it is gone after the call.
+    /// Removes the connection. Returns true only when it is verifiably gone:
+    /// a successful remove, or a successful listing that no longer contains
+    /// it. A CLI failure (bad exit from BOTH remove and list) returns false —
+    /// "could not confirm removal" must not read as success.
     @discardableResult
     static func unregister(
         podmanPath: String, connectionName: String = connectionName, spawn: Spawn = realSpawn
     ) -> Bool {
-        let remove = spawn(podmanPath, ["system", "connection", "remove", connectionName])
-        return remove.exitStatus == 0
-            || !isRegistered(
-                podmanPath: podmanPath, connectionName: connectionName, spawn: spawn)
+        if spawn(podmanPath, ["system", "connection", "remove", connectionName]).exitStatus == 0 {
+            return true
+        }
+        // The remove failed: either the name was never registered (remove
+        // errors, gone anyway) or podman could not run/answer at all. Only
+        // a SUCCESSFUL listing that omits the name confirms the former.
+        guard let entries = listConnections(podmanPath: podmanPath, spawn: spawn) else {
+            return false
+        }
+        return !entries.contains { $0.name == connectionName }
     }
 
-    /// Whether the connection is currently registered, via
-    /// `podman system connection show <name>` (exit 0 = exists).
+    /// Whether the connection is currently registered, parsed from
+    /// `system connection list --format json` (podman has no `show`
+    /// subcommand). Nil when the listing itself failed — the caller cannot
+    /// know, and must not report a confident yes or no.
     static func isRegistered(
         podmanPath: String, connectionName: String = connectionName, spawn: Spawn = realSpawn
-    ) -> Bool {
-        spawn(podmanPath, ["system", "connection", "show", connectionName]).exitStatus == 0
+    ) -> Bool? {
+        guard let entries = listConnections(podmanPath: podmanPath, spawn: spawn) else { return nil }
+        return entries.contains { $0.name == connectionName }
     }
 }
