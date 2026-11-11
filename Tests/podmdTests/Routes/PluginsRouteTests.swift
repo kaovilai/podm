@@ -513,7 +513,8 @@ struct PluginsRouteTests {
     func runtimeHalfStaysStubbed() async throws {
         try await withPluginsApp { app in
             try await app.testing().test(.POST, "/v1.51/plugins/myplugin/enable?timeout=1") { res async in
-                #expect(res.status == .internalServerError)
+                // #41 (stub compat): known-unsupported now answers 501, not 500.
+                #expect(res.status == .notImplemented)
                 #expect(res.body.string.contains("is not implemented by podm"))
             }
         }
