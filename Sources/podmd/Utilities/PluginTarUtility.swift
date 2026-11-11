@@ -158,8 +158,7 @@ enum PluginTarUtility {
 
         let digest: String
         do {
-            let data = try Data(contentsOf: rootfsURL)
-            digest = "sha256:" + SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            digest = try sha256Hex(of: rootfsURL)
         } catch {
             throw PluginTarUtilityError.archiveReadFailed("could not digest the rewritten rootfs tar")
         }
@@ -167,29 +166,52 @@ enum PluginTarUtility {
         return PluginTarSplit(configJSON: configJSON, rootfsDigest: digest)
     }
 
-    /// Go's `path.Clean` for the shapes a tar header produces: drop leading
-    /// "/", collapse "//" and ".", and resolve ".." against the parents that
-    /// are still in scope (a ".." that escapes the root clamps to it, like
-    /// path.Clean("..") → ".." only at the top level; for entry names the
-    /// clamped form never matches config.json/rootfs and is simply skipped,
-    /// which is also moby's behavior).
+    /// moby's entry-name normalization (`splitConfigRootFSFromTar`):
+    /// `path.Clean(hdr.Name)`, then the leading "/" of an absolute result
+    /// is stripped (Go's `name[1:]`). Go's Clean PRESERVES unresolved `..`
+    /// at the front of a RELATIVE name (`path.Clean("../config.json")` is
+    /// `"../config.json"`) and only clamps them for ABSOLUTE names
+    /// (`path.Clean("/../config.json")` is `"/config.json"`, then the strip
+    /// gives `"config.json"`). A preserved leading `..` can never equal
+    /// `config.json` nor carry the `rootfs/` prefix, so moby simply SKIPS
+    /// such entries — it never discards the parents, which would turn a
+    /// `../config.json` into a valid config entry.
     static func cleaned(_ raw: String) -> String {
+        let isAbsolute = raw.hasPrefix("/")
         var components: [String] = []
         for part in raw.split(separator: "/", omittingEmptySubsequences: false) {
             switch part {
             case "", ".":
                 continue
             case "..":
-                if !components.isEmpty, components.last != ".." {
+                if let last = components.last, last != ".." {
                     components.removeLast()
-                } else if components.isEmpty {
+                } else if isAbsolute {
+                    // ".." above the root of an absolute path clamps to it.
                     continue
+                } else {
+                    // A relative name keeps its unresolved leading parents.
+                    components.append("..")
                 }
             default:
                 components.append(String(part))
             }
         }
         return components.joined(separator: "/")
+    }
+    /// Streaming SHA-256 over a staged file, in bounded chunks: the whole
+    /// compressed rootfs is never held in memory on top of the uploaded tar
+    /// (concurrent creates would multiply that whole-file allocation). The
+    /// digest is identical to hashing the file in one `Data(contentsOf:)`
+    /// read — only the peak memory differs.
+    static func sha256Hex(of fileURL: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return "sha256:" + hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     /// Reads an entry's full data through its streaming reader.

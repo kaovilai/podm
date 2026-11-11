@@ -2,6 +2,7 @@
 import ContainerAPIClient
 import ContainerizationArchive
 import ContainerizationOCI
+import Crypto
 import Foundation
 import Testing
 import Vapor
@@ -309,6 +310,102 @@ struct PluginsRouteTests {
         }
     }
 
+    // MARK: - Malformed entry names (moby's path.Clean posture)
+
+    /// moby's `splitConfigRootFSFromTar` runs `path.Clean` over each entry
+    /// name and then strips a leading "/". Go's Clean PRESERVES unresolved
+    /// leading `..` on relative names — such entries match neither
+    /// `config.json` nor the `rootfs/` prefix and are skipped, never
+    /// promoted. Absolute names clamp their `..` to the root
+    /// (`/../config.json` → `config.json`), which moby DOES accept.
+    @Test("malformed entry names never yield config or rootfs entries")
+    func malformedEntryNames() async throws {
+        try await withPluginsApp { app in
+            // A relative ../config.json is NOT the config entry.
+            try await app.testing().test(
+                .POST, "/v1.51/plugins/create?name=dot/dot/config",
+                headers: ["Content-Type": "application/x-tar"],
+                body: ByteBuffer(
+                    data: entriesTar([
+                        ("../config.json", sampleConfigJSON()),
+                        ("rootfs/bin/plugin", Data("#!/bin/sh\necho plugin\n".utf8)),
+                    ]))
+            ) { res async in
+                #expect(res.status == .badRequest)
+                #expect(res.body.string.contains("config not found"))
+            }
+            // A relative ../rootfs/... is NOT the rootfs tree either.
+            try await app.testing().test(
+                .POST, "/v1.51/plugins/create?name=dot/dot/rootfs",
+                headers: ["Content-Type": "application/x-tar"],
+                body: ByteBuffer(
+                    data: entriesTar([
+                        ("config.json", sampleConfigJSON()),
+                        ("../rootfs/bin/plugin", Data("#!/bin/sh\necho plugin\n".utf8)),
+                    ]))
+            ) { res async in
+                #expect(res.status == .badRequest)
+                #expect(res.body.string.contains("no rootfs found"))
+            }
+            // An ABSOLUTE /../config.json clamps to config.json — moby's
+            // path.Clean("/../config.json") + name[1:] — and IS the config.
+            try await app.testing().test(
+                .POST, "/v1.51/plugins/create?name=dot/dot/abs",
+                headers: ["Content-Type": "application/x-tar"],
+                body: ByteBuffer(
+                    data: entriesTar([
+                        ("/../config.json", sampleConfigJSON()),
+                        ("rootfs/bin/plugin", Data("#!/bin/sh\necho plugin\n".utf8)),
+                    ]))
+            ) { res async in
+                #expect(res.status == .noContent)
+            }
+        }
+    }
+
+    /// The rootfs digest is streamed in 1 MiB chunks — a rootfs larger than
+    /// one chunk must still create and report a well-formed digest.
+    @Test("create digests a rootfs larger than the hashing chunk")
+    func largeRootfsCreate() async throws {
+        let big = Data(repeating: 0x5A, count: 3 * 1024 * 1024 + 7)
+        try await withPluginsApp { app in
+            try await app.testing().test(
+                .POST, "/v1.51/plugins/create?name=big/rootfs",
+                headers: ["Content-Type": "application/x-tar"],
+                body: ByteBuffer(
+                    data: entriesTar([
+                        ("config.json", sampleConfigJSON()),
+                        ("rootfs/blob", big),
+                    ]))
+            ) { res async in
+                #expect(res.status == .noContent)
+            }
+            try await app.testing().test(.GET, "/v1.51/plugins/big/rootfs/json") { res async throws in
+                #expect(res.status == .ok)
+                let decoded = try JSONDecoder().decode(DockerPlugin.self, from: Data(buffer: res.body))
+                let digest = decoded.Config.rootfs?.diff_ids.first
+                #expect(digest?.hasPrefix("sha256:") == true)
+                #expect(digest?.count == "sha256:".count + 64)
+            }
+        }
+    }
+
+    /// The context-tar cap: an oversized body answers 413 before anything
+    /// is staged (the limit is injected small; the default is 256 MiB).
+    @Test("create rejects an oversized context tar with 413")
+    func createRejectsOversizedBody() async throws {
+        try await withPluginsApp(maximumContextBytes: 1024) { app in
+            try await app.testing().test(
+                .POST, "/v1.51/plugins/create?name=too/big",
+                headers: ["Content-Type": "application/x-tar"],
+                body: ByteBuffer(data: sampleTar())
+            ) { res async in
+                #expect(res.status == .payloadTooLarge)
+                #expect(res.body.string.contains("request body too large"))
+            }
+        }
+    }
+
     @Test("create round-trips across daemon restarts (store re-instantiation)")
     func createPersists() async throws {
         let dir = uniqueTempDir()
@@ -438,6 +535,7 @@ struct PluginsRouteTests {
     private func withPluginsApp(
         store: PluginStore? = nil,
         privileges: PluginPrivilegesProviding = MockPrivileges.success([]),
+        maximumContextBytes: Int = PluginsRoute.defaultMaximumContextBytes,
         _ test: (Application) async throws -> Void
     ) async throws {
         let pluginStore = store ?? PluginStore(storageDirectory: uniqueTempDir())
@@ -450,7 +548,10 @@ struct PluginsRouteTests {
             // the real daemon.
             app.middleware.use(DockerErrorMiddleware(), at: .beginning)
             app.storage[EventBroadcasterKey.self] = EventBroadcaster()
-            try app.register(collection: PluginsRoute(store: pluginStore, privilegesProvider: privileges))
+            try app.register(
+                collection: PluginsRoute(
+                    store: pluginStore, privilegesProvider: privileges,
+                    maximumContextBytes: maximumContextBytes))
             try app.register(collection: PluginsNameEnableRoute())
             try await test(app)
         }
@@ -552,6 +653,26 @@ struct PluginsRouteTests {
                 entry.size = Int64(content.count)
                 try! writer.writeEntry(entry: entry, data: content)
             }
+        }
+        try! writer.finishEncoding()
+        return try! Data(contentsOf: tarURL)
+    }
+
+    /// A tar with arbitrary entry names/contents — for the malformed-name
+    /// and large-rootfs regressions, where the fixed `sampleTar` shapes do
+    /// not fit.
+    private func entriesTar(_ entries: [(path: String, content: Data)]) -> Data {
+        let dir = uniqueTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let tarURL = dir.appendingPathComponent("context.tar")
+        let writer = try! ArchiveWriter(format: .pax, filter: .none, file: tarURL)
+        for entry in entries {
+            let e = WriteEntry()
+            e.path = entry.path
+            e.fileType = .regular
+            e.permissions = 0o644
+            e.size = Int64(entry.content.count)
+            try! writer.writeEntry(entry: e, data: entry.content)
         }
         try! writer.finishEncoding()
         return try! Data(contentsOf: tarURL)
@@ -666,6 +787,68 @@ func pluginReferenceNormalizationUnit() throws {
         _ = try PluginReferenceUtility.repoName(
             from: "foo@sha256:\(String(repeating: "a", count: 64))")
     }
+}
+
+/// The registry-side repository path for a privileges lookup — moby's
+/// `ParseNormalizedNamed` dominant-registry rule (`library/` for
+/// single-component Docker Hub refs), applied to untagged, tagged, AND
+/// digested refs alike. ContainerizationOCI's `normalize()` alone misses
+/// the absent-domain case (`myplugin`) and podm used to skip it entirely
+/// for tagged/digested refs (`docker.io/myplugin:latest`) — both looked up
+/// the bare repository, which Docker Hub answers with 404.
+@Test("plugin registry lookup path: library/ familiarization for Hub refs")
+func pluginRegistryLookupPathUnit() throws {
+    func lookupPath(_ raw: String) throws -> String {
+        PluginReferenceUtility.registryLookupPath(of: try Reference.parse(raw))
+    }
+    #expect(try lookupPath("myplugin") == "library/myplugin")
+    #expect(try lookupPath("myplugin:latest") == "library/myplugin")
+    #expect(try lookupPath("docker.io/myplugin") == "library/myplugin")
+    #expect(try lookupPath("docker.io/myplugin:latest") == "library/myplugin")
+    #expect(
+        try lookupPath("docker.io/myplugin@sha256:\(String(repeating: "a", count: 64))")
+            == "library/myplugin")
+    #expect(try lookupPath("registry-1.docker.io/myplugin") == "library/myplugin")
+    // Multi-component paths and other registries are untouched.
+    #expect(try lookupPath("vieux/sshfs") == "vieux/sshfs")
+    #expect(try lookupPath("example.com/myplugin") == "myplugin")
+    #expect(try lookupPath("example.com/foo/bar:1.0") == "foo/bar")
+}
+
+/// moby's `splitConfigRootFSFromTar` entry-name cleaning: `path.Clean`,
+/// then the leading "/" of an absolute result is stripped. Relative names
+/// keep their unresolved leading `..`; absolute ones clamp theirs.
+@Test("plugin tar entry-name cleaning: moby's path.Clean + absolute strip")
+func pluginTarPathCleaningUnit() {
+    // Relative parents are preserved — the entry is then skipped, never
+    // promoted to a valid config/rootfs name.
+    #expect(PluginTarUtility.cleaned("../config.json") == "../config.json")
+    #expect(PluginTarUtility.cleaned("../rootfs/bin/plugin") == "../rootfs/bin/plugin")
+    #expect(PluginTarUtility.cleaned("../../config.json") == "../../config.json")
+    #expect(PluginTarUtility.cleaned("a/../../x") == "../x")
+    // Absolute parents clamp to the root, then the "/" is stripped.
+    #expect(PluginTarUtility.cleaned("/../config.json") == "config.json")
+    #expect(PluginTarUtility.cleaned("/rootfs/bin/plugin") == "rootfs/bin/plugin")
+    // Ordinary cleaning: "//", ".", and resolved mid-path "..".
+    #expect(PluginTarUtility.cleaned("./config.json") == "config.json")
+    #expect(PluginTarUtility.cleaned("//rootfs//bin") == "rootfs/bin")
+    #expect(PluginTarUtility.cleaned("rootfs/../config.json") == "config.json")
+}
+
+/// The rewritten-rootfs digest is computed by streaming 1 MiB chunks — the
+/// result must equal a single-shot hash of the same bytes, including for
+/// files spanning several chunks plus a remainder.
+@Test("plugin rootfs digest: streaming hash equals whole-file hash")
+func pluginRootfsStreamingDigestUnit() throws {
+    let dir = uniqueTempDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let fileURL = dir.appendingPathComponent("rootfs.tar.gz")
+    var content = Data()
+    let block = Data(repeating: 0xA5, count: 256 * 1024)
+    for _ in 0..<14 { content.append(block) }  // 3.5 MiB — several chunks
+    try content.write(to: fileURL)
+    let expected = "sha256:" + SHA256.hash(data: content).map { String(format: "%02x", $0) }.joined()
+    #expect(try PluginTarUtility.sha256Hex(of: fileURL) == expected)
 }
 
 /// The interface-type string coder, moby's parse rules (last '.' before

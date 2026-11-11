@@ -45,7 +45,10 @@ import Vapor
 ///   moby then sets `Config.rootfs = {Type: "layers", DiffIds: [rootfs blob
 ///   digest]}` and `Config.DockerVersion`; podm sets both (the digest is
 ///   computed over podm's rewrite of the same rootfs entries — see
-///   `PluginTarUtility`). Answers **204 No Content**. Duplicate name → 409
+///   `PluginTarUtility`). Answers **204 No Content**. The context tar is
+///   capped at 256 MiB (`defaultMaximumContextBytes` — moby has no cap, but
+///   podm buffers the split in memory); oversized bodies answer 413.
+///   Duplicate name → 409
 ///   "plugin %s already exists" (moby `alreadyExistsError`, Conflict).
 ///   Client-input failures are 400s (podm's standing deviation — moby serves
 ///   500s for unparseable refs/configs).
@@ -69,10 +72,18 @@ import Vapor
 struct PluginsRoute: RouteCollection {
     let store: PluginStore
     let privilegesProvider: PluginPrivilegesProviding
+    /// The context-tar cap `POST /plugins/create` enforces (injectable so
+    /// the limit itself is testable).
+    let maximumContextBytes: Int
 
-    init(store: PluginStore, privilegesProvider: PluginPrivilegesProviding) {
+    init(
+        store: PluginStore,
+        privilegesProvider: PluginPrivilegesProviding,
+        maximumContextBytes: Int = PluginsRoute.defaultMaximumContextBytes
+    ) {
         self.store = store
         self.privilegesProvider = privilegesProvider
+        self.maximumContextBytes = maximumContextBytes
     }
 
     func boot(routes: RoutesBuilder) throws {
@@ -80,7 +91,9 @@ struct PluginsRoute: RouteCollection {
         try routes.registerVersionedRoute(.GET, pattern: "/plugins/privileges", use: Self.privilegesHandler(provider: privilegesProvider))
         try routes.registerVersionedRoute(.GET, pattern: "/plugins/{name}", use: Self.inspectHandler(store: store))
         try routes.registerVersionedRoute(.GET, pattern: "/plugins/{name}/json", use: Self.inspectHandler(store: store))
-        try routes.registerVersionedRoute(.POST, pattern: "/plugins/create", use: Self.createHandler(store: store))
+        try routes.registerVersionedRoute(
+            .POST, pattern: "/plugins/create",
+            use: Self.createHandler(store: store, maximumContextBytes: maximumContextBytes))
     }
 }
 
@@ -130,8 +143,13 @@ extension PluginsRoute {
 
     /// `POST /plugins/create?name=<repo>` — moby's createPlugin: tar body,
     /// 204 on success. The name is validated BEFORE the body is read, so a
-    /// probe with no parameters fails fast at the 400.
-    static func createHandler(store: PluginStore) -> @Sendable (Request) async throws -> Response {
+    /// probe with no parameters fails fast at the 400. The body is bounded
+    /// by `maximumContextBytes` (see `collectBody`): podm buffers the whole
+    /// context while splitting it, so an unbounded body would let one
+    /// request exhaust daemon memory — oversized tars answer 413.
+    static func createHandler(
+        store: PluginStore, maximumContextBytes: Int = defaultMaximumContextBytes
+    ) -> @Sendable (Request) async throws -> Response {
         { req in
             let rawName = req.query[String.self, at: "name"] ?? ""
             let name: String
@@ -148,8 +166,9 @@ extension PluginsRoute {
 
             // Collect the tar body explicitly: the regex router bypasses
             // Vapor's route-level collection (see the configs family's note
-            // on the 16 KiB default cap).
-            let bodyData = try await collectBody(req)
+            // on the 16 KiB default cap). The 413 fires here — before the
+            // work directory is staged or the tar is read.
+            let bodyData = try await collectBody(req, maximumBytes: maximumContextBytes)
 
             let workDirectory = FileManager.default.temporaryDirectory
                 .appendingPathComponent("podm-plugin-create-\(UUID().uuidString)", isDirectory: true)
@@ -338,14 +357,34 @@ extension PluginsRoute {
         DistributionJsonRoute.registryAuth(from: req)
     }
 
+    /// The maximum plugin-context tar `POST /plugins/create` accepts, in
+    /// bytes. moby imposes no cap of its own, but podm buffers the entire
+    /// context in memory while splitting it (and stages a second copy on
+    /// disk), so an unbounded streamed body lets a single request exhaust
+    /// daemon memory before the tar is ever validated. 256 MiB sits above
+    /// every real plugin context tar (the largest published plugin images
+    /// are well under 200 MiB) while bounding the allocation.
+    static let defaultMaximumContextBytes = 256 * 1024 * 1024
+
     /// Collects the raw request body — the same dual-path collection the
-    /// image load route uses (already-collected buffer, else streaming).
-    static func collectBody(_ req: Request) async throws -> Data {
+    /// image load route uses (already-collected buffer, else streaming) —
+    /// bounded by `maximumBytes`: both paths reject an oversized body with
+    /// a 413 the moment the limit is exceeded, before the caller stages
+    /// anything.
+    static func collectBody(_ req: Request, maximumBytes: Int) async throws -> Data {
         if let data = req.body.data {
+            guard data.readableBytes <= maximumBytes else {
+                throw Abort(.payloadTooLarge, reason: "request body too large")
+            }
             return Data(buffer: data)
         }
         var data = Data()
+        var received = 0
         for try await chunk in req.body {
+            received += chunk.readableBytes
+            guard received <= maximumBytes else {
+                throw Abort(.payloadTooLarge, reason: "request body too large")
+            }
             data.append(contentsOf: chunk.readableBytesView)
         }
         return data

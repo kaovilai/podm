@@ -85,6 +85,27 @@ enum PluginReferenceUtility {
     static func isFullID(_ input: String) -> Bool {
         input.range(of: fullIDPattern, options: .regularExpression) != nil
     }
+    /// The repository path a REGISTRY lookup must use — moby's
+    /// `ParseNormalizedNamed` dominant-registry rule: a reference on Docker
+    /// Hub (absent domain, `docker.io`, or its resolved `registry-1.docker.io`
+    /// form) whose path is a single component lives under `library/`.
+    ///
+    /// `ContainerizationOCI.Reference.normalize()` cannot stand in for this:
+    /// it only prepends `library/` when the reference carries an EXPLICIT
+    /// docker.io domain (an absent domain is skipped), so `remote=myplugin`
+    /// and `remote=docker.io/myplugin:latest` would both look up the bare
+    /// `myplugin` repository, which Docker Hub answers with 404. The tag or
+    /// digest is the caller's concern — this only familiarizes the path.
+    static func registryLookupPath(of reference: Reference) -> String {
+        let domain = reference.domain
+        let isDefaultRegistry =
+            domain == nil || domain == "docker.io" || domain == "registry-1.docker.io"
+        let path = reference.path
+        if isDefaultRegistry, !path.contains("/") {
+            return "library/\(path)"
+        }
+        return path
+    }
 }
 
 // MARK: - Privileges
@@ -117,9 +138,6 @@ struct RegistryPluginPrivilegesProvider: PluginPrivilegesProviding {
         let reference: Reference
         do {
             reference = try Reference.parse(remote)
-            if reference.tag == nil, reference.digest == nil {
-                reference.normalize()
-            }
         } catch {
             // distribution/reference's own message for a bad ref.
             throw Abort(.badRequest, reason: "invalid reference format")
@@ -129,7 +147,9 @@ struct RegistryPluginPrivilegesProvider: PluginPrivilegesProviding {
         let server = reference.resolvedDomain ?? "registry-1.docker.io"
         let client = try registryClient(server: server, authentication: authentication)
 
-        let name = reference.path
+        // ParseNormalizedNamed's `library/` familiarization for Hub refs —
+        // including tagged and digested ones (their identifiers survive).
+        let name = PluginReferenceUtility.registryLookupPath(of: reference)
         let descriptor: Descriptor
         do {
             descriptor = try await client.resolve(name: name, tag: reference.digest ?? reference.tag ?? "latest")
