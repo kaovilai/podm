@@ -91,9 +91,26 @@ protocol ClientContainerProtocol: Sendable {
     func getContainer(id: String) async throws -> ContainerSnapshot?
     func enforceContainerRunning(container: ContainerSnapshot) throws
 
-    func start(id: String, detachKeys: String?) async throws
+    /// Starts a stopped container. The return value is whether THIS call
+    /// performed the boot transition: false when the container was already
+    /// running when observed, or when the bootstrap raced another caller that
+    /// booted it first (the attach route may have bootstrapped it, and the
+    /// already-booted error is suppressed). Boot-sensitive state — the log
+    /// journal's fresh-boot reset — must key off this result, not off the
+    /// call succeeding: a suppressed no-op returns normally.
+    @discardableResult
+    func start(id: String, detachKeys: String?) async throws -> Bool
     func stop(id: String, signal: String?, timeout: Int?) async throws
-    func restart(id: String, signal: String?, timeout: Int?) async throws
+    /// Restarts a container (stop, then start). The return value is whether
+    /// THIS call performed the boot transition — `start`'s semantics: false
+    /// when the internal start raced another caller that booted the
+    /// container first (the already-booted error is suppressed). Boot-
+    /// sensitive state — the log journal's fresh-boot reset — must key off
+    /// this result, not off the call succeeding: a suppressed no-op returns
+    /// normally, and treating it as a boot would cancel the winning
+    /// follower and wipe its journal.
+    @discardableResult
+    func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool
     func kill(id: String, signal: String?) async throws
     func delete(id: String) async throws
     func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait
@@ -314,21 +331,24 @@ struct ClientContainerService: ClientContainerProtocol {
     // create+start or stop calls. start/stop/restart all hold a VMLifecycleAdmission slot for
     // their full VM-transition duration; excess calls queue rather than piling onto the storm.
 
-    func start(id: String, detachKeys: String?) async throws {
+    @discardableResult
+    func start(id: String, detachKeys: String?) async throws -> Bool {
         guard let container = try await getContainer(id: id) else {
             throw ClientContainerError.notFound(id: id)
         }
 
         if container.status == .running {
-            return
+            return false
         }
 
-        try await VMLifecycleAdmission.shared.withSlot {
+        return try await VMLifecycleAdmission.shared.withSlot {
             try await self.startInternal(container: container)
         }
     }
 
-    private func startInternal(container: ContainerSnapshot) async throws {
+    /// - Returns: whether this call performed the VM boot.
+    @discardableResult
+    private func startInternal(container: ContainerSnapshot) async throws -> Bool {
         let stdin: FileHandle? = nil
         let stdout: FileHandle? = nil
         let stderr: FileHandle? = nil
@@ -352,12 +372,13 @@ struct ClientContainerService: ClientContainerProtocol {
                 }
                 await ContainerExitCodeStore.shared.set(id: containerId, code: code)
             }
+            return true
         } catch {
             // NOTE: If bootstrap fails because container is already booted,
             //       the attach handler may have already bootstrapped it
             let errorMessage = error.localizedDescription
             if errorMessage.contains("booted") || errorMessage.contains("expected to be in created state") {
-                return
+                return false
             }
 
             // Re-throw any other errors
@@ -399,7 +420,11 @@ struct ClientContainerService: ClientContainerProtocol {
         try await containerClient.withClient { try await $0.kill(id: container.id, signal: signal) }
     }
 
-    func restart(id: String, signal: String?, timeout: Int?) async throws {
+    /// - Returns: whether this call performed the VM boot (propagated from
+    ///   `startInternal` — false when a concurrent start/attach won the
+    ///   boot race and ours was a suppressed no-op).
+    @discardableResult
+    func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool {
         guard let container = try await getContainer(id: id) else {
             throw ClientContainerError.notFound(id: id)
         }
@@ -411,12 +436,13 @@ struct ClientContainerService: ClientContainerProtocol {
 
         // Hold a single slot across stop+start: acquiring separately would let other queued
         // work run in between, leaving the container stopped longer than necessary.
-        try await VMLifecycleAdmission.shared.withSlot {
+        let bootedByThisCall = try await VMLifecycleAdmission.shared.withSlot { () -> Bool in
             if wasRunning {
                 try await self.stopInternal(container: container, signal: signal, timeout: timeout)
             }
-            try await self.startInternal(container: container)
+            return try await self.startInternal(container: container)
         }
+        return bootedByThisCall
     }
 
     func delete(id: String) async throws {

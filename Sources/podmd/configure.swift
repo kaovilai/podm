@@ -99,8 +99,23 @@ func configure(_ app: Application) async throws {
     // entries are lost on restart; without re-registration containers that are
     // restarted (not re-created) via docker start cannot be resolved by peers.
     let resumeClient = ContainerClient()
+    let resumeFollowerClient = ClientContainerService()
     if let runningContainers = try? await resumeClient.list() {
         for container in runningContainers where container.status == .running {
+            // Resume the log-journal follower for a container that was already
+            // running when Podm stopped: without it, new output has no
+            // recorded arrival time, so later `docker logs --since/--until`
+            // would mis-window it. freshBoot false — the current boot's
+            // persisted journal is preserved and alignment continues (Apple
+            // only truncates the log at a boot). The snapshot's startedDate
+            // is the boot identity: a container that REBOOTED while podmd was
+            // down has a different one, and the resume resets its stale
+            // journal instead of lending the old boot's timestamps to
+            // identical startup lines.
+            await ContainerLogFollowerRegistry.shared.arm(
+                nativeId: container.id, client: resumeFollowerClient, logger: app.logger, freshBoot: false,
+                bootStartedAt: container.startedDate)
+
             // Skip DNS-sidecar containers — they are internal infrastructure.
             guard !ClientContainerService.isDNSSidecar(container)
             else { continue }

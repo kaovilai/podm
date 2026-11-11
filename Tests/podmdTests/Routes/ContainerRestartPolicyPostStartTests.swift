@@ -16,6 +16,14 @@ import VaporTesting
 @Suite("ContainerStartRoute — post-start setup on automatic restart")
 struct ContainerRestartPolicyPostStartTests {
 
+    /// Routes the SHARED journal (the one these routes use) at a test-owned
+    /// directory before any route test runs — this suite drives lifecycle
+    /// routes that reset and delete journal files. See
+    /// `SharedJournalTestIsolation`.
+    init() async {
+        await SharedJournalTestIsolation.shared.install()
+    }
+
     @Test("An automatic restart re-registers DNS with the container's new IP")
     func automaticRestartRefreshesDNS() async throws {
         let nativeId = "restart-dns-refresh-ctr"
@@ -311,20 +319,23 @@ private actor RestartMock: ClientContainerProtocol {
     func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { [snapshot] }
     func getContainer(id: String) async throws -> ContainerSnapshot? { snapshot }
     nonisolated func enforceContainerRunning(container: ContainerSnapshot) throws {}
-    func start(id: String, detachKeys: String?) async throws {
+    func start(id: String, detachKeys: String?) async throws -> Bool {
         startCalls += 1
         // Mirrors ClientContainerService.startInternal, which clears any exit code recorded by
         // the previous run so the newly-armed observer awaits the *next* exit, not a stale one.
         await ContainerExitCodeStore.shared.remove(id: id)
+        return true
     }
     func stop(id: String, signal: String?, timeout: Int?) async throws {}
-    func restart(id: String, signal: String?, timeout: Int?) async throws {
+    @discardableResult
+    func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool {
         // Mirrors ClientContainerService.restart(), which marks a running container
         // explicitly-stopped as part of its internal stop-then-start sequence.
         if snapshot.status == .running {
             await ContainerRestartState.shared.markExplicitlyStopped(id: snapshot.id)
         }
         await ContainerExitCodeStore.shared.remove(id: id)
+        return true
     }
     func kill(id: String, signal: String?) async throws {}
     func delete(id: String) async throws {}

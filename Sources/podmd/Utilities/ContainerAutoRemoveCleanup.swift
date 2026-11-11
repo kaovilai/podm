@@ -31,6 +31,10 @@ enum ContainerAutoRemoveCleanup {
         // Read it first so the destroy event can carry the name clients knew.
         let effectiveName = await ContainerNameOverrideStore.shared.get(hexId: hexId)
         await ContainerNameOverrideStore.shared.remove(hexId: hexId)
+        // The log journal and its follower die with the container too (the
+        // delete route does the same teardown) — otherwise every removed
+        // instance leaves a capped-but-orphaned journal behind.
+        await ContainerLogFollower.teardown(nativeId: nativeId)
         if let broadcaster {
             await broadcaster.broadcast(
                 ContainerAttachRoute.makeAutoRemoveEvent(

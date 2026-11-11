@@ -29,8 +29,9 @@ extension ContainerRestartRoute {
                 await ContainerRestartState.shared.reset(id: nativeId)
             }
 
+            var restartedByThisCall = true
             do {
-                try await client.restart(id: id, signal: signal, timeout: timeout)
+                restartedByThisCall = try await client.restart(id: id, signal: signal, timeout: timeout)
             } catch ClientContainerError.notFound {
                 throw Abort(.notFound, reason: "No such container: \(id)")
             } catch ClientContainerError.ambiguousId(let reference, let matches) {
@@ -80,7 +81,18 @@ extension ContainerRestartRoute {
                     dnsServer: dnsServer,
                     healthManager: healthManager,
                     client: client,
-                    logger: req.logger
+                    logger: req.logger,
+                    // This restart actually booted the container: a fresh
+                    // log boot whose journal must reset. A restart whose
+                    // internal start lost a concurrent boot race (a
+                    // suppressed no-op) stays non-disruptive — resetting
+                    // anyway would cancel the winning follower and wipe its
+                    // journal, exactly like a raced /start.
+                    freshLogBoot: restartedByThisCall,
+                    // The post-boot snapshot's startedDate identifies THIS
+                    // boot to the follower registry, so a delayed arm cannot
+                    // displace a newer boot's follower.
+                    logBootStartedAt: restartedSnapshot?.startedDate
                 )
             }
 

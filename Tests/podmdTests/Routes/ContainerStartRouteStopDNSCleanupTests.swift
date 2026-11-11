@@ -16,6 +16,14 @@ import VaporTesting
 @Suite("ContainerStartRoute — DNS cleanup on a terminal (non-restarting) stop")
 struct ContainerStartRouteStopDNSCleanupTests {
 
+    /// Routes the SHARED journal (the one these routes use) at a test-owned
+    /// directory before any route test runs — this suite drives lifecycle
+    /// routes that reset and delete journal files. See
+    /// `SharedJournalTestIsolation`.
+    init() async {
+        await SharedJournalTestIsolation.shared.install()
+    }
+
     @Test("a container with no restart policy unregisters its DNS alias on exit")
     func plainStopUnregistersDNS() async throws {
         let nativeId = "stop-dns-plain-ctr"

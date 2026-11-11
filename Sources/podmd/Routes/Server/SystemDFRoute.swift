@@ -58,6 +58,16 @@ struct SystemDFRoute: RouteCollection {
     }
 
     func handler(_ req: Request) async throws -> Response {
+        let response = try await report(req)
+        return try await response.encodeResponse(status: .ok, for: req)
+    }
+
+    /// The shared body of the docker-dialect `/system/df` handler. The libpod
+    /// `/libpod/system/df` wrapper maps this same report into podman's
+    /// `SystemDfReport` field names (podman's remote client hard-fails on the
+    /// docker shape: it decodes `Created` as time.Time and `Command` as
+    /// []string).
+    func report(_ req: Request) async throws -> SystemDFResponse {
         let query = try req.query.decode(SystemDFQuery.self)
         // moby rejects an unknown object type with a 400 instead of silently
         // returning an all-null document. Validate the raw ordered list so the
@@ -134,7 +144,7 @@ struct SystemDFRoute: RouteCollection {
             BuildCache: buildCache
         )
 
-        return try await response.encodeResponse(status: .ok, for: req)
+        return response
     }
 
     /// The object types moby's GET /system/df accepts. An unknown value is a 400,
@@ -152,6 +162,16 @@ struct SystemDFRoute: RouteCollection {
 }
 
 extension SystemDFRoute {
+    /// The repo tags an image summary reports for `reference`. A digest-only
+    /// reference (`alpine@sha256:<digest>`) is NOT a tag: docker's
+    /// `/system/df` shows `<none>:<none>` for such an image, and podman's
+    /// `system df -v` reports the untagged placeholders. Putting the digest
+    /// reference in `RepoTags` made the libpod report split it at the last
+    /// colon into Repository `alpine@sha256` + Tag `<digest>`.
+    static func repoTags(for reference: String) -> [String] {
+        reference.isEmpty || reference.contains("@") ? [] : [reference]
+    }
+
     fileprivate static func buildImageSummaries(
         images: [ClientImage],
         usageByImageReference: [String: Int]
@@ -190,7 +210,7 @@ extension SystemDFRoute {
                         totalSize += descriptor.size
                     }
 
-                    let repoTags = image.reference.isEmpty ? [] : [image.reference]
+                    let repoTags = SystemDFRoute.repoTags(for: image.reference)
                     let repoDigests = image.reference.contains("@sha256:") ? [image.reference] : []
                     let containerCount = usageByImageReference[image.reference] ?? 0
 
@@ -348,6 +368,7 @@ extension SystemDFRoute {
             ImageID: container.configuration.image.digest,
             ImageManifestDescriptor: nil,
             Command: ([container.configuration.initProcess.executable] + container.configuration.initProcess.arguments).joined(separator: " "),
+            CommandArgv: [container.configuration.initProcess.executable] + container.configuration.initProcess.arguments,
             Created: createdTimestamp,
             StartedAtUnix: nil,
             ExitCode: nil,

@@ -139,6 +139,7 @@ extension ContainerAttachRoute {
                 // eliminates the race condition for fast-exiting containers (#220).
                 return try await attachStoppedOutputOnly(
                     req: req,
+                    client: client,
                     hexId: id,
                     container: container,
                     query: query,
@@ -282,6 +283,7 @@ extension ContainerAttachRoute {
     // Uses pipes instead of log-file polling to eliminate the race for fast-exiting containers.
     private static func attachStoppedOutputOnly(
         req: Request,
+        client: ClientContainerProtocol,
         hexId: String,
         container: ContainerSnapshot,
         query: ContainerAttachQuery,
@@ -321,6 +323,12 @@ extension ContainerAttachRoute {
             throw Abort(.internalServerError, reason: "Failed to bootstrap container: \(error.localizedDescription)")
         }
 
+        // True when THIS call's bootstrap performed the container's boot. A
+        // benign start race means a concurrent request already started the
+        // container — ITS arm registered that boot's fresh journal, so ours
+        // must arm as a resume (freshBoot false) or it would cancel the
+        // winning boot's follower and replace its journal timestamps.
+        var startedByThisCall = true
         do {
             try await process.start()
         } catch {
@@ -329,9 +337,35 @@ extension ContainerAttachRoute {
                 await ContainerExitCodeStore.shared.set(id: container.id, code: -1)
                 throw Abort(.internalServerError, reason: "Failed to start container: \(error.localizedDescription)")
             }
+            startedByThisCall = false
         }
 
         await ProcessRegistry.shared.set(id: container.id, process: process)
+
+        // The bootstrap above performed this container's boot — register a
+        // fresh log-journal boot NOW. The /start the CLI sends next sees the
+        // container already running and arms with freshLogBoot false, so
+        // without this registration the previous boot's follower and journal
+        // would live on: startup lines identical to the old boot's (same
+        // banner) classify as covered and inherit stale timestamps — a
+        // coincidence the first-mismatch self-heal can never catch.
+        //
+        // The arm carries the boot's identity (see CR/F1): fetching the
+        // snapshot at ARM time — not bootstrap time — observes whichever
+        // boot is CURRENT if a concurrent lifecycle already restarted the
+        // container, so an identityless fresh arm can never bypass the
+        // registry's stale-boot guard, cancel a newer boot's follower and
+        // wipe its journal. If the snapshot belongs to a newer boot that is
+        // already armed, the registry's equal-identity check makes this arm
+        // a no-op — the restart's output is never attributed to this boot.
+        // Apple not reporting a start date yet leaves nil — never synthesize
+        // one (a made-up identity would falsely prove a reboot on the next
+        // resume that learns Apple's real date); the /start that follows
+        // adopts the identity into the journal then.
+        let attachBootStartedAt = (try? await client.getContainer(id: container.id))?.startedDate
+        await ContainerLogFollowerRegistry.shared.arm(
+            nativeId: container.id, client: client, logger: req.logger, freshBoot: startedByThisCall,
+            bootStartedAt: attachBootStartedAt)
 
         await broadcastAttach(
             container: container,
@@ -566,6 +600,15 @@ extension ContainerAttachRoute {
         }
 
         await ProcessRegistry.shared.set(id: container.id, process: process)
+
+        // The bootstrap above performed this container's boot — register a
+        // fresh log-journal boot NOW (see attachStoppedOutputOnly for why the
+        // later no-op /start cannot be the one to do it, and for why the arm
+        // carries the boot identity fetched at arm time).
+        let attachBootStartedAt = (try? await client.getContainer(id: container.id))?.startedDate
+        await ContainerLogFollowerRegistry.shared.arm(
+            nativeId: container.id, client: client, logger: req.logger, freshBoot: true,
+            bootStartedAt: attachBootStartedAt)
 
         let broadcaster = req.application.storage[EventBroadcasterKey.self]
         await broadcastAttach(

@@ -26,9 +26,9 @@ private struct StopFailureMock: ClientContainerProtocol {
     func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { [snapshot] }
     func getContainer(id: String) async throws -> ContainerSnapshot? { snapshot }
     func enforceContainerRunning(container: ContainerSnapshot) throws {}
-    func start(id: String, detachKeys: String?) async throws {}
+    func start(id: String, detachKeys: String?) async throws -> Bool { true }
     func stop(id: String, signal: String?, timeout: Int?) async throws { throw GenericStopFailure() }
-    func restart(id: String, signal: String?, timeout: Int?) async throws {}
+    func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool { true }
     func kill(id: String, signal: String?) async throws {}
     func delete(id: String) async throws { throw GenericStopFailure() }
     func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait {
@@ -55,6 +55,14 @@ private func makeSnapshot(id: String, status: RuntimeStatus = .running) -> Conta
 @Suite("ContainerStopRoute — generic error surfacing")
 struct ContainerStopRouteGenericErrorTests {
 
+    /// Routes the SHARED journal (the one these routes use) at a test-owned
+    /// directory before any route test runs — this suite drives lifecycle
+    /// routes that reset and delete journal files. See
+    /// `SharedJournalTestIsolation`.
+    init() async {
+        await SharedJournalTestIsolation.shared.install()
+    }
+
     @Test("A non-ClientContainerError failure surfaces its real reason, not a generic message")
     func genericStopFailureSurfacesReason() async throws {
         let snapshot = makeSnapshot(id: "stop-fail-ctr")
@@ -77,6 +85,14 @@ struct ContainerStopRouteGenericErrorTests {
 
 @Suite("ContainerDeleteRoute — generic error surfacing")
 struct ContainerDeleteRouteGenericErrorTests {
+
+    /// Routes the SHARED journal (the one these routes use) at a test-owned
+    /// directory before any route test runs — this suite drives lifecycle
+    /// routes that reset and delete journal files. See
+    /// `SharedJournalTestIsolation`.
+    init() async {
+        await SharedJournalTestIsolation.shared.install()
+    }
 
     @Test("A non-ClientContainerError failure surfaces its real reason, not a generic message")
     func genericDeleteFailureSurfacesReason() async throws {

@@ -37,6 +37,11 @@ extension ContainerStartRoute {
                 throw Abort(.badRequest, reason: "ambiguous container reference \(reference): matches \(matchList)")
             }
 
+            // Whether this request actually transitioned the container to
+            // running (a stopped container being started) — drives the log
+            // journal's fresh-boot reset below.
+            var startedByThisCall = false
+
             do {
                 guard let container = preStartSnapshot else {
                     throw Abort(.notFound, reason: "No such container: \(id)")
@@ -50,9 +55,19 @@ extension ContainerStartRoute {
                 if container.status == .running {
                     req.logger.debug("Container \(id) is already running")
                 } else {
-                    // Try to start the container
-                    try await client.start(id: id, detachKeys: detachKeys)
-                    req.logger.debug("Started container \(id)")
+                    // Try to start the container. The service reports whether
+                    // THIS call performed the boot: a concurrent /start (or
+                    // the attach route's bootstrap) winning the race makes
+                    // ours a suppressed no-op that returns normally — which
+                    // must not be mistaken for a fresh boot below, or the
+                    // real boot's follower would be cancelled and its journal
+                    // erased and restamped.
+                    startedByThisCall = try await client.start(id: id, detachKeys: detachKeys)
+                    if startedByThisCall {
+                        req.logger.debug("Started container \(id)")
+                    } else {
+                        req.logger.debug("Container \(id) was already booted by a concurrent caller")
+                    }
                 }
 
             } catch {
@@ -140,7 +155,16 @@ extension ContainerStartRoute {
                     dnsServer: req.application.storage[PodmDNSServerKey.self],
                     healthManager: req.application.storage[HealthCheckManagerKey.self],
                     client: client,
-                    logger: req.logger
+                    logger: req.logger,
+                    // This call actually transitioned the container to running:
+                    // a fresh log boot whose journal must reset. A redundant
+                    // /start on an already-running container stays
+                    // non-disruptive (freshBoot false preserves the journal).
+                    freshLogBoot: startedByThisCall,
+                    // The post-boot snapshot's startedDate identifies THIS
+                    // boot to the follower registry, so a delayed arm cannot
+                    // displace a newer boot's follower.
+                    logBootStartedAt: startedSnapshot?.startedDate
                 )
             }
 
@@ -274,8 +298,12 @@ extension ContainerStartRoute {
             // /start or /restart landing during the backoff sleep above must not inflate
             // RestartCount for a restart that the generation check just aborted.
             let attempt = await ContainerRestartState.shared.nextAttempt(id: nativeId)
+            // Whether THIS restart performed the boot (a concurrent /start
+            // winning the race makes ours a suppressed no-op — see the /start
+            // handler): only a real transition resets the log journal.
+            var restartedByThisCall = false
             do {
-                try await client.start(id: nativeId, detachKeys: nil)
+                restartedByThisCall = try await client.start(id: nativeId, detachKeys: nil)
             } catch {
                 await ContainerRestartState.shared.clearPendingRestart(id: nativeId)
                 logger.warning("restart-policy: failed to restart \(nativeId) (attempt \(attempt)): \(error)")
@@ -303,7 +331,9 @@ extension ContainerStartRoute {
                 dnsServer: dnsServer,
                 healthManager: healthManager,
                 client: client,
-                logger: logger
+                logger: logger,
+                freshLogBoot: restartedByThisCall,
+                logBootStartedAt: restartedSnapshot?.startedDate
             )
             if let snap = restartedSnapshot ?? exitSnapshot {
                 await VolumeMountEvents.broadcastMounts(for: snap, containerId: eventId, broadcaster: broadcaster)
@@ -317,6 +347,21 @@ extension ContainerStartRoute {
     /// Refreshes `ContainerInfoCache` (when `refreshCache` is true) and arms `observeExit`
     /// to watch the container's next exit. Shared by `/start`, `/restart`, and the internal
     /// restart-policy restart so all three leave the same cache/observer state behind.
+    /// - Parameter freshLogBoot: true whenever this lifecycle actually
+    ///   transitioned the container to running (`/restart`, the restart-policy
+    ///   restart, or a `/start` of a stopped container) — Apple truncates the
+    ///   container's log file at every boot, so the timestamped log journal
+    ///   must reset and a fresh follower must take over. False for a plain
+    ///   `/start` on an already-running container, which leaves the existing
+    ///   follower and its journal alone (or resumes them after a daemon
+    ///   restart).
+    /// - Parameter logBootStartedAt: the `startedDate` of the boot this
+    ///   lifecycle transitioned into, when a post-boot snapshot observed one.
+    ///   The follower registry rejects an arm for a boot OLDER than the
+    ///   currently-armed one — a `/start` delayed in post-start setup must not
+    ///   cancel the follower of a newer `/restart`'s boot and wipe its
+    ///   journal. Nil (no snapshot, or Apple reported no start date) falls
+    ///   back to epoch-only ordering.
     static func armRestartObserver(
         nativeId: String,
         eventId: String,
@@ -331,7 +376,9 @@ extension ContainerStartRoute {
         dnsServer: PodmDNSServer?,
         healthManager: HealthCheckManager?,
         client: ClientContainerProtocol,
-        logger: Logger
+        logger: Logger,
+        freshLogBoot: Bool = false,
+        logBootStartedAt: Date? = nil
     ) async {
         if refreshCache {
             await ContainerInfoCache.shared.set(hexId: eventId, nativeId: nativeId, image: image, labels: labels, ip: ip)
@@ -341,6 +388,15 @@ extension ContainerStartRoute {
         // explicitly-stopped; clear it here so the new observer doesn't mistake a manual
         // restart for a stop that should suppress restart-policy enforcement on the next exit.
         _ = await ContainerRestartState.shared.consumeExplicitlyStopped(id: nativeId)
+
+        // Arm the log-journal follower for this boot alongside the exit
+        // observer: it records per-line arrival times into
+        // ContainerLogJournal, which backs `docker logs --since/--until` and
+        // accurate historical `--timestamps` (Apple's log stream carries no
+        // write-time metadata of its own).
+        await ContainerLogFollowerRegistry.shared.arm(
+            nativeId: nativeId, client: client, logger: logger, freshBoot: freshLogBoot,
+            bootStartedAt: logBootStartedAt)
 
         ContainerStartRoute.observeExit(
             nativeId: nativeId, eventId: eventId, image: image, name: name, labels: labels,

@@ -11,6 +11,14 @@ import VaporTesting
 @Suite("Compose DNS — service name registration")
 struct ComposeDNSTests {
 
+    /// Routes the SHARED journal (the one these routes use) at a test-owned
+    /// directory before any route test runs — this suite drives lifecycle
+    /// routes that reset and delete journal files. See
+    /// `SharedJournalTestIsolation`.
+    init() async {
+        await SharedJournalTestIsolation.shared.install()
+    }
+
     // MARK: - Start route registers compose DNS aliases
 
     @Test("Start registers service and service.project aliases when compose labels present")
@@ -436,9 +444,9 @@ private struct ComposeMock: ClientContainerProtocol {
     func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { [snapshot] }
     func getContainer(id: String) async throws -> ContainerSnapshot? { snapshot }
     func enforceContainerRunning(container: ContainerSnapshot) throws {}
-    func start(id: String, detachKeys: String?) async throws {}
+    func start(id: String, detachKeys: String?) async throws -> Bool { true }
     func stop(id: String, signal: String?, timeout: Int?) async throws {}
-    func restart(id: String, signal: String?, timeout: Int?) async throws {}
+    func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool { true }
     func kill(id: String, signal: String?) async throws {}
     func delete(id: String) async throws {}
     func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait {

@@ -38,6 +38,13 @@ extension ContainerPruneRoute {
             }
 
             let result = try await client.prune(filters: parsedFilters)
+            // The prune path deletes containers directly through the native
+            // client, bypassing the delete/auto-remove cleanup callers — tear
+            // down each pruned container's log journal and follower along
+            // with it, or its journal file lingers with no sweep to remove it.
+            for containerID in result.deletedContainers {
+                await ContainerLogFollower.teardown(nativeId: containerID)
+            }
             if let broadcaster = req.application.storage[EventBroadcasterKey.self] {
                 // moby fires a `destroy` per removed container before the aggregate prune.
                 for containerID in result.deletedContainers {

@@ -14,6 +14,14 @@ import VaporTesting
 @Suite("ContainerStartRoute — --rm auto-remove DNS alias cleanup")
 struct ContainerStartRouteAutoRemoveAliasTests {
 
+    /// Routes the SHARED journal (the one these routes use) at a test-owned
+    /// directory before any route test runs — this suite drives lifecycle
+    /// routes that reset and delete journal files. See
+    /// `SharedJournalTestIsolation`.
+    init() async {
+        await SharedJournalTestIsolation.shared.install()
+    }
+
     @Test("die on a --rm container unregisters its name and its compose service/project aliases")
     func autoRemoveUnregistersFullAliasSet() async throws {
         let nativeId = "web-autoremove-ctr"

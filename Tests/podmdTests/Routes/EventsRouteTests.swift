@@ -100,7 +100,7 @@ struct EventsRouteTests {
         }
     }
 
-    @Test("a live event broadcast after subscribe is delivered within a future until")
+    @Test("an event broadcast while a future-until request is in flight is delivered")
     func liveEventWithinFutureUntil() async throws {
         let broadcaster = EventBroadcaster()
 
@@ -111,26 +111,26 @@ struct EventsRouteTests {
             app.storage[EventBroadcasterKey.self] = broadcaster
             try app.register(collection: EventsRoute(client: MockHealthCheckClient()))
 
-            // The request runs; shortly after the subscription is live, an
-            // event is broadcast and must appear in the response body
-            // before the until deadline ends it. Generous margins (2s
-            // deadline, 150ms broadcast) keep this stable under parallel
-            // suite load: whether the broadcast lands before subscribe
-            // (delivered via the replay snapshot) or after (delivered via
-            // the live stream), the event is in the body either way.
+            // The request runs concurrently; the test itself broadcasts an
+            // event 200 ms in — from the test's perspective deterministic,
+            // and always before the earliest possible response end (the
+            // 2 s deadline). Whether the subscription is live by then (the
+            // event streams) or not (the event replays from history via
+            // since=0), the body contains it. A fire-and-forget broadcast
+            // Task cannot be used here: on a saturated runner it can be
+            // starved past the deadline entirely.
             let deadline = nanoNow() + 2_000_000_000
-            Task {
-                try await Task.sleep(nanoseconds: 150_000_000)
-                await broadcaster.broadcast(
-                    self.makeEvent(action: "start", id: "live-ctr", timeNano: self.nanoNow()))
-            }
-            try await app.testing().test(
+            async let response = app.testing().test(
                 .GET, "/v1.51/events?since=0&until=\(param(deadline))"
             ) { res async in
                 #expect(res.status == .ok)
                 let events = self.decodeEvents(res.body)
-                #expect(events.map(\.id).contains("live-ctr"), "the live broadcast must be delivered")
+                #expect(events.map(\.id).contains("live-ctr"), "the broadcast must be delivered")
             }
+            try await Task.sleep(nanoseconds: 200_000_000)
+            await broadcaster.broadcast(
+                self.makeEvent(action: "start", id: "live-ctr", timeNano: self.nanoNow()))
+            _ = try await response
         }
     }
 

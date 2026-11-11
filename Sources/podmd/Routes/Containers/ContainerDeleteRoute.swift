@@ -38,6 +38,11 @@ extension ContainerDeleteRoute {
 
             func broadcastRemove() async {
                 await ContainerInfoCache.shared.remove(id: id)
+                // The timestamped log journal dies with the container — keyed
+                // by native id, so a recreated container never inherits it.
+                if let nativeId = snapshot?.id ?? cached?.nativeId {
+                    await ContainerLogFollower.teardown(nativeId: nativeId)
+                }
                 // Prevents a container recreated under the same name from inheriting this one's restart-attempt count.
                 await ContainerRestartState.shared.reset(id: eventName)
                 await RestartPolicyOverrideStore.shared.remove(id: eventId)

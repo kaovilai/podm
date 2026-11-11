@@ -28,12 +28,16 @@ struct ContainerFileChange: Sendable, Equatable {
 /// snapshot. The image snapshot therefore IS the pristine baseline — no
 /// create-time capture is needed.
 ///
-/// The walk compares (type, mode, uid/gid, size, mtime, ctime) metadata per path and only
-/// hashes the contents of regular files whose metadata diverges, confirming
-/// Modified entries (and suppressing false positives when a copy rewrites
-/// timestamps). Directories are reported Modified only when their immediate
-/// child set or mode differs — matching what `docker diff` shows in practice
-/// and avoiding false positives from timestamp-only directory churn.
+/// The walk compares (type, mode, uid/gid, size, mtime, ctime, xattrs)
+/// metadata per path and only hashes the contents of regular files whose
+/// metadata diverges, confirming Modified entries (and suppressing false
+/// positives when a copy rewrites timestamps). Xattr-only changes (e.g.
+/// `setcap` writing `security.capability`, issue #25) are detected through
+/// a cheap inode-level signal first — see `xattrsDiverge` — so files
+/// without xattrs never pay a decode. Directories are reported Modified
+/// only when their immediate child set or mode differs — matching what
+/// `docker diff` shows in practice and avoiding false positives from
+/// timestamp-only directory churn.
 ///
 /// Reading the rootfs while the guest VM writes to it yields a volatile
 /// snapshot — the same guarantee moby gives when diffing a running container.
@@ -73,16 +77,40 @@ enum ContainerChangesWalker {
 
     /// Diff two ext4 block devices. Runs the (synchronous) EXT4 walk on a
     /// utility task so the event loop is not blocked on disk I/O.
-    static func changes(baselineBlockDevice: URL, currentBlockDevice: URL) async throws -> [ContainerFileChange] {
+    ///
+    /// - Parameter onXattrDecode: invoked once per full xattr-set decode.
+    ///   Test instrumentation only — the walk must take its decode-free
+    ///   fast path for files without xattrs, and this makes that observable
+    ///   per invocation.
+    static func changes(
+        baselineBlockDevice: URL,
+        currentBlockDevice: URL,
+        onXattrDecode: (@Sendable () -> Void)? = nil
+    ) async throws -> [ContainerFileChange] {
         let baselinePath = baselineBlockDevice.path
         let currentPath = currentBlockDevice.path
         return try await Task.detached(priority: .utility) {
             let baseline = try EXT4.EXT4Reader(blockDevice: FilePath(baselinePath))
             let current = try EXT4.EXT4Reader(blockDevice: FilePath(currentPath))
+            let baselineSide = DiffSide(
+                reader: baseline,
+                xattrs: EXT4XattrReader(
+                    blockDevice: FilePath(baselinePath), superBlock: baseline.superBlock, onDecode: onXattrDecode))
+            let currentSide = DiffSide(
+                reader: current,
+                xattrs: EXT4XattrReader(
+                    blockDevice: FilePath(currentPath), superBlock: current.superBlock, onDecode: onXattrDecode))
             var changes: [ContainerFileChange] = []
-            try walk(baseline: baseline, current: current, path: "/", into: &changes)
+            try walk(baseline: baselineSide, current: currentSide, path: "/", into: &changes)
             return changes.sorted { $0.path < $1.path }
         }.value
+    }
+
+    /// One side of the comparison: the tree reader plus the xattr reader for
+    /// the same block device.
+    private struct DiffSide {
+        let reader: EXT4.EXT4Reader
+        let xattrs: EXT4XattrReader
     }
 
     // MARK: - Baseline resolution
@@ -198,6 +226,19 @@ enum ContainerChangesWalker {
         /// change and must not compare equal.
         let uid: UInt32
         let gid: UInt32
+        /// Raw inline-xattr region of the inode (nil when all zeros).
+        /// Byte-identical regions necessarily decode to identical xattr
+        /// sets, so this doubles as the decode-free fast-path signal: the
+        /// walk only ever parses xattrs when these bytes (or the block
+        /// pointer below) diverge between the two sides.
+        let inlineXattrBytes: Data?
+        /// ext4 xattr block pointer (`xattrBlockLow | xattrBlockHigh << 32`);
+        /// 0 = no block-backed xattrs. A NON-zero pointer on either side
+        /// forces a full decode — the same block NUMBER on two different
+        /// devices does not imply the same block CONTENT (ext4 rewrites
+        /// xattr blocks in place), so the pointer alone can never prove
+        /// equality.
+        let xattrBlock: UInt64
 
         init(inode: EXT4.Inode) {
             typeTag = inode.mode & 0xF000
@@ -211,6 +252,8 @@ enum ContainerChangesWalker {
             mode = inode.mode
             uid = UInt32(inode.uid) | (UInt32(inode.uidHigh) << 16)
             gid = UInt32(inode.gid) | (UInt32(inode.gidHigh) << 16)
+            inlineXattrBytes = EXT4XattrReader.inlineRegion(of: inode)
+            xattrBlock = UInt64(inode.xattrBlockLow) | (UInt64(inode.xattrBlockHigh) << 32)
         }
 
         /// Metadata equality for content-bearing entries: everything a
@@ -222,8 +265,8 @@ enum ContainerChangesWalker {
     }
 
     private static func walk(
-        baseline: EXT4.EXT4Reader,
-        current: EXT4.EXT4Reader,
+        baseline: DiffSide,
+        current: DiffSide,
         path: String,
         into changes: inout [ContainerFileChange]
     ) throws {
@@ -244,8 +287,8 @@ enum ContainerChangesWalker {
     /// One directory level. `baseEntries`/`currentEntries` carry the listings
     /// of `path` on each side (`nil` when that side has nothing there).
     private static func walk(
-        baseline: EXT4.EXT4Reader,
-        current: EXT4.EXT4Reader,
+        baseline: DiffSide,
+        current: DiffSide,
         path: String,
         baseEntries: [String: TreeEntry],
         currentEntries: [String: TreeEntry],
@@ -282,7 +325,10 @@ enum ContainerChangesWalker {
                     // additions/deletions or mask the whole subtree.
                     let childBase = try list(baseline, at: childPath)
                     let childCurrent = try list(current, at: childPath)
-                    if Set(childBase.keys) != Set(childCurrent.keys) || !b.metadataMatches(c) {
+                    if Set(childBase.keys) != Set(childCurrent.keys)
+                        || !b.metadataMatches(c)
+                        || xattrsDiverge(baseline: baseline, base: b, current: current, currentEntry: c)
+                    {
                         changes.append(ContainerFileChange(path: childPath, kind: .modified))
                     }
                     try walk(
@@ -294,7 +340,8 @@ enum ContainerChangesWalker {
                     // the link inode itself).
                     if b.size != c.size
                         || !b.metadataMatches(c)
-                        || symlinkTarget(baseline, at: childPath) != symlinkTarget(current, at: childPath)
+                        || symlinkTarget(baseline.reader, at: childPath) != symlinkTarget(current.reader, at: childPath)
+                        || xattrsDiverge(baseline: baseline, base: b, current: current, currentEntry: c)
                     {
                         changes.append(ContainerFileChange(path: childPath, kind: .modified))
                     }
@@ -305,12 +352,13 @@ enum ContainerChangesWalker {
                     // and ownership changes even when the bytes are identical,
                     // so they are checked BEFORE any content heuristic can
                     // suppress them.
+                    var modified = false
                     if !b.metadataMatches(c) {
-                        changes.append(ContainerFileChange(path: childPath, kind: .modified))
+                        modified = true
                     } else if b.size != c.size {
                         // Different sizes mean different contents — no hash
                         // needed (also avoids reading both files in vain).
-                        changes.append(ContainerFileChange(path: childPath, kind: .modified))
+                        modified = true
                     } else if (b.mtime, b.mtimeExtra) != (c.mtime, c.mtimeExtra)
                         || (b.ctime, b.ctimeExtra) != (c.ctime, c.ctimeExtra)
                     {
@@ -319,9 +367,19 @@ enum ContainerChangesWalker {
                         // timestamp churn) — hash to confirm. ctime cannot be
                         // forged via utimes(), so an archive-API replace that
                         // preserves mtime still lands here.
-                        if isModifiedFile(baseline: baseline, at: childPath, current: current) {
-                            changes.append(ContainerFileChange(path: childPath, kind: .modified))
-                        }
+                        modified = isModifiedFile(baseline: baseline, at: childPath, current: current)
+                    }
+                    // Xattr-only changes (issue #25: `setcap` writing
+                    // security.capability) leave size/mode/ownership intact,
+                    // and identical bytes survive the hash rescue above —
+                    // compare xattrs whenever the file is otherwise clean.
+                    if !modified,
+                        xattrsDiverge(baseline: baseline, base: b, current: current, currentEntry: c)
+                    {
+                        modified = true
+                    }
+                    if modified {
+                        changes.append(ContainerFileChange(path: childPath, kind: .modified))
                     }
                 }
             }
@@ -345,15 +403,45 @@ enum ContainerChangesWalker {
     /// Immediate child entries of the directory at `path`, keyed by name.
     /// Stats without following symlinks so a link keeps its own inode (type,
     /// size = target length) and dangling links still list.
-    private static func list(_ reader: EXT4.EXT4Reader, at path: String) throws -> [String: TreeEntry] {
+    private static func list(_ side: DiffSide, at path: String) throws -> [String: TreeEntry] {
         var entries: [String: TreeEntry] = [:]
-        for name in try reader.listDirectory(FilePath(path)) {
+        for name in try side.reader.listDirectory(FilePath(path)) {
             guard name != ".", name != ".." else { continue }
             let childPath = path == "/" ? "/\(name)" : "\(path)/\(name)"
-            let (_, inode) = try reader.stat(FilePath(childPath), followSymlinks: false)
+            let (_, inode) = try side.reader.stat(FilePath(childPath), followSymlinks: false)
             entries[name] = TreeEntry(inode: inode)
         }
         return entries
+    }
+
+    /// Xattr comparison with a decode-free fast path: when neither side has
+    /// an xattr block and the raw inline regions are byte-identical (or
+    /// absent), the decoded sets are necessarily equal — no parsing at all.
+    /// Anything else — differing inline bytes, or a block pointer on either
+    /// side (the same block NUMBER on two devices does not imply the same
+    /// block CONTENT, since ext4 rewrites xattr blocks in place) — decodes
+    /// both full sets and compares them. A set that cannot be read counts as
+    /// diverged: the signal already moved and equality cannot be established
+    /// (mirroring `isModifiedFile`'s unreadable-file behavior).
+    private static func xattrsDiverge(
+        baseline: DiffSide,
+        base: TreeEntry,
+        current: DiffSide,
+        currentEntry: TreeEntry
+    ) -> Bool {
+        if base.xattrBlock == 0, currentEntry.xattrBlock == 0,
+            base.inlineXattrBytes == currentEntry.inlineXattrBytes
+        {
+            return false
+        }
+        guard
+            let baseXattrs = baseline.xattrs.xattrs(inline: base.inlineXattrBytes, block: base.xattrBlock),
+            let currentXattrs = current.xattrs.xattrs(
+                inline: currentEntry.inlineXattrBytes, block: currentEntry.xattrBlock)
+        else {
+            return true
+        }
+        return baseXattrs != currentXattrs
     }
 
     /// Content comparison for metadata-divergent regular files: hash both
@@ -361,13 +449,13 @@ enum ContainerChangesWalker {
     /// cannot be read is treated as modified — its metadata already diverged
     /// and equality cannot be established.
     private static func isModifiedFile(
-        baseline: EXT4.EXT4Reader,
+        baseline: DiffSide,
         at path: String,
-        current: EXT4.EXT4Reader
+        current: DiffSide
     ) -> Bool {
         guard
-            let baseDigest = contentDigest(baseline, at: path),
-            let currentDigest = contentDigest(current, at: path)
+            let baseDigest = contentDigest(baseline.reader, at: path),
+            let currentDigest = contentDigest(current.reader, at: path)
         else {
             return true
         }
