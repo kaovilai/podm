@@ -417,7 +417,7 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | 🚫 | `GET` | `/services/{id}` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
 | 🚫 | `GET` | `/services/{id}/logs` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
 | 🚫 | `POST` | `/services/{id}/update` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
-| 🚫 | `GET` | `/session` | docker | dockerd's buildx session channel is not supported; the route answers not-supported for CLI compatibility. |
+| 🚫 | `POST` | `/session` | docker | dockerd's buildx session channel is not supported; the route answers not-implemented for CLI compatibility — POST is the method every Docker API version since v1.31 defines, and the one buildx's session dialer issues. |
 | 🚫 | `GET` | `/swarm` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
 | 🚫 | `POST` | `/swarm/init` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
 | 🚫 | `POST` | `/swarm/join` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |

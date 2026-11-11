@@ -46,8 +46,10 @@ enum RouteSupportManifest {
         ),
         // ── buildx session channel ───────────────────────────────────────────
         DeliberateStub(
-            method: "GET", pattern: "/session",
-            reason: "dockerd's buildx session channel is not supported; the route answers not-supported for CLI compatibility."),
+            method: "POST", pattern: "/session",
+            reason:
+                "dockerd's buildx session channel is not supported; the route answers not-implemented for CLI compatibility — POST is the method every Docker API version since v1.31 defines, and the one buildx's session dialer issues."
+        ),
         // ── Swarm compatibility surface (single-node: not supported) ─────────
         // (The GET/POST/DELETE /configs routes are live over the local
         // ConfigStore — see ConfigsRoute.)
