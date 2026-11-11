@@ -32,14 +32,18 @@ enum DeliberateStubResponse {
     /// pause/unpause (docker + libpod twins share this answer): 503 with one
     /// shared message carrying the canonical upstream attribution (issue
     /// #37) — blocked on apple/container XPC support, tracked upstream in
-    /// apple/containerization#998.
+    /// apple/containerization#998. Note apple/containerization#366 removed
+    /// the LinuxContainer/LinuxPod pause/resume integration API (suspected
+    /// vended-vsock EBADF asserts); the underlying VZ pause/resume VM
+    /// primitives remain, and #998 builds on them.
     static func pauseUnavailable() -> Response {
         json(
             .serviceUnavailable,
             "Pausing and unpausing a container is not supported by podm: blocked upstream — "
-                + "apple/container exposes no pause XPC route, and containerization's VZ "
-                + "pause/resume was removed pending a fix for the vended-vsock lifetime "
-                + "problem (tracked in apple/containerization#998)"
+                + "apple/container exposes no pause XPC route, and containerization removed its "
+                + "LinuxContainer/LinuxPod pause/resume API pending a fix for the vended-vsock "
+                + "lifetime problem while the underlying VZ pause/resume primitives remain "
+                + "(tracked in apple/containerization#998)"
         )
     }
 

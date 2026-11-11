@@ -350,7 +350,7 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `GET` | `/containers/{id}/json` | docker |  |
 | ✅ | `POST` | `/containers/{id}/kill` | docker |  |
 | ✅ | `GET` | `/containers/{id}/logs` | docker |  |
-| 🚫 | `POST` | `/containers/{id}/pause` | docker | Blocked upstream: apple/container exposes no pause XPC route, and containerization's VZ pause/resume was removed pending a vsock lifetime fix (apple/containerization#998). |
+| 🚫 | `POST` | `/containers/{id}/pause` | docker | Blocked upstream: apple/container exposes no pause XPC route; apple/containerization#366 removed the LinuxContainer/LinuxPod pause/resume API (suspected vended-vsock EBADF asserts), while the underlying VZ pause/resume VM primitives remain (apple/containerization#998). |
 | ✅ | `POST` | `/containers/{id}/rename` | docker |  |
 | ✅ | `POST` | `/containers/{id}/resize` | docker |  |
 | ✅ | `POST` | `/containers/{id}/restart` | docker |  |
@@ -358,7 +358,7 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `GET` | `/containers/{id}/stats` | docker |  |
 | ✅ | `POST` | `/containers/{id}/stop` | docker |  |
 | ✅ | `GET` | `/containers/{id}/top` | docker |  |
-| 🚫 | `POST` | `/containers/{id}/unpause` | docker | Blocked upstream: apple/container exposes no pause XPC route, and containerization's VZ pause/resume was removed pending a vsock lifetime fix (apple/containerization#998). |
+| 🚫 | `POST` | `/containers/{id}/unpause` | docker | Blocked upstream: apple/container exposes no pause XPC route; apple/containerization#366 removed the LinuxContainer/LinuxPod pause/resume API (suspected vended-vsock EBADF asserts), while the underlying VZ pause/resume VM primitives remain (apple/containerization#998). |
 | ✅ | `POST` | `/containers/{id}/update` | docker |  |
 | ✅ | `POST` | `/containers/{id}/wait` | docker |  |
 | ✅ | `GET` | `/distribution/{name:.*}/json` | docker |  |
@@ -449,14 +449,14 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `GET` | `/libpod/containers/{id}/json` | libpod |  |
 | ✅ | `POST` | `/libpod/containers/{id}/kill` | libpod |  |
 | ✅ | `GET` | `/libpod/containers/{id}/logs` | libpod |  |
-| 🚫 | `POST` | `/libpod/containers/{id}/pause` | libpod | Blocked upstream: apple/container exposes no pause XPC route, and containerization's VZ pause/resume was removed pending a vsock lifetime fix (apple/containerization#998). |
+| 🚫 | `POST` | `/libpod/containers/{id}/pause` | libpod | Blocked upstream: apple/container exposes no pause XPC route; apple/containerization#366 removed the LinuxContainer/LinuxPod pause/resume API (suspected vended-vsock EBADF asserts), while the underlying VZ pause/resume VM primitives remain (apple/containerization#998). |
 | ✅ | `POST` | `/libpod/containers/{id}/rename` | libpod |  |
 | ✅ | `POST` | `/libpod/containers/{id}/restart` | libpod |  |
 | ✅ | `POST` | `/libpod/containers/{id}/start` | libpod |  |
 | ✅ | `GET` | `/libpod/containers/{id}/stats` | libpod |  |
 | ✅ | `POST` | `/libpod/containers/{id}/stop` | libpod |  |
 | ✅ | `GET` | `/libpod/containers/{id}/top` | libpod |  |
-| 🚫 | `POST` | `/libpod/containers/{id}/unpause` | libpod | Blocked upstream: apple/container exposes no pause XPC route, and containerization's VZ pause/resume was removed pending a vsock lifetime fix (apple/containerization#998). |
+| 🚫 | `POST` | `/libpod/containers/{id}/unpause` | libpod | Blocked upstream: apple/container exposes no pause XPC route; apple/containerization#366 removed the LinuxContainer/LinuxPod pause/resume API (suspected vended-vsock EBADF asserts), while the underlying VZ pause/resume VM primitives remain (apple/containerization#998). |
 | ✅ | `POST` | `/libpod/containers/{id}/update` | libpod |  |
 | ✅ | `POST` | `/libpod/containers/{id}/wait` | libpod |  |
 | ✅ | `GET` | `/libpod/containers/{name}/healthcheck` | libpod |  |

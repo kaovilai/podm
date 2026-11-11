@@ -82,22 +82,35 @@ struct DeliberateStubRouteTests {
                         return
                     }
                     let body = res.body.string
+                    // The error-body contract is moby's exact
+                    // `{"message": <string>}` shape: DECODE the body and
+                    // require a single string-valued "message" key — a
+                    // marker substring in a malformed body, or in an
+                    // object carrying only some other field, must fail.
+                    guard let bodyData = body.data(using: .utf8),
+                        let object = try? JSONSerialization.jsonObject(with: bodyData, options: []) as? [String: Any],
+                        Set(object.keys) == ["message"],
+                        let message = object["message"] as? String
+                    else {
+                        failures.append("\(stub.key): body is not {\"message\": <string>}: \(body)")
+                        return
+                    }
                     switch expectation {
                     case .notInSwarm:
-                        if !body.contains("This node is not part of a swarm") {
-                            failures.append("\(stub.key): body does not carry moby's errNoSwarm message: \(body)")
+                        if !message.contains("This node is not part of a swarm") {
+                            failures.append("\(stub.key): message does not carry moby's errNoSwarm text: \(message)")
                         }
                     case .pauseUnavailable:
-                        pauseBodies.insert(body)
-                        if !body.contains("apple/containerization#998") {
-                            failures.append("\(stub.key): body does not cite the upstream blocker: \(body)")
+                        pauseBodies.insert(message)
+                        if !message.contains("apple/containerization#998") {
+                            failures.append("\(stub.key): message does not cite the upstream blocker: \(message)")
                         }
-                        if !body.contains("is not supported by podm") {
-                            failures.append("\(stub.key): body is not a podm not-supported message: \(body)")
+                        if !message.contains("is not supported by podm") {
+                            failures.append("\(stub.key): message is not a podm not-supported message: \(message)")
                         }
                     case .notImplemented:
-                        if !body.contains("is not implemented by podm") {
-                            failures.append("\(stub.key): body is not a podm not-implemented message: \(body)")
+                        if !message.contains("is not implemented by podm") {
+                            failures.append("\(stub.key): message is not a podm not-implemented message: \(message)")
                         }
                     }
                 }

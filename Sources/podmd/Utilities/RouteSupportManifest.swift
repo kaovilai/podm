@@ -27,22 +27,22 @@ enum RouteSupportManifest {
         DeliberateStub(
             method: "POST", pattern: "/containers/{id}/pause",
             reason:
-                "Blocked upstream: apple/container exposes no pause XPC route, and containerization's VZ pause/resume was removed pending a vsock lifetime fix (apple/containerization#998)."
+                "Blocked upstream: apple/container exposes no pause XPC route; apple/containerization#366 removed the LinuxContainer/LinuxPod pause/resume API (suspected vended-vsock EBADF asserts), while the underlying VZ pause/resume VM primitives remain (apple/containerization#998)."
         ),
         DeliberateStub(
             method: "POST", pattern: "/containers/{id}/unpause",
             reason:
-                "Blocked upstream: apple/container exposes no pause XPC route, and containerization's VZ pause/resume was removed pending a vsock lifetime fix (apple/containerization#998)."
+                "Blocked upstream: apple/container exposes no pause XPC route; apple/containerization#366 removed the LinuxContainer/LinuxPod pause/resume API (suspected vended-vsock EBADF asserts), while the underlying VZ pause/resume VM primitives remain (apple/containerization#998)."
         ),
         DeliberateStub(
             method: "POST", pattern: "/libpod/containers/{id}/pause",
             reason:
-                "Blocked upstream: apple/container exposes no pause XPC route, and containerization's VZ pause/resume was removed pending a vsock lifetime fix (apple/containerization#998)."
+                "Blocked upstream: apple/container exposes no pause XPC route; apple/containerization#366 removed the LinuxContainer/LinuxPod pause/resume API (suspected vended-vsock EBADF asserts), while the underlying VZ pause/resume VM primitives remain (apple/containerization#998)."
         ),
         DeliberateStub(
             method: "POST", pattern: "/libpod/containers/{id}/unpause",
             reason:
-                "Blocked upstream: apple/container exposes no pause XPC route, and containerization's VZ pause/resume was removed pending a vsock lifetime fix (apple/containerization#998)."
+                "Blocked upstream: apple/container exposes no pause XPC route; apple/containerization#366 removed the LinuxContainer/LinuxPod pause/resume API (suspected vended-vsock EBADF asserts), while the underlying VZ pause/resume VM primitives remain (apple/containerization#998)."
         ),
         // ── buildx session channel ───────────────────────────────────────────
         DeliberateStub(
