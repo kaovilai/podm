@@ -52,9 +52,6 @@ enum RouteSupportManifest {
         // (The GET/POST/DELETE /configs routes are live over the local
         // ConfigStore — see ConfigsRoute.)
         DeliberateStub(
-            method: "POST", pattern: "/configs/{id}/update",
-            reason: "A local file-backed config store cannot update in place; the route exists for CLI compatibility."),
-        DeliberateStub(
             method: "GET", pattern: "/nodes",
             reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(

@@ -334,7 +334,6 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `POST` | `/configs/create` | docker |  |
 | ✅ | `DELETE` | `/configs/{id}` | docker |  |
 | ✅ | `GET` | `/configs/{id}` | docker |  |
-| 🚫 | `POST` | `/configs/{id}/update` | docker | A local file-backed config store cannot update in place; the route exists for CLI compatibility. |
 | ✅ | `POST` | `/containers/create` | docker |  |
 | ✅ | `GET` | `/containers/json` | docker |  |
 | ✅ | `POST` | `/containers/prune` | docker |  |
