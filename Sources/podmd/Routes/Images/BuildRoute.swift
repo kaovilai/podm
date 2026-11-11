@@ -129,17 +129,36 @@ extension BuildRoute {
         return try sanitizedDockerfilePath(first)
     }
 
-    /// Rejects a dockerfile path that would escape the build context (absolute paths, or
-    /// `..` components) with a client error instead of silently substituting a different
-    /// file — the caller asked for a SPECIFIC dockerfile, so a fallback that builds
-    /// something else entirely without telling them is worse than just failing the request.
+    /// Validates a dockerfile path and normalizes it for use by the handler.
+    ///
+    /// Real podman clients send `-f` as an ABSOLUTE path (pkg/bindings/images/build.go
+    /// resolves it before sending — reproduced with podman 6.1.4: `podman build -f
+    /// Dockerfile .` arrives as `dockerfile=["/abs/…/Dockerfile"]` even for a file in
+    /// the context root), and podman's daemon accepts absolute paths as-is
+    /// (pkg/api/handlers/compat/images_build.go: `filepath.IsAbs` → `filepath.Clean`,
+    /// used directly — only RELATIVE paths are joined onto the context directory).
+    /// podm matches that wire contract: absolute paths pass through, relative paths
+    /// stay relative (the handler joins them onto the extracted context).
+    ///
+    /// `..` components are rejected in BOTH forms — a confused-deputy guard, not a
+    /// trust boundary: no real client sends them, a fallback that silently builds a
+    /// different file is worse than failing the request, and podm's unix socket is
+    /// same-user, same-host (podman system service's own model), so an absolute path
+    /// the user explicitly named with `-f` crosses no privilege boundary.
     static func sanitizedDockerfilePath(_ value: String) throws -> String {
-        let isAbsolute = value.hasPrefix("/")
         let hasTraversal = value.split(separator: "/").contains(where: { $0 == ".." })
-        guard !value.isEmpty, !isAbsolute, !hasTraversal else {
+        guard !value.isEmpty, !hasTraversal else {
             throw Abort(.badRequest, reason: "dockerfile path '\(value)' escapes the build context")
         }
         return value
+    }
+
+    /// Resolves the (validated) dockerfile param to the host path the handler
+    /// reads: absolute paths (podman's `-f` wire format) name a host file
+    /// directly; relative paths live inside the extracted build context.
+    static func resolvedDockerfilePath(_ dockerfile: String, contextDir: String) -> String {
+        dockerfile.hasPrefix("/")
+            ? dockerfile : URL(fileURLWithPath: contextDir).appendingPathComponent(dockerfile).path
     }
 
     /// Parses a Docker API build query parameter (`buildargs` or `labels`).
@@ -495,7 +514,7 @@ extension BuildRoute {
 
         // resolve the full path to the Dockerfile
         sendStreamMessage(" ---> Reading Dockerfile")
-        let dockerfilePath = URL(fileURLWithPath: contextDir).appendingPathComponent(dockerfile).path
+        let dockerfilePath = BuildRoute.resolvedDockerfilePath(dockerfile, contextDir: contextDir)
         logger.info("Reading Dockerfile at path: \(dockerfilePath)")
 
         guard let dockerfileData = try? Data(contentsOf: URL(filePath: dockerfilePath)) else {
