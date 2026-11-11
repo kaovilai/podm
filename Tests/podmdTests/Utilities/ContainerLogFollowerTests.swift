@@ -1673,8 +1673,9 @@ struct ContainerLogFollowerTests {
     }
 
     /// The open-retry loop must still END: a CONFIRMED missing or stopped
-    /// container stops the follower so the registry can reap it — unlike a
-    /// failed lookup, which only retries.
+    /// container stops the follower (after the bounded post-stop open
+    /// grace — see `openRetryDrainsFinalOutputAfterStop`) so the registry
+    /// can reap it — unlike a failed lookup, which only retries.
     @Test("log-stream open retries stop once the container is confirmed stopped")
     func openRetryStopsOnConfirmedStop() async throws {
         let dir = tempDirectory()
@@ -1714,5 +1715,57 @@ struct ContainerLogFollowerTests {
             return !armed
         }
         #expect(finished, "a confirmed-stopped container must end the open-retry loop")
+    }
+
+    /// Review round 10 (CodeRabbit): when the stream only becomes
+    /// available AFTER the container stopped, the open-retry loop must
+    /// still pick it up inside the bounded post-stop grace, drain the
+    /// final output into the journal with recorded timestamps, and then
+    /// exit normally — not abandon the output to read-time stamping.
+    @Test("an open that succeeds after the container stops drains the final output")
+    func openRetryDrainsFinalOutputAfterStop() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("post-stop-drain.log")
+        FileManager.default.createFile(atPath: logFile.path, contents: nil)
+        let writer = try FileHandle(forWritingTo: logFile)
+
+        let journal = ContainerLogJournal()
+        await journal.configure(storageDirectory: dir)
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        // Two failures cover the pre-stop polls; the recovery lands inside
+        // the post-stop grace window (postStopOpenGracePolls = 3).
+        let opener = FlakyOpener(failures: 2)
+
+        await registry.arm(
+            nativeId: "post-stop-drain-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: true,
+            journal: journal,
+            openLogStream: { _ in
+                try await opener.open { try FileHandle(forReadingFrom: logFile) }
+            }
+        )
+        // The container stops before any open succeeded; its final output
+        // is already in the log file.
+        client.stopContainer()
+        try writer.write(contentsOf: Data("final output after stop\n".utf8))
+
+        // The open succeeds within the grace: the final line must land in
+        // the journal (recorded write time), then the confirmed-exit path
+        // drains and the follower ends.
+        let journaled = await waitFor {
+            await journal.entries(nativeId: "post-stop-drain-ctr").contains {
+                $0.bytes == Data("final output after stop\n".utf8)
+            }
+        }
+        #expect(journaled, "final output written before the post-stop open must be journaled")
+
+        let finished = await waitFor {
+            let armed = await registry.isArmed(nativeId: "post-stop-drain-ctr")
+            return !armed
+        }
+        #expect(finished, "the follower must end after draining the post-stop output")
     }
 }

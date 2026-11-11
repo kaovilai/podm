@@ -163,6 +163,15 @@ enum ContainerLogFollower {
     /// the same cadence the logs route's follow loop uses.
     static let pollIntervalNs: UInt64 = 150_000_000
 
+    /// How many polls the open-retry loop keeps trying to open the log
+    /// stream after the container is CONFIRMED stopped — a bounded
+    /// post-stop flush window. The stream often becomes readable shortly
+    /// after exit; giving up on the first confirmation would leave the
+    /// final output unjournaled, and the route would judge it by read
+    /// time. Bounded so a stop under a flapping Apple service cannot pin
+    /// the follower forever.
+    static let postStopOpenGracePolls: Int = 3
+
     /// Completed lines are journaled in batches of at most this many while
     /// reading, so a huge backlog (or a continuously written log) reaches the
     /// journal before the stream hits EOF instead of accumulating in memory.
@@ -321,11 +330,16 @@ enum ContainerLogFollower {
         // output lost its recorded timestamps until another lifecycle
         // request or a daemon restart. Retry while this follower's epoch
         // stays current, stopping only on cancellation/supersession or a
-        // CONFIRMED missing/stopped container. A failed status LOOKUP is
+        // CONFIRMED missing/stopped container (whose final output still
+        // gets a bounded post-stop open grace — `postStopOpenGracePolls`).
+        // A failed status LOOKUP is
         // not a confirmation (same rule as the poll loop below — the Apple
         // service can stay unavailable through a reconnect retry): retry
         // after the polling delay instead.
         var handle: FileHandle?
+        // Polls of open grace left after the container was CONFIRMED
+        // stopped; nil while the container is (or may still be) running.
+        var postStopPollsRemaining: Int? = nil
         while handle == nil {
             if Task.isCancelled { return }
             guard await isCurrent() else { return }
@@ -350,7 +364,23 @@ enum ContainerLogFollower {
                 }
                 if Task.isCancelled { return }
                 guard await isCurrent() else { return }
-                if current == nil || current?.status != .running { return }
+                if current == nil || current?.status != .running {
+                    // Bounded post-stop flush window: keep opening for a
+                    // few polls past the confirmed stop — the stream often
+                    // becomes readable shortly after exit, and output read
+                    // through the route without a follower carries no
+                    // journal timestamps (--since/--until would judge it by
+                    // read time). Once open, the poll loop's confirmed-exit
+                    // path drains and finalizes. A container that comes
+                    // back to running resets the window.
+                    if postStopPollsRemaining == nil {
+                        postStopPollsRemaining = Self.postStopOpenGracePolls
+                    }
+                    guard let remaining = postStopPollsRemaining, remaining > 0 else { return }
+                    postStopPollsRemaining = remaining - 1
+                } else {
+                    postStopPollsRemaining = nil
+                }
                 try? await Task.sleep(nanoseconds: pollIntervalNs)
             }
         }
