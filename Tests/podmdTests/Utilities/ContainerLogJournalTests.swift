@@ -59,7 +59,7 @@ struct ContainerLogJournalTests {
         withUnsafeBytes(of: UInt32(2).littleEndian) { file.append(contentsOf: $0) }
         withUnsafeBytes(of: UInt64(7).littleEndian) { file.append(contentsOf: $0) }
         for e in entries { file.append(ContainerLogJournal.encode(e)) }
-        let (parsed, droppedLines, _, salvaged) = ContainerLogJournal.parse(file)
+        let (parsed, droppedLines, _, _, salvaged) = ContainerLogJournal.parse(file)
         #expect(!salvaged)
         #expect(droppedLines == 7)
         #expect(parsed == entries)
@@ -71,7 +71,7 @@ struct ContainerLogJournalTests {
         var file = Data("PDLJ".utf8)
         withUnsafeBytes(of: UInt32(1).littleEndian) { file.append(contentsOf: $0) }
         file.append(ContainerLogJournal.encode(good))
-        let (parsed, droppedLines, _, salvaged) = ContainerLogJournal.parse(file)
+        let (parsed, droppedLines, _, _, salvaged) = ContainerLogJournal.parse(file)
         #expect(!salvaged)
         #expect(droppedLines == 0)
         #expect(parsed == [good])
@@ -87,7 +87,7 @@ struct ContainerLogJournalTests {
         withUnsafeBytes(of: UInt64(100).littleEndian) { file.append(contentsOf: $0) }
         withUnsafeBytes(of: UInt64(200).littleEndian) { file.append(contentsOf: $0) }
         file.append(ContainerLogJournal.encode(good))
-        let (parsed, droppedLines, evictedNanos, salvaged) = ContainerLogJournal.parse(file)
+        let (parsed, droppedLines, evictedNanos, _, salvaged) = ContainerLogJournal.parse(file)
         #expect(!salvaged)
         #expect(droppedLines == 2)
         #expect(evictedNanos == [100, 200])
@@ -100,7 +100,7 @@ struct ContainerLogJournalTests {
         withUnsafeBytes(of: UInt64(2).littleEndian) { truncated.append(contentsOf: $0) }
         withUnsafeBytes(of: UInt32(5).littleEndian) { truncated.append(contentsOf: $0) }
         withUnsafeBytes(of: UInt64(100).littleEndian) { truncated.append(contentsOf: $0) }
-        let (_, _, _, truncatedSalvaged) = ContainerLogJournal.parse(truncated)
+        let (_, _, _, _, truncatedSalvaged) = ContainerLogJournal.parse(truncated)
         #expect(truncatedSalvaged)
     }
 
@@ -114,11 +114,11 @@ struct ContainerLogJournalTests {
         // Half of a second record's header — a crash mid-write.
         file.append(Data([0x01, 0x02, 0x03]))
 
-        let (parsed, _, _, salvaged) = ContainerLogJournal.parse(file)
+        let (parsed, _, _, _, salvaged) = ContainerLogJournal.parse(file)
         #expect(salvaged)
         #expect(parsed == [good])
 
-        let (bad, _, _, badSalvaged) = ContainerLogJournal.parse(Data("NOPEjunkjunkjunkjunkjunkjunkjunk".utf8))
+        let (bad, _, _, _, badSalvaged) = ContainerLogJournal.parse(Data("NOPEjunkjunkjunkjunkjunkjunkjunk".utf8))
         #expect(badSalvaged)
         #expect(bad.isEmpty)
     }
@@ -450,7 +450,7 @@ struct ContainerLogJournalTests {
         var file = Data("PDLJ".utf8)
         withUnsafeBytes(of: UInt32(2).littleEndian) { file.append(contentsOf: $0) }
         withUnsafeBytes(of: UInt64(0x8000_0000_0000_0000).littleEndian) { file.append(contentsOf: $0) }
-        let (parsed, droppedLines, _, salvaged) = ContainerLogJournal.parse(file)
+        let (parsed, droppedLines, _, _, salvaged) = ContainerLogJournal.parse(file)
         #expect(salvaged, "an unrepresentable dropped count is corruption — salvage it")
         #expect(parsed.isEmpty)
         #expect(droppedLines == 0)
@@ -481,7 +481,7 @@ struct ContainerLogJournalTests {
         let reloaded = try? Data(contentsOf: dir.appendingPathComponent("podm-log-journals/damaged.journal"))
         #expect(reloaded != nil)
         if let reloaded {
-            let (entries, dropped, _, salvaged) = ContainerLogJournal.parse(reloaded)
+            let (entries, dropped, _, _, salvaged) = ContainerLogJournal.parse(reloaded)
             #expect(!salvaged)
             #expect(entries.isEmpty)
             #expect(dropped == 0)
@@ -533,5 +533,125 @@ struct ContainerLogJournalTests {
         #expect(contents.entries.count == 1600)
         #expect(contents.entries.map(\.unixNano) == expected)
         #expect(contents.droppedLines == 0)
+    }
+
+    // MARK: - Boot identity (version-4 header)
+
+    @Test("the boot identity round-trips through the persisted file")
+    func bootIdRoundTrips() async {
+        let dir = tempDirectory()
+        let writer = ContainerLogJournal()
+        await writer.configure(storageDirectory: dir)
+        await writer.beginBoot(nativeId: "boot-ctr", epoch: 1, bootIdNano: 1_730_000_000_000_000_000)
+        await writer.append(nativeId: "boot-ctr", epoch: 1, [entry(100, "line\n")])
+
+        let reader = ContainerLogJournal()
+        await reader.configure(storageDirectory: dir)
+        let contents = await reader.contents(nativeId: "boot-ctr")
+        #expect(contents.entries.count == 1)
+
+        // The identity is in the file itself, not just in memory.
+        let raw = try? Data(contentsOf: dir.appendingPathComponent("podm-log-journals/boot-ctr.journal"))
+        #expect(raw != nil)
+        if let raw {
+            let (_, _, _, bootIdNano, salvaged) = ContainerLogJournal.parse(raw)
+            #expect(!salvaged)
+            #expect(bootIdNano == 1_730_000_000_000_000_000)
+        }
+
+        // An unidentified boot (no startedDate) persists a flag-only header.
+        await writer.beginBoot(nativeId: "unidentified-ctr", epoch: 1)
+        await writer.append(nativeId: "unidentified-ctr", epoch: 1, [entry(100, "line\n")])
+        let unidentifiedRaw = try? Data(
+            contentsOf: dir.appendingPathComponent("podm-log-journals/unidentified-ctr.journal"))
+        #expect(unidentifiedRaw != nil)
+        if let unidentifiedRaw {
+            let (_, _, _, bootIdNano, salvaged) = ContainerLogJournal.parse(unidentifiedRaw)
+            #expect(!salvaged)
+            #expect(bootIdNano == nil)
+        }
+    }
+
+    @Test("a truncated version-4 boot identity salvages to nothing")
+    func truncatedBootIdSalvages() {
+        // A presence flag with fewer than 8 bytes behind it is a truncated
+        // header, like a truncated stamp section.
+        var file = Data("PDLJ".utf8)
+        withUnsafeBytes(of: UInt32(4).littleEndian) { file.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt64(0).littleEndian) { file.append(contentsOf: $0) }  // droppedLines
+        withUnsafeBytes(of: UInt32(0).littleEndian) { file.append(contentsOf: $0) }  // stamp count
+        file.append(Data([1, 0x01, 0x02]))  // flag set, only 2 of 8 identity bytes
+        let (entries, _, _, _, salvaged) = ContainerLogJournal.parse(file)
+        #expect(salvaged)
+        #expect(entries.isEmpty)
+    }
+
+    @Test("a resume whose boot identity differs resets; the same or unknown identity adopts")
+    func resumeBootIdentityMismatchResets() async {
+        let dir = tempDirectory()
+        let seeder = ContainerLogJournal()
+        await seeder.configure(storageDirectory: dir)
+        await seeder.beginBoot(nativeId: "reboot-ctr", epoch: 1, bootIdNano: 1_000_000_000_000_000_000)
+        await seeder.append(nativeId: "reboot-ctr", epoch: 1, [entry(111, "previous boot\n")])
+
+        // Same boot (podm restarted, container kept running): adopt.
+        let sameBoot = ContainerLogJournal()
+        await sameBoot.configure(storageDirectory: dir)
+        await sameBoot.resumeBoot(nativeId: "reboot-ctr", epoch: 2, bootIdNano: 1_000_000_000_000_000_000)
+        #expect(
+            await sameBoot.entries(nativeId: "reboot-ctr").map(\.bytes) == [Data("previous boot\n".utf8)],
+            "the same boot's persisted timestamps must survive the daemon restart")
+
+        // Different boot (the container REBOOTED while podmd was down): the
+        // old journal can never align with the new boot's stream — resetting
+        // it is the only way identical startup lines cannot inherit the old
+        // boot's stamps.
+        let rebooted = ContainerLogJournal()
+        await rebooted.configure(storageDirectory: dir)
+        await rebooted.resumeBoot(nativeId: "reboot-ctr", epoch: 3, bootIdNano: 2_000_000_000_000_000_000)
+        #expect(
+            await rebooted.entries(nativeId: "reboot-ctr").isEmpty,
+            "a reboot while no follower was armed must reset the stale journal")
+
+        // Unknown identity on either side cannot prove a mismatch: adopt.
+        await rebooted.beginBoot(nativeId: "unknown-ctr", epoch: 1, bootIdNano: 5_000_000_000_000_000_000)
+        await rebooted.append(nativeId: "unknown-ctr", epoch: 1, [entry(222, "current boot\n")])
+        let unidentified = ContainerLogJournal()
+        await unidentified.configure(storageDirectory: dir)
+        await unidentified.resumeBoot(nativeId: "unknown-ctr", epoch: 2, bootIdNano: nil)
+        #expect(
+            await unidentified.entries(nativeId: "unknown-ctr").map(\.bytes) == [Data("current boot\n".utf8)],
+            "a nil identity (Apple reported no startedDate) must not force a reset")
+    }
+
+    @Test("bootIdNano(from:) converts startedDate, and leaves unknown or pre-epoch dates nil")
+    func bootIdConversion() {
+        #expect(ContainerLogJournal.bootIdNano(from: nil) == nil)
+        #expect(ContainerLogJournal.bootIdNano(from: Date(timeIntervalSince1970: -1)) == nil)
+        let nano = ContainerLogJournal.bootIdNano(from: Date(timeIntervalSince1970: 100.5))
+        #expect(nano == 100_500_000_000)
+    }
+
+    @Test("reconfiguring the same directory is a no-op — live state survives")
+    func configureIsIdempotentPerDirectory() async {
+        // The route lifecycle suite installs ONE process-wide test directory
+        // from every test; without per-directory idempotence each install
+        // would wipe live state — closing cached writers and dropping the
+        // writer epochs of followers other suites armed, silently
+        // discarding their appends.
+        let dir = tempDirectory()
+        let journal = ContainerLogJournal()
+        await journal.configure(storageDirectory: dir)
+        await journal.beginBoot(nativeId: "ctr", epoch: 1)
+        await journal.append(nativeId: "ctr", epoch: 1, [entry(100, "line\n")])
+
+        await journal.configure(storageDirectory: dir)  // same directory: no wipe
+
+        #expect(
+            await journal.entries(nativeId: "ctr").map(\.bytes) == [Data("line\n".utf8)],
+            "a same-directory reconfigure must not drop live entries")
+        #expect(
+            await journal.writerIsOpen(nativeId: "ctr"),
+            "a same-directory reconfigure must not close the cached writer")
     }
 }

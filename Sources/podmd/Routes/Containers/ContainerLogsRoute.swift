@@ -48,16 +48,15 @@ extension ContainerLogsRoute {
             // ("42m") and RFC3339 timestamps to unix seconds client-side;
             // DockerTimeParam accepts those forms too. `until=0` is treated as
             // absent, exactly like dockerd.
-            let since: UInt64?
-            let until: UInt64?
+            let window: (since: UInt64?, until: UInt64?)
             do {
-                since = try DockerTimeParam.unixNanoseconds(req.query["since"] as String?)
-                var parsedUntil = try DockerTimeParam.unixNanoseconds(req.query["until"] as String?)
-                if parsedUntil == 0 { parsedUntil = nil }
-                until = parsedUntil
+                window = try ContainerLogsRoute.parseLogWindow(
+                    since: req.query["since"] as String?, until: req.query["until"] as String?)
             } catch {
                 throw Abort(.badRequest, reason: "Bad parameters: invalid since/until timestamp: \(error)")
             }
+            let since = window.since
+            let until = window.until
 
             // always use the container's log, not the boot of the container
             let fhs = try await ContainerClient().logs(id: container.id)
@@ -555,6 +554,20 @@ extension ContainerLogsRoute {
         }
     }
 
+    /// Parses the `since`/`until` query parameters of `GET /containers/{id}/logs`
+    /// into the window the scanner applies. moby treats a literal `until=0`
+    /// as absent, exactly like dockerd — but the zero special case must be
+    /// applied to the RAW value, BEFORE the parser clamps a PRE-EPOCH
+    /// timestamp (e.g. `until=1969-12-31T23:59:59Z`) to 0 as well: the clamped
+    /// form is a real bound that excludes everything (all journal stamps are
+    /// post-epoch), and treating it as absent returned the entire modern log.
+    /// A pre-epoch `since` clamps to 0 and filters nothing, like moby.
+    static func parseLogWindow(since: String?, until: String?) throws -> (since: UInt64?, until: UInt64?) {
+        let parsedSince = try DockerTimeParam.unixNanoseconds(since)
+        let parsedUntil = try DockerTimeParam.unixNanoseconds(until)
+        return (parsedSince, until == "0" ? nil : parsedUntil)
+    }
+
     /// Backlog-scan boundaries for a windowed logs request, derived from
     /// whether follow is active and whether the container was running when
     /// the request arrived.
@@ -715,6 +728,12 @@ extension ContainerLogsRoute {
             _ line: Data, unixNano: UInt64, isUpperBound: Bool = false,
             position: WindowTailRing.Position = .inline
         ) async throws {
+            // A reversed window (since > until) is empty: no timestamp can
+            // satisfy both bounds. Without this guard an EVICTED line whose
+            // upper-bound stamp is at or after `since` slipped through — the
+            // upper bound skips the `until` check, so the line was emitted
+            // although its true write time excludes it from either side.
+            if let since, let until, since > until { return }
             // moby: lines written before `since` or after `until` are dropped.
             if let since, unixNano < since { return }
             if let until, !isUpperBound, unixNano > until { return }
@@ -833,8 +852,9 @@ extension ContainerLogsRoute {
         if inOversizedLine, !streamEnded {
             let nano = oversizedLineNano ?? nowNanos()
             // Same bound semantics as accept: an upper-bound time cannot
-            // prove the line past `until`.
-            let pastSince = since.map { nano < $0 } ?? false
+            // prove the line past `until`, and a reversed window is empty.
+            let reversedWindow = since != nil && until != nil && since! > until!
+            let pastSince = reversedWindow || (since.map { nano < $0 } ?? false)
             let pastUntil = !oversizedLineBound && (until.map { nano > $0 } ?? false)
             return BacklogHandoff(
                 pending: pending, openLine: WindowedOpenLine(unixNano: nano, inWindow: !(pastSince || pastUntil)))

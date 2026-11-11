@@ -323,6 +323,12 @@ extension ContainerAttachRoute {
             throw Abort(.internalServerError, reason: "Failed to bootstrap container: \(error.localizedDescription)")
         }
 
+        // True when THIS call's bootstrap performed the container's boot. A
+        // benign start race means a concurrent request already started the
+        // container — ITS arm registered that boot's fresh journal, so ours
+        // must arm as a resume (freshBoot false) or it would cancel the
+        // winning boot's follower and replace its journal timestamps.
+        var startedByThisCall = true
         do {
             try await process.start()
         } catch {
@@ -331,6 +337,7 @@ extension ContainerAttachRoute {
                 await ContainerExitCodeStore.shared.set(id: container.id, code: -1)
                 throw Abort(.internalServerError, reason: "Failed to start container: \(error.localizedDescription)")
             }
+            startedByThisCall = false
         }
 
         await ProcessRegistry.shared.set(id: container.id, process: process)
@@ -343,7 +350,7 @@ extension ContainerAttachRoute {
         // banner) classify as covered and inherit stale timestamps — a
         // coincidence the first-mismatch self-heal can never catch.
         await ContainerLogFollowerRegistry.shared.arm(
-            nativeId: container.id, client: client, logger: req.logger, freshBoot: true)
+            nativeId: container.id, client: client, logger: req.logger, freshBoot: startedByThisCall)
 
         await broadcastAttach(
             container: container,

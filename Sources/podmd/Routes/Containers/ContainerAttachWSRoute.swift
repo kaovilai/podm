@@ -106,6 +106,12 @@ extension ContainerAttachWSRoute {
             return
         }
 
+        // True when THIS call's bootstrap performed the container's boot. A
+        // benign start race means a concurrent request already started the
+        // container — ITS arm registered that boot's fresh journal, so ours
+        // must arm as a resume (freshBoot false) or it would cancel the
+        // winning boot's follower and replace its journal timestamps.
+        var startedByThisCall = true
         do {
             try await process.start()
         } catch {
@@ -116,6 +122,7 @@ extension ContainerAttachWSRoute {
                 try? await ws.close(code: .unexpectedServerError)
                 return
             }
+            startedByThisCall = false
         }
 
         await ProcessRegistry.shared.set(id: container.id, process: process)
@@ -125,7 +132,7 @@ extension ContainerAttachWSRoute {
         // attachStoppedOutputOnly for why the later no-op /start cannot be
         // the one to do it).
         await ContainerLogFollowerRegistry.shared.arm(
-            nativeId: container.id, client: client, logger: req.logger, freshBoot: true)
+            nativeId: container.id, client: client, logger: req.logger, freshBoot: startedByThisCall)
 
         let broadcaster = req.application.storage[EventBroadcasterKey.self]
         // A bootstrap attach streams the process stdio regardless of query flags.

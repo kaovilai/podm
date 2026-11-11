@@ -19,11 +19,21 @@ import Logging
 /// accepted writer epoch itself (checked synchronously with each mutation),
 /// so a superseded follower (redundant `/start`, restart racing a slow poll)
 /// can never interleave entries into a newer boot's journal.
+///
+/// Epochs order ARMS, not boots: a `/start` delayed in its post-start setup
+/// can arm after a newer `/restart` already booted the container and armed
+/// its own follower — the delayed arm would carry a higher epoch, cancel the
+/// newer boot's follower and wipe its journal. Arms therefore also carry the
+/// boot's `startedDate` (when the lifecycle transition observed one); an arm
+/// for an OLDER boot than the currently-armed one is rejected outright.
 actor ContainerLogFollowerRegistry {
     static let shared = ContainerLogFollowerRegistry()
 
     private var epochs: [String: UInt64] = [:]
     private var tasks: [String: (task: Task<Void, Never>, epoch: UInt64)] = [:]
+    /// The `startedDate` of the boot each container's armed follower belongs
+    /// to — the boot-generation token stale arms are rejected against.
+    private var bootTokens: [String: Date] = [:]
     private var nextEpoch: UInt64 = 0
 
     /// True while `epoch` is still the current generation for `nativeId`.
@@ -45,14 +55,31 @@ actor ContainerLogFollowerRegistry {
     ///   restart yet. False for a plain `/start`, where a live current-epoch
     ///   follower means the container was already running under this boot and
     ///   must not be disturbed.
+    /// - Parameter bootStartedAt: the `startedDate` of the boot this arm is
+    ///   for, when the lifecycle transition observed one. An arm for a boot
+    ///   OLDER than the currently-armed follower's boot is rejected — it
+    ///   belongs to a superseded lifecycle (a `/start` delayed past a newer
+    ///   `/restart`) and must not cancel the newer boot's follower or wipe
+    ///   its journal. Nil (Apple reported no start date) falls back to
+    ///   epoch-only ordering.
+    ///
+    /// The journal activation (reset for a fresh boot, adoption for a resume)
+    /// happens BEFORE this method returns: a windowed logs request issued
+    /// immediately after the route returns must not read the previous boot's
+    /// journal — repeated startup lines would match its old timestamps.
     func arm(
         nativeId: String,
         client: ClientContainerProtocol,
         logger: Logger,
         freshBoot: Bool,
+        bootStartedAt: Date? = nil,
         journal: ContainerLogJournal = .shared,
         openLogStream: (@Sendable (String) async throws -> FileHandle)? = nil
-    ) {
+    ) async {
+        // A stale boot never displaces the armed follower of a newer one.
+        if let bootStartedAt, let armedBoot = bootTokens[nativeId], bootStartedAt < armedBoot {
+            return
+        }
         if !freshBoot,
             let existing = tasks[nativeId],
             existing.epoch == epochs[nativeId],
@@ -64,10 +91,29 @@ actor ContainerLogFollowerRegistry {
         let epoch = nextEpoch
         epochs[nativeId] = epoch
         tasks[nativeId]?.task.cancel()
+        if let bootStartedAt { bootTokens[nativeId] = bootStartedAt }
+        // Activate this follower as the journal's writer NOW, not from the
+        // detached task: the route must not return while the previous boot's
+        // journal is still visible. A fresh boot resets (gated on the epoch
+        // inside the journal actor); a resume adopts — or resets, when the
+        // persisted journal's boot identity proves a reboot happened while no
+        // follower was armed.
+        if freshBoot {
+            await journal.beginBoot(
+                nativeId: nativeId, epoch: epoch, bootIdNano: ContainerLogJournal.bootIdNano(from: bootStartedAt))
+        } else {
+            await journal.resumeBoot(
+                nativeId: nativeId, epoch: epoch, bootIdNano: ContainerLogJournal.bootIdNano(from: bootStartedAt))
+        }
+        // The activation suspended this actor — a concurrent arm may have
+        // taken the epoch over in the meantime. Its own activation (higher
+        // epoch) won inside the journal; do not register a superseded task.
+        guard epochs[nativeId] == epoch else { return }
         let task = Task.detached {
             await ContainerLogFollower.follow(
                 nativeId: nativeId, epoch: epoch, client: client, logger: logger,
-                freshBoot: freshBoot, journal: journal, openLogStream: openLogStream)
+                freshBoot: freshBoot, journal: journal, openLogStream: openLogStream,
+                bootStartedAt: bootStartedAt, journalAlreadyActivated: true)
         }
         tasks[nativeId] = (task, epoch)
         Task.detached {
@@ -79,6 +125,7 @@ actor ContainerLogFollowerRegistry {
     /// Stops the follower (if any) for a container about to be removed.
     func disarm(nativeId: String) {
         epochs[nativeId] = nil
+        bootTokens[nativeId] = nil
         tasks[nativeId]?.task.cancel()
         tasks[nativeId] = nil
     }
@@ -119,7 +166,26 @@ enum ContainerLogFollower {
     /// tests use it to assert that a large backlog reaches the journal in
     /// bounded batches WHILE the stream is read, not in one unbounded
     /// accumulation at EOF.
-    nonisolated(unsafe) static var onBatchFlush: (@Sendable (String) -> Void)?
+    ///
+    /// Access is lock-guarded: tests run in parallel and several suites
+    /// install (and nil out) the callback while followers of OTHER tests are
+    /// invoking it — an unsynchronized global is a data race that can crash
+    /// the test process. `nonisolated(unsafe)` only silences the compiler's
+    /// isolation check; the lock below provides the actual safety.
+    private static let onBatchFlushLock = NSLock()
+    nonisolated(unsafe) private static var _onBatchFlush: (@Sendable (String) -> Void)?
+    nonisolated(unsafe) static var onBatchFlush: (@Sendable (String) -> Void)? {
+        get {
+            onBatchFlushLock.lock()
+            defer { onBatchFlushLock.unlock() }
+            return _onBatchFlush
+        }
+        set {
+            onBatchFlushLock.lock()
+            defer { onBatchFlushLock.unlock() }
+            _onBatchFlush = newValue
+        }
+    }
 
     /// Picks the container's log stream out of the handles Apple Container's
     /// `logs(id:)` returns — 1.2.2 yields TWO (`[containerLog, bootlog]`),
@@ -157,6 +223,14 @@ enum ContainerLogFollower {
     /// journal from a different boot is detected by alignment failure and
     /// reset then, so an unknowing resume cannot restamp history.
     ///
+    /// `bootStartedAt` (the boot's `startedDate`) is the journal's boot
+    /// identity: a resume whose identity differs from the persisted one
+    /// resets instead of adopting — the container rebooted while no follower
+    /// was armed. `journalAlreadyActivated` marks that the registry already
+    /// performed the activation before spawning this follower (arming routes
+    /// must not return while the previous boot's journal is still visible),
+    /// so the follower must not reset or adopt again.
+    ///
     /// `journal`, `openLogStream` and `isCurrentEpoch` are seams for tests:
     /// production runs use the shared journal, Apple's log stream, and the
     /// follower registry's epoch check respectively.
@@ -168,7 +242,35 @@ enum ContainerLogFollower {
         freshBoot: Bool,
         journal: ContainerLogJournal = .shared,
         openLogStream: (@Sendable (String) async throws -> FileHandle)? = nil,
-        isCurrentEpoch: (@Sendable () async -> Bool)? = nil
+        isCurrentEpoch: (@Sendable () async -> Bool)? = nil,
+        bootStartedAt: Date? = nil,
+        journalAlreadyActivated: Bool = false
+    ) async {
+        await runFollow(
+            nativeId: nativeId, epoch: epoch, client: client, logger: logger, freshBoot: freshBoot,
+            journal: journal, openLogStream: openLogStream, isCurrentEpoch: isCurrentEpoch,
+            bootStartedAt: bootStartedAt, journalAlreadyActivated: journalAlreadyActivated)
+        // The follower is done: release the journal's cached writer. The
+        // follower closed ITS Apple log handle on exit, but the journal's
+        // writer would otherwise stay open until the next reset, trim or
+        // container deletion — one leaked descriptor per stopped container
+        // can exhaust the daemon's fd limit. Epoch-guarded inside the
+        // journal: a superseded follower cannot close its replacement's
+        // handle. The entries stay for later windowed reads.
+        await journal.closeWriter(nativeId: nativeId, epoch: epoch)
+    }
+
+    private static func runFollow(
+        nativeId: String,
+        epoch: UInt64,
+        client: ClientContainerProtocol,
+        logger: Logger,
+        freshBoot: Bool,
+        journal: ContainerLogJournal,
+        openLogStream: (@Sendable (String) async throws -> FileHandle)?,
+        isCurrentEpoch: (@Sendable () async -> Bool)?,
+        bootStartedAt: Date?,
+        journalAlreadyActivated: Bool
     ) async {
         let isCurrent: @Sendable () async -> Bool =
             isCurrentEpoch ?? { await ContainerLogFollowerRegistry.shared.isCurrent(nativeId: nativeId, epoch: epoch) }
@@ -176,11 +278,19 @@ enum ContainerLogFollower {
         // Activate this follower as the journal's writer. A fresh boot resets
         // the journal (gated on the epoch inside the actor, so a follower
         // superseded before it starts wipes nothing); a resume adopts the
-        // persisted journal of the current boot instead.
-        if freshBoot {
-            await journal.beginBoot(nativeId: nativeId, epoch: epoch)
-        } else {
-            await journal.resumeBoot(nativeId: nativeId, epoch: epoch)
+        // persisted journal of the current boot instead — or resets when the
+        // persisted boot identity proves a reboot happened in between. The
+        // registry already did this before spawning us (its callers must not
+        // return while the old journal is visible) — never repeat it: a
+        // second reset would wipe entries journaled in between.
+        if !journalAlreadyActivated {
+            if freshBoot {
+                await journal.beginBoot(
+                    nativeId: nativeId, epoch: epoch, bootIdNano: ContainerLogJournal.bootIdNano(from: bootStartedAt))
+            } else {
+                await journal.resumeBoot(
+                    nativeId: nativeId, epoch: epoch, bootIdNano: ContainerLogJournal.bootIdNano(from: bootStartedAt))
+            }
         }
         guard await isCurrent() else { return }
 
@@ -276,8 +386,26 @@ enum ContainerLogFollower {
             /// is equally accounted: the line's marker was evicted by the
             /// cap, and the evicted-prefix count already covers the line —
             /// appending a marker here would double-count its ordinal.
+            ///
+            /// A retained ORDINARY entry at the alignment head is a mismatch
+            /// (`consumeGapMarker` disables matching) — the journal is from
+            /// a different boot, and the heal must run HERE, before any
+            /// marker is flushed: a resumed stream of ONLY oversized lines
+            /// never reaches the ordinary-line recovery branch, so without
+            /// this the marker would land behind the stale entries and
+            /// every later windowed read would fall back to read time. The
+            /// line itself is accounted by the heal's dropped-lines count —
+            /// no marker is recorded for it, exactly like the ordinary-line
+            /// heal (a surviving marker would double-count its ordinal).
             func markOversizedLine() async {
                 if case .fresh = alignment.consumeGapMarker() {
+                    if alignment.failed {
+                        // Count THIS line before healing so the replacement
+                        // journal's dropped-lines prefix accounts it.
+                        linesConsumedUnretained += 1
+                        await healStaleJournal()
+                        return
+                    }
                     await enqueue(
                         ContainerLogJournal.Entry.gapMarker(unixNano: ContainerLogJournal.currentUnixNano()))
                 }
@@ -304,7 +432,9 @@ enum ContainerLogFollower {
                 // marker, losing its recorded timestamp.
                 freshBytes -= fresh.filter(\.isGapMarker).reduce(0) { $0 + $1.framedByteCount }
                 fresh.removeAll { $0.isGapMarker }
-                await journal.beginBoot(nativeId: nativeId, epoch: epoch, droppedLines: linesConsumedUnretained)
+                await journal.beginBoot(
+                    nativeId: nativeId, epoch: epoch, droppedLines: linesConsumedUnretained,
+                    bootIdNano: ContainerLogJournal.bootIdNano(from: bootStartedAt))
                 alignment = ContainerLogJournal.Alignment(entries: [])
                 linesConsumedUnretained = 0
             }

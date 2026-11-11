@@ -107,9 +107,14 @@ func configure(_ app: Application) async throws {
             // recorded arrival time, so later `docker logs --since/--until`
             // would mis-window it. freshBoot false — the current boot's
             // persisted journal is preserved and alignment continues (Apple
-            // only truncates the log at a boot).
+            // only truncates the log at a boot). The snapshot's startedDate
+            // is the boot identity: a container that REBOOTED while podmd was
+            // down has a different one, and the resume resets its stale
+            // journal instead of lending the old boot's timestamps to
+            // identical startup lines.
             await ContainerLogFollowerRegistry.shared.arm(
-                nativeId: container.id, client: resumeFollowerClient, logger: app.logger, freshBoot: false)
+                nativeId: container.id, client: resumeFollowerClient, logger: app.logger, freshBoot: false,
+                bootStartedAt: container.startedDate)
 
             // Skip DNS-sidecar containers — they are internal infrastructure.
             guard !ClientContainerService.isDNSSidecar(container)

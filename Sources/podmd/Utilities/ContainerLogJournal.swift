@@ -35,6 +35,14 @@ import Logging
 /// stamp evicted lines with the CURRENT read time, so a recent `--since`
 /// included old output and a past `--until` excluded output that belonged in
 /// the window. Version 2 files load with no stamps (read-time fallback).
+/// Version 4 appends the boot identity (`hasBootId: u8` + `bootIdNano:
+/// u64 LE` when the flag is nonzero — the boot's `startedDate` in unix
+/// nanoseconds): a resumed follower compares it against the container's
+/// CURRENT startedDate and resets the journal when they differ, so a
+/// container that rebooted while podmd was down cannot lend its previous
+/// boot's timestamps to identical startup lines (a coincidence the
+/// first-mismatch self-heal can never catch). Older versions load with no
+/// boot identity and keep the alignment-based detection.
 actor ContainerLogJournal {
     static let shared = ContainerLogJournal()
 
@@ -102,13 +110,18 @@ actor ContainerLogJournal {
     private static let maxEntryBytes = 16 * 1024 * 1024
 
     private static let magic = Data("PDLJ".utf8)
-    private static let version: UInt32 = 3
+    private static let version: UInt32 = 4
 
     private struct State {
         var entries: [Entry] = []
         var totalFramedBytes = 0
         var droppedLines = 0
         var evictedNanos: [UInt64] = []
+        /// The boot identity (`startedDate` unix nanos) this journal belongs
+        /// to, when known — see the version-4 header above. Nil means the
+        /// boot was never identified (no `startedDate` available), and
+        /// identity comparisons fall back to content alignment.
+        var bootIdNano: UInt64?
         var fileHandle: FileHandle?
     }
 
@@ -128,12 +141,27 @@ actor ContainerLogJournal {
     /// Points the journal at a test-controlled storage directory (mirrors the
     /// override stores' `configure`). Unconfigured, the journal lazily defaults
     /// to the same Apple container app-support root `RouteRegistry` uses.
+    ///
+    /// IDEMPOTENT per directory: reconfiguring the SAME directory is a no-op.
+    /// Clearing live state on a same-dir reconfigure would close the cached
+    /// writers and drop the writer epochs of followers other test suites
+    /// armed, silently discarding their appends — the route lifecycle suite
+    /// relies on this when every test installs the same process-wide test
+    /// directory.
     func configure(storageDirectory: URL) {
+        let newDirectory = storageDirectory.appendingPathComponent("podm-log-journals", isDirectory: true)
+        guard newDirectory != configuredDirectory else { return }
         for state in states.values { try? state.fileHandle?.close() }
         states.removeAll()
         writerEpochs.removeAll()
         tombstoneEpochs.removeAll()
-        configuredDirectory = storageDirectory.appendingPathComponent("podm-log-journals", isDirectory: true)
+        configuredDirectory = newDirectory
+    }
+
+    /// The storage root this journal writes to — test observation for the
+    /// isolation installer in the route lifecycle suite.
+    func currentStorageDirectory() -> URL {
+        baseDirectory
     }
 
     private var baseDirectory: URL {
@@ -165,6 +193,16 @@ actor ContainerLogJournal {
         contents(nativeId: nativeId).entries
     }
 
+    /// Converts a boot's `startedDate` to the identity persisted in the
+    /// version-4 header. Nil (Apple did not report a start date) stays nil:
+    /// an unidentified boot never forces a mismatch reset.
+    static func bootIdNano(from startedAt: Date?) -> UInt64? {
+        guard let startedAt else { return nil }
+        let seconds = startedAt.timeIntervalSince1970
+        guard seconds > 0 else { return nil }
+        return UInt64(seconds * 1_000_000_000)
+    }
+
     /// Resets the journal for a new container boot: Apple truncates the log
     /// file at every boot, so previous-boot entries can never align with the
     /// new stream and are dropped instead of risking false timestamp matches.
@@ -177,30 +215,49 @@ actor ContainerLogJournal {
     /// exactly that prefix, so the retained suffix still aligns. The stale
     /// journal's self-heal path uses this so a mid-read reset does not
     /// orphan the lines read before the mismatch was detected.
-    func beginBoot(nativeId: String, epoch: UInt64, droppedLines: Int = 0) {
-        activate(nativeId: nativeId, epoch: epoch, reset: true, droppedLines: droppedLines)
+    ///
+    /// `bootIdNano` records which boot the replacement journal belongs to
+    /// (see the version-4 header); nil leaves the boot unidentified.
+    func beginBoot(nativeId: String, epoch: UInt64, droppedLines: Int = 0, bootIdNano: UInt64? = nil) {
+        activate(nativeId: nativeId, epoch: epoch, reset: true, droppedLines: droppedLines, bootIdNano: bootIdNano)
     }
 
     /// Adopts the persisted journal for the container's CURRENT boot — the
     /// daemon-restart/resume path. Registers `epoch` as the journal's writer
     /// without dropping entries, so a resumed follower keeps aligning against
     /// what the previous process recorded.
-    func resumeBoot(nativeId: String, epoch: UInt64) {
-        activate(nativeId: nativeId, epoch: epoch, reset: false)
+    ///
+    /// `bootIdNano` (the container's CURRENT `startedDate`) is compared with
+    /// the persisted boot identity: a container that REBOOTED while no
+    /// follower was armed (podmd was down) has a different identity, and its
+    /// new boot's log can never align with the old journal — reset it like a
+    /// fresh boot instead of lending the old timestamps to identical startup
+    /// lines. A nil on either side cannot prove a mismatch and adopts.
+    func resumeBoot(nativeId: String, epoch: UInt64, bootIdNano: UInt64? = nil) {
+        activate(nativeId: nativeId, epoch: epoch, reset: false, bootIdNano: bootIdNano)
     }
 
-    private func activate(nativeId: String, epoch: UInt64, reset: Bool, droppedLines: Int = 0) {
+    private func activate(nativeId: String, epoch: UInt64, reset: Bool, droppedLines: Int = 0, bootIdNano: UInt64? = nil) {
         guard epoch > tombstoneEpochs[nativeId] ?? 0 else { return }
         guard epoch >= writerEpochs[nativeId] ?? 0 else { return }
+        if !reset {
+            loadIfNeeded(nativeId)
+            guard let persisted = states[nativeId]?.bootIdNano, let bootIdNano, persisted != bootIdNano else {
+                writerEpochs[nativeId] = epoch
+                // Adopting the current boot also adopts its identity when the
+                // caller knows it — a later resume can then detect a reboot.
+                if let bootIdNano { states[nativeId]?.bootIdNano = bootIdNano }
+                return
+            }
+        }
         writerEpochs[nativeId] = epoch
-        guard reset else { return }
-        loadIfNeeded(nativeId)
         try? states[nativeId]?.fileHandle?.close()
         var state = states[nativeId] ?? State()
         state.entries = []
         state.totalFramedBytes = 0
         state.droppedLines = droppedLines
         state.evictedNanos = []
+        state.bootIdNano = bootIdNano
         // The closed handle must NOT survive into the new State: `persist`
         // would skip reopening and write through the dead descriptor, so
         // the new boot's entries would live only in memory until a cap
@@ -217,7 +274,9 @@ actor ContainerLogJournal {
             // the retained suffix stops aligning with a scan from byte zero.
             // The replacement journal holds no evicted stamps — the stale
             // boot's lines (and their times) are gone for good.
-            rewriteFile(fileURL(nativeId), entries: [], droppedLines: droppedLines, evictedNanos: [])
+            rewriteFile(
+                fileURL(nativeId), entries: [], droppedLines: droppedLines, evictedNanos: [],
+                bootIdNano: bootIdNano)
         }
     }
 
@@ -284,6 +343,27 @@ actor ContainerLogJournal {
         try? FileManager.default.removeItem(at: fileURL(nativeId))
     }
 
+    /// Closes the cached writer handle for a container whose follower has
+    /// FINISHED — the follower closes its Apple log handle at exit, but the
+    /// journal's writer would otherwise stay open until the next reset,
+    /// trim or container deletion, accumulating one descriptor per stopped
+    /// container and exhausting the daemon's fd limit. Epoch-gated inside
+    /// the actor: an old follower cannot close its replacement's handle.
+    /// The entries (and the file) stay for later windowed reads; a later
+    /// append reopens the handle on demand.
+    func closeWriter(nativeId: String, epoch: UInt64) {
+        guard writerEpochs[nativeId] == epoch else { return }
+        try? states[nativeId]?.fileHandle?.close()
+        states[nativeId]?.fileHandle = nil
+    }
+
+    /// Whether the cached writer handle for `nativeId` is open — test
+    /// observation for the follower-exit release path above.
+    func writerIsOpen(nativeId: String) -> Bool {
+        loadIfNeeded(nativeId)
+        return states[nativeId]?.fileHandle != nil
+    }
+
     // MARK: - Persistence
 
     private func loadIfNeeded(_ nativeId: String) {
@@ -291,16 +371,19 @@ actor ContainerLogJournal {
         var state = State()
         let url = fileURL(nativeId)
         if let data = try? Data(contentsOf: url), !data.isEmpty {
-            let (entries, droppedLines, evictedNanos, salvaged) = Self.parse(data)
+            let (entries, droppedLines, evictedNanos, bootIdNano, salvaged) = Self.parse(data)
             state.entries = entries
             state.droppedLines = droppedLines
             state.evictedNanos = evictedNanos
+            state.bootIdNano = bootIdNano
             state.totalFramedBytes = entries.reduce(0) { $0 + $1.framedByteCount }
             if salvaged {
                 // A crash mid-write left a partial trailing entry; keep the
                 // parseable prefix so appends land on a valid boundary again.
                 log.warning("log journal for \(nativeId) had a partial trailing entry — salvaged \(entries.count) entries")
-                rewriteFile(url, entries: entries, droppedLines: droppedLines, evictedNanos: evictedNanos)
+                rewriteFile(
+                    url, entries: entries, droppedLines: droppedLines, evictedNanos: evictedNanos,
+                    bootIdNano: bootIdNano)
             }
         }
         states[nativeId] = state
@@ -315,7 +398,8 @@ actor ContainerLogJournal {
             try? state.fileHandle?.close()
             state.fileHandle = nil
             rewriteFile(
-                url, entries: state.entries, droppedLines: state.droppedLines, evictedNanos: state.evictedNanos)
+                url, entries: state.entries, droppedLines: state.droppedLines, evictedNanos: state.evictedNanos,
+                bootIdNano: state.bootIdNano)
             return
         }
         if state.fileHandle == nil {
@@ -329,7 +413,8 @@ actor ContainerLogJournal {
                         FileManager.default.createFile(
                             atPath: url.path,
                             contents: Self.headerData(
-                                droppedLines: state.droppedLines, evictedNanos: state.evictedNanos))
+                                droppedLines: state.droppedLines, evictedNanos: state.evictedNanos,
+                                bootIdNano: state.bootIdNano))
                     else {
                         log.error("could not create log journal file at \(url.path)")
                         return
@@ -351,12 +436,14 @@ actor ContainerLogJournal {
         }
     }
 
-    private func rewriteFile(_ url: URL, entries: [Entry], droppedLines: Int, evictedNanos: [UInt64]) {
+    private func rewriteFile(
+        _ url: URL, entries: [Entry], droppedLines: Int, evictedNanos: [UInt64], bootIdNano: UInt64? = nil
+    ) {
         // The first append of a container can already exceed the cap (a huge
         // backlog batch), landing here before the plain append path has ever
         // created the journal directory — createFile does not create parents.
         try? FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
-        var contents = Self.headerData(droppedLines: droppedLines, evictedNanos: evictedNanos)
+        var contents = Self.headerData(droppedLines: droppedLines, evictedNanos: evictedNanos, bootIdNano: bootIdNano)
         for entry in entries { contents.append(Self.encode(entry)) }
         if !FileManager.default.createFile(atPath: url.path, contents: contents, attributes: nil) {
             log.error("could not rewrite log journal file at \(url.path)")
@@ -365,7 +452,9 @@ actor ContainerLogJournal {
 
     // MARK: - Framing
 
-    private static func headerData(droppedLines: Int = 0, evictedNanos: [UInt64] = []) -> Data {
+    private static func headerData(
+        droppedLines: Int = 0, evictedNanos: [UInt64] = [], bootIdNano: UInt64? = nil
+    ) -> Data {
         var data = magic
         withUnsafeBytes(of: version.littleEndian) { data.append(contentsOf: $0) }
         // Clamping, not trapping: a negative count can only come from a
@@ -377,6 +466,14 @@ actor ContainerLogJournal {
         withUnsafeBytes(of: UInt32(evictedNanos.count).littleEndian) { data.append(contentsOf: $0) }
         for nano in evictedNanos {
             withUnsafeBytes(of: nano.littleEndian) { data.append(contentsOf: $0) }
+        }
+        // Version 4: the boot identity (see the header doc above). A missing
+        // identity costs one flag byte; a present one nine.
+        if let bootIdNano {
+            data.append(1)
+            withUnsafeBytes(of: bootIdNano.littleEndian) { data.append(contentsOf: $0) }
+        } else {
+            data.append(0)
         }
         return data
     }
@@ -394,21 +491,25 @@ actor ContainerLogJournal {
 
     /// Parses a journal file image. Returns the complete entries, the evicted
     /// prefix's line count (0 for version-1 files), the evicted prefix's
-    /// retained arrival stamps (empty before version 3), and whether the file
-    /// had to be salvaged (bad magic/version, or a truncated or oversized
-    /// trailing record).
-    static func parse(_ data: Data) -> (entries: [Entry], droppedLines: Int, evictedNanos: [UInt64], salvaged: Bool) {
+    /// retained arrival stamps (empty before version 3), the persisted boot
+    /// identity (nil before version 4), and whether the file had to be
+    /// salvaged (bad magic/version, or a truncated or oversized trailing
+    /// record).
+    static func parse(_ data: Data) -> (
+        entries: [Entry], droppedLines: Int, evictedNanos: [UInt64], bootIdNano: UInt64?, salvaged: Bool
+    ) {
         let bytes = [UInt8](data)
-        guard bytes.count >= 8 else { return ([], 0, [], true) }
-        guard Data(bytes[0..<4]) == magic else { return ([], 0, [], true) }
+        guard bytes.count >= 8 else { return ([], 0, [], nil, true) }
+        guard Data(bytes[0..<4]) == magic else { return ([], 0, [], nil, true) }
         let version = UInt32(bytes[4]) | UInt32(bytes[5]) << 8 | UInt32(bytes[6]) << 16 | UInt32(bytes[7]) << 24
         var droppedLines = 0
         var evictedNanos: [UInt64] = []
+        var bootIdNano: UInt64? = nil
         var offset = 8
         if version >= 2 {
             // Version 2+ carries the evicted-prefix line count; a short header
             // is a truncated file, salvaged to nothing.
-            guard bytes.count >= 16 else { return ([], 0, [], true) }
+            guard bytes.count >= 16 else { return ([], 0, [], nil, true) }
             // Decode as UInt64 and reject counts that cannot be a nonnegative
             // Int: decoding straight into Int turns a damaged high bit into
             // a NEGATIVE count (or traps on the shift), and a subsequent
@@ -416,11 +517,11 @@ actor ContainerLogJournal {
             // crashing the daemon instead of recovering the journal.
             var dropped: UInt64 = 0
             for i in 0..<8 { dropped |= UInt64(bytes[8 + i]) << (8 * UInt64(i)) }
-            guard let count = Int(exactly: dropped) else { return ([], 0, [], true) }
+            guard let count = Int(exactly: dropped) else { return ([], 0, [], nil, true) }
             droppedLines = count
             offset = 16
         } else {
-            guard version == 1 else { return ([], 0, [], true) }
+            guard version == 1 else { return ([], 0, [], nil, true) }
         }
         if version >= 3 {
             // Version 3 appends the evicted prefix's retained arrival stamps:
@@ -429,13 +530,13 @@ actor ContainerLogJournal {
             // to nothing, like a truncated entry (the stamps are a suffix
             // window; losing them only degrades evicted lines to the
             // read-time fallback).
-            guard bytes.count >= offset + 4 else { return ([], 0, [], true) }
+            guard bytes.count >= offset + 4 else { return ([], 0, [], nil, true) }
             let stampCount =
                 Int(bytes[offset]) | Int(bytes[offset + 1]) << 8 | Int(bytes[offset + 2]) << 16
                 | Int(bytes[offset + 3]) << 24
             offset += 4
             let stampsEnd = offset + stampCount * 8
-            guard stampsEnd <= bytes.count else { return ([], 0, [], true) }
+            guard stampsEnd <= bytes.count else { return ([], 0, [], nil, true) }
             for _ in 0..<stampCount {
                 var nano: UInt64 = 0
                 for i in 0..<8 {
@@ -444,6 +545,21 @@ actor ContainerLogJournal {
                 evictedNanos.append(nano)
                 offset += 8
             }
+        }
+        if version >= 4 {
+            // Version 4 appends the boot identity: a presence flag followed,
+            // when set, by the boot's startedDate in unix nanoseconds. A
+            // truncated identity is a truncated header — salvaged to nothing
+            // like the sections above (losing it only degrades reboot
+            // detection to the alignment-based fallback).
+            guard bytes.count >= offset + 1 else { return ([], 0, [], nil, true) }
+            if bytes[offset] != 0 {
+                guard bytes.count >= offset + 9 else { return ([], 0, [], nil, true) }
+                var bootId: UInt64 = 0
+                for i in 0..<8 { bootId |= UInt64(bytes[offset + 1 + i]) << (8 * i) }
+                bootIdNano = bootId
+            }
+            offset += bytes[offset] != 0 ? 9 : 1
         }
         var entries: [Entry] = []
         while offset + Entry.headerByteCount <= bytes.count {
@@ -459,13 +575,13 @@ actor ContainerLogJournal {
             let payloadStart = offset + Entry.headerByteCount
             let payloadByteCount = Int(payloadLength)
             guard payloadByteCount >= 0, payloadByteCount <= maxEntryBytes, payloadStart + payloadByteCount <= bytes.count else {
-                return (entries, droppedLines, evictedNanos, true)
+                return (entries, droppedLines, evictedNanos, bootIdNano, true)
             }
             entries.append(
                 Entry(unixNano: nano, streamType: streamType, bytes: Data(bytes[payloadStart..<(payloadStart + payloadByteCount)])))
             offset = payloadStart + payloadByteCount
         }
-        return (entries, droppedLines, evictedNanos, offset != bytes.count)
+        return (entries, droppedLines, evictedNanos, bootIdNano, offset != bytes.count)
     }
 
     /// Wall-clock unix nanoseconds — the arrival timestamp a follower stamps

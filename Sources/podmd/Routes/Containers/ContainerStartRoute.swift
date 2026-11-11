@@ -160,7 +160,11 @@ extension ContainerStartRoute {
                     // a fresh log boot whose journal must reset. A redundant
                     // /start on an already-running container stays
                     // non-disruptive (freshBoot false preserves the journal).
-                    freshLogBoot: startedByThisCall
+                    freshLogBoot: startedByThisCall,
+                    // The post-boot snapshot's startedDate identifies THIS
+                    // boot to the follower registry, so a delayed arm cannot
+                    // displace a newer boot's follower.
+                    logBootStartedAt: startedSnapshot?.startedDate
                 )
             }
 
@@ -328,7 +332,8 @@ extension ContainerStartRoute {
                 healthManager: healthManager,
                 client: client,
                 logger: logger,
-                freshLogBoot: restartedByThisCall
+                freshLogBoot: restartedByThisCall,
+                logBootStartedAt: restartedSnapshot?.startedDate
             )
             if let snap = restartedSnapshot ?? exitSnapshot {
                 await VolumeMountEvents.broadcastMounts(for: snap, containerId: eventId, broadcaster: broadcaster)
@@ -350,6 +355,13 @@ extension ContainerStartRoute {
     ///   `/start` on an already-running container, which leaves the existing
     ///   follower and its journal alone (or resumes them after a daemon
     ///   restart).
+    /// - Parameter logBootStartedAt: the `startedDate` of the boot this
+    ///   lifecycle transitioned into, when a post-boot snapshot observed one.
+    ///   The follower registry rejects an arm for a boot OLDER than the
+    ///   currently-armed one — a `/start` delayed in post-start setup must not
+    ///   cancel the follower of a newer `/restart`'s boot and wipe its
+    ///   journal. Nil (no snapshot, or Apple reported no start date) falls
+    ///   back to epoch-only ordering.
     static func armRestartObserver(
         nativeId: String,
         eventId: String,
@@ -365,7 +377,8 @@ extension ContainerStartRoute {
         healthManager: HealthCheckManager?,
         client: ClientContainerProtocol,
         logger: Logger,
-        freshLogBoot: Bool = false
+        freshLogBoot: Bool = false,
+        logBootStartedAt: Date? = nil
     ) async {
         if refreshCache {
             await ContainerInfoCache.shared.set(hexId: eventId, nativeId: nativeId, image: image, labels: labels, ip: ip)
@@ -382,7 +395,8 @@ extension ContainerStartRoute {
         // accurate historical `--timestamps` (Apple's log stream carries no
         // write-time metadata of its own).
         await ContainerLogFollowerRegistry.shared.arm(
-            nativeId: nativeId, client: client, logger: logger, freshBoot: freshLogBoot)
+            nativeId: nativeId, client: client, logger: logger, freshBoot: freshLogBoot,
+            bootStartedAt: logBootStartedAt)
 
         ContainerStartRoute.observeExit(
             nativeId: nativeId, eventId: eventId, image: image, name: name, labels: labels,

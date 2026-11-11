@@ -355,14 +355,19 @@ struct ContainerLogFollowerTests {
         )
         defer { FlushHub.shared.unregister(nativeId: "batch-ctr") }
 
+        // Wait for the journal AND the flush notifications TOGETHER:
+        // `flushBatch()` updates the journal before invoking `onBatchFlush`,
+        // so observing 600 entries does not imply the third notification
+        // has run yet — asserting the count at that moment flakes with
+        // correct batching.
         let journaled = await waitFor {
-            await journal.entries(nativeId: "batch-ctr").count >= 600
+            await journal.entries(nativeId: "batch-ctr").count >= 600 && flushCounter.currentCount() >= 3
         }
         #expect(journaled, "the whole backlog should be journaled")
         // 600 lines at a 256-line batch size: at least the two in-read
         // flushes plus the final remainder — the single flush-at-EOF of the
         // old unbounded accumulation would count 1.
-        #expect(flushCounter.count >= 3, "batches must be flushed mid-read, not accumulated until EOF")
+        #expect(flushCounter.currentCount() >= 3, "batches must be flushed mid-read, not accumulated until EOF")
 
         client.stopContainer()
         let finished = await waitFor {
@@ -373,17 +378,24 @@ struct ContainerLogFollowerTests {
     }
 
     /// Thread-safe flush counter for the `onBatchFlush` seam, scoped to one
-    /// native id so parallel followers from other tests do not skew it.
+    /// native id so parallel followers from other tests do not skew it. The
+    /// count is read through a LOCKED accessor — the follower's flush task
+    /// increments it concurrently, and an unsynchronized read races.
     private final class FlushCounter: @unchecked Sendable {
         private let lock = NSLock()
         private let nativeId: String
-        private(set) var count = 0
+        private var count = 0
         init(nativeId: String) { self.nativeId = nativeId }
         func record(_ nativeId: String) {
             guard nativeId == self.nativeId else { return }
             lock.lock()
             count += 1
             lock.unlock()
+        }
+        func currentCount() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return count
         }
     }
 
@@ -1116,12 +1128,15 @@ struct ContainerLogFollowerTests {
             openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
         )
 
+        // Wait for the journal AND the flush notifications TOGETHER — see
+        // the line-count batching test for why observing entries alone does
+        // not imply the notification has run yet.
         let journaled = await waitFor {
-            await journal.entries(nativeId: "byte-batch-ctr").count >= 6
+            await journal.entries(nativeId: "byte-batch-ctr").count >= 6 && flushCounter.currentCount() >= 2
         }
         #expect(journaled, "the whole backlog should be journaled")
         #expect(
-            flushCounter.count >= 2,
+            flushCounter.currentCount() >= 2,
             "payload-heavy batches must flush on the byte bound mid-read, not accumulate until EOF")
 
         client.stopContainer()
@@ -1244,6 +1259,211 @@ struct ContainerLogFollowerTests {
         client.stopContainer()
         _ = await waitFor {
             let armed = await registry.isArmed(nativeId: "stale-oversized-ctr")
+            return !armed
+        }
+    }
+
+    // MARK: - Review round 7
+
+    /// A resumed stream of ONLY oversized lines never runs the ordinary-line
+    /// branch that self-heals a stale journal: the mismatch surfaces inside
+    /// `markOversizedLine` (a retained ORDINARY entry where the gap marker
+    /// should be), and healing must happen THERE — without it the marker lands
+    /// behind the stale entries, alignment stays broken, and later windowed
+    /// reads fall back to read time for everything. The line itself is
+    /// accounted by the heal's dropped-lines count, like the ordinary-line
+    /// heal.
+    @Test("a resumed stream of only oversized lines heals the stale journal before recording its marker")
+    func oversizedOnlyResumeHealsStaleJournal() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("output.log")
+        // The new boot's output is a single newline-free line far past the
+        // pending bound: its head is discarded mid-read and its (empty) tail is
+        // finalized at the confirmed-exit drain — no ordinary line ever fires
+        // the classify-based heal.
+        FileManager.default.createFile(
+            atPath: logFile.path,
+            contents: Data(repeating: 0x78, count: ContainerLogFollower.maxPendingLineBytes + (1 << 18)))
+        // The stale journal retains an ordinary entry at the head — exactly
+        // where the oversized line's marker consumption expects a marker.
+        let journal = await seedJournal(
+            dir: dir, nativeId: "oversized-heal-ctr",
+            entries: [ContainerLogJournal.Entry(unixNano: 111, streamType: 1, bytes: Data("stale boot\n".utf8))])
+
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        await registry.arm(
+            nativeId: "oversized-heal-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: false,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+
+        try await Task.sleep(for: .milliseconds(600))
+        client.stopContainer()
+        _ = await waitFor {
+            let armed = await registry.isArmed(nativeId: "oversized-heal-ctr")
+            return !armed
+        }
+
+        let contents = await journal.contents(nativeId: "oversized-heal-ctr")
+        #expect(
+            contents.entries.isEmpty,
+            "the stale journal must be healed — its ordinary entry must not survive behind a marker")
+        #expect(
+            !contents.entries.contains { $0.bytes == Data("stale boot\n".utf8) },
+            "the stale boot's entry must not lend its timestamps to the new boot's lines")
+        #expect(
+            contents.droppedLines == 1,
+            "the consumed oversized line is accounted in the replacement's dropped prefix")
+    }
+
+    /// The journal's cached writer is released when the follower finishes — the
+    /// follower closes its Apple log handle at exit, but the writer would
+    /// otherwise stay open until the next reset, trim or deletion. Starting and
+    /// stopping containers without deleting them must not accumulate one
+    /// descriptor per stopped container.
+    @Test("the journal's cached writer closes when the follower finishes; entries are retained")
+    func followerExitClosesJournalWriter() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("output.log")
+        FileManager.default.createFile(atPath: logFile.path, contents: Data("hello\n".utf8))
+
+        let journal = ContainerLogJournal()
+        await journal.configure(storageDirectory: dir)
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        await registry.arm(
+            nativeId: "writer-close-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: true,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+
+        let journaled = await waitFor {
+            await journal.entries(nativeId: "writer-close-ctr").count >= 1
+        }
+        #expect(journaled)
+        #expect(
+            await journal.writerIsOpen(nativeId: "writer-close-ctr"),
+            "the writer is open while the follower runs")
+
+        client.stopContainer()
+        let finished = await waitFor {
+            let armed = await registry.isArmed(nativeId: "writer-close-ctr")
+            return !armed
+        }
+        #expect(finished)
+        let writerOpen = await journal.writerIsOpen(nativeId: "writer-close-ctr")
+        #expect(
+            !writerOpen,
+            "the follower's exit must release the journal's cached writer — one leaked descriptor per stopped container exhausts the fd limit")
+        #expect(
+            await journal.entries(nativeId: "writer-close-ctr").map(\.bytes) == [Data("hello\n".utf8)],
+            "the entries stay for later windowed reads")
+    }
+
+    /// Epochs order ARMS, not boots: a `/start` delayed in post-start setup can
+    /// arm after a newer `/restart` already booted the container and armed its
+    /// follower. The delayed arm carries the OLDER boot's `startedDate` and must
+    /// be rejected — pre-fix it received a higher epoch, cancelled the newer
+    /// boot's follower and wiped its journal.
+    @Test("an arm for an older boot than the armed follower's is rejected")
+    func staleBootArmIsRejected() async throws {
+        let dir = tempDirectory()
+        let newLogFile = dir.appendingPathComponent("new-boot.log")
+        let oldLogFile = dir.appendingPathComponent("old-boot.log")
+        FileManager.default.createFile(atPath: newLogFile.path, contents: Data("new boot\n".utf8))
+        FileManager.default.createFile(atPath: oldLogFile.path, contents: Data("old boot\n".utf8))
+
+        let journal = ContainerLogJournal()
+        await journal.configure(storageDirectory: dir)
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        let newerBoot = Date(timeIntervalSince1970: 2_000_000_000)
+        let olderBoot = Date(timeIntervalSince1970: 1_000_000_000)
+
+        // A /restart boots at `newerBoot` and arms its follower over its boot's
+        // log stream.
+        await registry.arm(
+            nativeId: "stale-arm-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: true,
+            bootStartedAt: newerBoot,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: newLogFile) }
+        )
+        let journaled = await waitFor {
+            await journal.entries(nativeId: "stale-arm-ctr").count >= 1
+        }
+        #expect(journaled)
+
+        // The delayed /start finally arms — for the OLDER boot it transitioned,
+        // over that boot's (already superseded) log stream. It must be rejected
+        // outright: accepting it would cancel the newer follower and journal
+        // the old boot's stream over the new boot's timestamps.
+        await registry.arm(
+            nativeId: "stale-arm-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: true,
+            bootStartedAt: olderBoot,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: oldLogFile) }
+        )
+        // Give a wrongly-accepted stale follower time to journal its stream.
+        try await Task.sleep(for: .milliseconds(400))
+        let entries = await journal.entries(nativeId: "stale-arm-ctr")
+        #expect(
+            entries.map(\.bytes) == [Data("new boot\n".utf8)],
+            "the newer boot's journal must survive the stale arm untouched — no old-boot output, no reset")
+
+        client.stopContainer()
+        _ = await waitFor {
+            let armed = await registry.isArmed(nativeId: "stale-arm-ctr")
+            return !armed
+        }
+    }
+
+    /// `arm()` activates the journal BEFORE it returns: the route answers right
+    /// after, and an immediately-issued windowed logs request reads the journal
+    /// synchronously — if the reset still lived in the detached follower task,
+    /// the request could see the previous boot's journal and match repeated
+    /// startup lines against its old timestamps.
+    @Test("arm() resets the journal before returning — an immediate windowed read cannot see the previous boot")
+    func armActivatesJournalBeforeReturning() async throws {
+        let dir = tempDirectory()
+        // An EMPTY log stream: the follower can never journal anything, so the
+        // assertion below is deterministic — whatever it sees is arm()'s own
+        // activation, not a race with the follower's first read.
+        let logFile = dir.appendingPathComponent("empty.log")
+        FileManager.default.createFile(atPath: logFile.path, contents: nil)
+
+        let journal = await seedJournal(dir: dir, nativeId: "arm-activation-ctr", lines: [(111, "boot banner\n")])
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+
+        await registry.arm(
+            nativeId: "arm-activation-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: true,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+        // No waitFor: the previous boot's journal must already be gone the
+        // moment arm() returns.
+        let entries = await journal.entries(nativeId: "arm-activation-ctr")
+        #expect(entries.isEmpty, "the previous boot's journal must be reset before arm() returns")
+
+        client.stopContainer()
+        _ = await waitFor {
+            let armed = await registry.isArmed(nativeId: "arm-activation-ctr")
             return !armed
         }
     }

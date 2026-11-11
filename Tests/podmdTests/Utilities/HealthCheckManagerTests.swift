@@ -283,6 +283,26 @@ private actor ProbeScript {
     }
 }
 
+/// A manually-advanced monotonic clock for the healthcheck loop's start
+/// period: frozen at `start` until the test advances it, so mid-window
+/// assertions hold for ANY amount of runner-induced starvation (the
+/// wall-clock-driven variants of these tests failed CI rounds 6 and 7 — the
+/// whole test process stalled ~10s on the 3-core macOS runners and the
+/// observation landed past the window with no product defect).
+private actor ManualClock {
+    private var now: UInt64
+
+    init(start: UInt64 = 1_000_000_000_000) {
+        now = start
+    }
+
+    func current() -> UInt64 { now }
+
+    func advance(byNanoseconds: UInt64) {
+        now += byNanoseconds
+    }
+}
+
 /// Docker 25+ `StartInterval` (`start_interval`) startup semantics, mirroring
 /// moby's `daemon/health.go` (v28.5.2 — the version podm's API level targets):
 ///
@@ -376,36 +396,38 @@ struct HealthCheckManagerStartIntervalTests {
     @Test("failures during the start period do not count toward Retries")
     func startupFailuresAreForgiven() async throws {
         let timeline = ProbeTimeline()
+        // The start period lives on a MANUALLY-ADVANCED clock: while frozen,
+        // the probes are inside the window BY CONSTRUCTION however long the
+        // runner takes to schedule the test's poll — the wall-clock variant
+        // of this assertion failed CI twice when the whole test process
+        // stalled past the 3s window.
+        let clock = ManualClock()
         let mgr = HealthCheckManager(
             probe: { _, _, _ in
                 await timeline.record()
                 return 1
             },
-            intervalFloorNs: 1_000_000
+            intervalFloorNs: 1_000_000,
+            clock: { await clock.current() }
         )
         let cfg = HealthcheckConfig(
             Test: ["CMD", "false"],
             Interval: 1_000_000,
             Timeout: 1_000_000_000,
             Retries: 1,  // a single counted failure must flip the container unhealthy
-            StartPeriod: 3_000_000_000,  // 3s: the probe-count poll below must finish
-            // inside the window (a loaded CI runner once burned the whole 1s
-            // poll loop before the mid-window assertion), while the 6s
-            // waitForStatus budget below still covers the post-window
-            // transition after the period ends
+            StartPeriod: 10_000_000_000,  // clock domain — frozen until the test advances it
             StartInterval: 1_000_000
         )
         await mgr.start(containerId: "forgiven", config: cfg)
 
-        // Poll until at least 5 probes have run and assert in the SAME step —
-        // a fixed sleep can resume past the start period on a loaded runner,
-        // and a counted failure would then (correctly) mark the container
-        // unhealthy, failing the test without a product defect. Five probes
-        // at the ~1ms startup cadence land in milliseconds, far inside the
-        // 1s window; with Retries=1 the first COUNTED failure goes unhealthy,
-        // so reaching 5 probes at all proves every one was forgiven.
+        // Poll until at least 5 probes have run: five probes at the ~1ms
+        // startup cadence land in milliseconds once scheduled; with
+        // Retries=1 the first COUNTED failure goes unhealthy, so reaching 5
+        // probes at all proves every one was forgiven. The poll has no
+        // wall-clock coupling — the window cannot close while the clock is
+        // frozen.
         var probes = 0
-        for _ in 0..<200 {
+        for _ in 0..<2000 {
             probes = await timeline.timestamps.count
             if probes >= 5 { break }
             try await Task.sleep(nanoseconds: 10_000_000)
@@ -415,7 +437,9 @@ struct HealthCheckManagerStartIntervalTests {
         #expect(midHealth?.Status == "starting", "startup failures must not mark the container unhealthy")
         #expect(midHealth?.FailingStreak == 0, "startup failures must not count toward the retry budget")
 
-        // Once the start period ends, the next failure counts normally.
+        // End the start period (clock domain): the next failure counts
+        // normally — a single one, with Retries=1.
+        await clock.advance(byNanoseconds: 10_000_000_000)
         try await Self.waitForStatus("unhealthy", on: mgr, id: "forgiven")
         let endHealth = await mgr.currentHealth(for: "forgiven")
         #expect((endHealth?.FailingStreak ?? 0) >= 1)
@@ -527,45 +551,56 @@ struct HealthCheckManagerStartIntervalTests {
         // and every later probe fails. The interval floor of 200ms spaces the
         // probes far enough apart that each mid-flight assertion is observed
         // while it holds (the next probe is a full floor away).
+        //
+        // The start period lives on a FROZEN clock — it can never expire, so
+        // the final transition has no wall-clock assertion at all: if grace
+        // were (wrongly) reopened, the streak would stay 0 for as long as the
+        // window is open (forever, here) and waitForStatus would time out.
+        // The wall-clock variant of that check failed CI when the runner
+        // stalled the test process past the 9s window with no product defect.
         let script = ProbeScript(initialResult: 0)
+        let clock = ManualClock()
         let mgr = HealthCheckManager(
             probe: { _, _, _ in
                 await script.probe()
             },
-            intervalFloorNs: 200_000_000
+            intervalFloorNs: 200_000_000,
+            clock: { await clock.current() }
         )
         let cfg = HealthcheckConfig(
             Test: ["CMD", "false"],
             Interval: 1_000_000,
             Timeout: 1_000_000_000,
             Retries: 2,
-            StartPeriod: 9_000_000_000,  // the gated sequence needs ~600ms unloaded; CI load once drifted it to 5.15s, so the budget is generous
+            StartPeriod: 9_000_000_000,  // clock domain — frozen for the whole test
             StartInterval: 1_000_000
         )
-        let startNs = DispatchTime.now().uptimeNanoseconds
         await mgr.start(containerId: "grace-closed", config: cfg)
         try await Self.waitForStatus("healthy", on: mgr, id: "grace-closed")
         // From here on, every probe fails.
         await script.startFailing()
         // First failure after the success: streak 1 < Retries 2 → the status
         // must STILL be healthy (not "starting", which would reopen grace).
-        // The next probe is ≥ 200ms away, so this observation is stable.
-        while await (mgr.currentHealth(for: "grace-closed")?.FailingStreak ?? 0) < 1 {
+        // The next probe is ≥ 200ms away, and the observation is a single
+        // atomic snapshot of status+streak, so it cannot race the transition.
+        var midHealth: ContainerHealth? = nil
+        for _ in 0..<15000 {
+            let health = await mgr.currentHealth(for: "grace-closed")
+            if let health, health.FailingStreak >= 1 {
+                midHealth = health
+                break
+            }
             try await Task.sleep(nanoseconds: 2_000_000)
         }
-        let midHealth = await mgr.currentHealth(for: "grace-closed")
         #expect(midHealth?.Status == "healthy", "post-success failure below Retries must not demote to starting")
         #expect(midHealth?.FailingStreak == 1)
-        // Second failure: streak reaches Retries → unhealthy, while the start
-        // period is still open — if grace were (wrongly) reopened, the streak
-        // would stay 0 and unhealthy would only arrive after the 5s period.
+        // Second failure: streak reaches Retries → unhealthy while the start
+        // period is (clock-)still open — see above for why arriving at all
+        // is the assertion.
         try await Self.waitForStatus("unhealthy", on: mgr, id: "grace-closed")
         let endHealth = await mgr.currentHealth(for: "grace-closed")
         #expect(endHealth?.Status == "unhealthy")
         #expect((endHealth?.FailingStreak ?? 0) >= 2, "post-success failures must count toward the retry budget")
-        #expect(
-            DispatchTime.now().uptimeNanoseconds - startNs < 9_000_000_000,
-            "unhealthy arrived only after the start period expired — the grace window was reopened")
         await mgr.stop(containerId: "grace-closed")
     }
 

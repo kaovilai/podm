@@ -162,6 +162,16 @@ struct SystemDFRoute: RouteCollection {
 }
 
 extension SystemDFRoute {
+    /// The repo tags an image summary reports for `reference`. A digest-only
+    /// reference (`alpine@sha256:<digest>`) is NOT a tag: docker's
+    /// `/system/df` shows `<none>:<none>` for such an image, and podman's
+    /// `system df -v` reports the untagged placeholders. Putting the digest
+    /// reference in `RepoTags` made the libpod report split it at the last
+    /// colon into Repository `alpine@sha256` + Tag `<digest>`.
+    static func repoTags(for reference: String) -> [String] {
+        reference.isEmpty || reference.contains("@") ? [] : [reference]
+    }
+
     fileprivate static func buildImageSummaries(
         images: [ClientImage],
         usageByImageReference: [String: Int]
@@ -200,7 +210,7 @@ extension SystemDFRoute {
                         totalSize += descriptor.size
                     }
 
-                    let repoTags = image.reference.isEmpty ? [] : [image.reference]
+                    let repoTags = SystemDFRoute.repoTags(for: image.reference)
                     let repoDigests = image.reference.contains("@sha256:") ? [image.reference] : []
                     let containerCount = usageByImageReference[image.reference] ?? 0
 

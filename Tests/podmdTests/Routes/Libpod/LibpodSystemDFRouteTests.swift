@@ -267,4 +267,33 @@ struct LibpodSystemDFRouteTests {
         #expect(tagged.Repository == "localhost:5000/foo")
         #expect(tagged.Tag == "v1.2")
     }
+
+    /// Review round 7: a digest-only pull (`alpine@sha256:<digest>`) is not a
+    /// tagged image. Putting the digest reference in RepoTags split it at the
+    /// last colon into Repository `alpine@sha256` + Tag `<digest>`; podman's
+    /// libimage DiskUsage reports the untagged placeholders instead.
+    @Test("a digest-only image reports the untagged placeholders, not a split digest reference")
+    func digestOnlyImageReportsUntagged() throws {
+        let digestOnly = LibpodSystemDfImageReport.from(
+            RESTImageSummary(
+                Id: "sha256:digestonly", ParentId: "",
+                RepoTags: ["docker.io/library/alpine@sha256:deadbeef"],
+                RepoDigests: ["docker.io/library/alpine@sha256:deadbeef"],
+                Created: 0, Size: 100, SharedSize: 0, Labels: [:], Containers: 0,
+                Manifests: nil, Descriptor: nil))
+        #expect(digestOnly.Repository == "<none>")
+        #expect(digestOnly.Tag == "<none>")
+
+        // A digest reference behind a real tag is skipped, not split: the
+        // first TAGGED entry wins.
+        let digestAndTag = LibpodSystemDfImageReport.from(
+            RESTImageSummary(
+                Id: "sha256:both", ParentId: "",
+                RepoTags: ["docker.io/library/alpine@sha256:deadbeef", "docker.io/library/alpine:3.20"],
+                RepoDigests: ["docker.io/library/alpine@sha256:deadbeef"],
+                Created: 0, Size: 100, SharedSize: 0, Labels: [:], Containers: 0,
+                Manifests: nil, Descriptor: nil))
+        #expect(digestAndTag.Repository == "docker.io/library/alpine")
+        #expect(digestAndTag.Tag == "3.20")
+    }
 }

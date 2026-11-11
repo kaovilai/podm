@@ -11,6 +11,12 @@ struct HealthCheckManagerKey: StorageKey {
 /// its exit code. Injected so tests can stub the side-effecting exec path.
 typealias HealthProbe = @Sendable (_ containerId: String, _ cmd: [String], _ timeoutNs: UInt64) async -> Int32
 
+/// Monotonic nanoseconds — the clock the healthcheck loop schedules against.
+/// Injected so tests can freeze and advance the start period deterministically
+/// (a loaded CI runner stretches wall-clock-driven test windows until correct
+/// behavior fails its own assertions).
+typealias MonotonicClock = @Sendable () async -> UInt64
+
 /// Runs Docker `HEALTHCHECK` probes inside containers and tracks their status.
 ///
 /// Apple Container 1.0.0 has no native runtime healthcheck support, so we
@@ -54,6 +60,9 @@ actor HealthCheckManager {
     private let intervalFloorNs: UInt64
     /// Optional broadcaster for Docker `health_status` events. Nil in tests.
     private let broadcaster: EventBroadcaster?
+    /// The monotonic clock the loop schedules against — injected so tests can
+    /// hold the start period open (or end it) deterministically.
+    private let clock: MonotonicClock
 
     private static let maxLogEntries = 5
 
@@ -63,10 +72,16 @@ actor HealthCheckManager {
         return f.string(from: date)
     }
 
-    init(probe: @escaping HealthProbe = HealthCheckManager.execProbe, intervalFloorNs: UInt64 = HealthCheckManager.defaultMinimumIntervalNs, broadcaster: EventBroadcaster? = nil) {
+    init(
+        probe: @escaping HealthProbe = HealthCheckManager.execProbe,
+        intervalFloorNs: UInt64 = HealthCheckManager.defaultMinimumIntervalNs,
+        broadcaster: EventBroadcaster? = nil,
+        clock: @escaping MonotonicClock = { DispatchTime.now().uptimeNanoseconds }
+    ) {
         self.probe = probe
         self.intervalFloorNs = intervalFloorNs
         self.broadcaster = broadcaster
+        self.clock = clock
     }
 
     func currentHealth(for id: String) -> ContainerHealth? {
@@ -248,7 +263,7 @@ actor HealthCheckManager {
         let startIntervalNs = max(configStartIntervalNs, intervalFloorNs)
         // Monotonic start-period deadline measured from loop start (≈ the
         // container's start, matching moby's comparison against StartedAt).
-        let startPeriodEndNs = DispatchTime.now().uptimeNanoseconds + startPeriodNs
+        let startPeriodEndNs = await clock() + startPeriodNs
 
         // Without startup probing the start period simply delays the first
         // probe (podm's pre-Docker-25 behavior for StartPeriod-only configs).
@@ -273,7 +288,7 @@ actor HealthCheckManager {
         while !Task.isCancelled {
             guard isActive(id: containerId) else { return }
 
-            let probeStartNs = DispatchTime.now().uptimeNanoseconds
+            let probeStartNs = await clock()
             let start = Date()
             let exitCode = await runCheck(containerId: containerId, config: config, timeoutNs: timeoutNs)
             let end = Date()
@@ -329,7 +344,7 @@ actor HealthCheckManager {
             // has not turned healthy yet; regular Interval otherwise.
             let nextDelayNs: UInt64 =
                 if probesDuringStartPeriod,
-                    DispatchTime.now().uptimeNanoseconds < startPeriodEndNs,
+                    await clock() < startPeriodEndNs,
                     statuses[containerId]?.Status == "starting"
                 {
                     startIntervalNs

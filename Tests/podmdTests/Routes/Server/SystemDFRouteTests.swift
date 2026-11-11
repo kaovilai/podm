@@ -123,4 +123,18 @@ struct SystemDFRouteNetworkSettingsTests {
             }
         }
     }
+
+    /// Review round 7: a digest-only reference (`alpine@sha256:<digest>`) is
+    /// not a tag — docker's `/system/df` reports no RepoTags for such an
+    /// image, and the libpod report maps the empty list to podman's untagged
+    /// placeholders. Putting the digest reference in RepoTags made the podman
+    /// report split it into Repository `alpine@sha256` + Tag `<digest>`.
+    @Test("repo tags exclude digest-only references")
+    func repoTagsExcludeDigestReferences() {
+        #expect(SystemDFRoute.repoTags(for: "alpine:latest") == ["alpine:latest"])
+        #expect(SystemDFRoute.repoTags(for: "localhost:5000/foo") == ["localhost:5000/foo"])
+        #expect(SystemDFRoute.repoTags(for: "localhost:5000/foo:v1.2") == ["localhost:5000/foo:v1.2"])
+        #expect(SystemDFRoute.repoTags(for: "docker.io/library/alpine@sha256:deadbeef") == [])
+        #expect(SystemDFRoute.repoTags(for: "") == [])
+    }
 }

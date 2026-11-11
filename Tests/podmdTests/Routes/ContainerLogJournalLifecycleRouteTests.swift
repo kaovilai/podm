@@ -15,10 +15,35 @@ import VaporTesting
 /// pruned container's journal — the prune path deletes through the native
 /// client and bypasses the delete/auto-remove cleanup callers.
 ///
-/// One SERIALIZED suite because these tests drive the SHARED journal the
-/// production routes use; parallel tests reconfiguring it would race.
+/// These tests drive the SHARED journal the production routes use. Every
+/// test first routes it at a test-owned directory through the one-time
+/// installer below — the shared journal's unconfigured default is the
+/// DEVELOPER'S real journal directory, and route tests reset and delete
+/// journal files. The installer runs once per process; the journal's
+/// `configure` is idempotent per directory, so repeated installs never wipe
+/// live state (an unconditional reconfigure would clear the writer epochs of
+/// followers other suites armed and silently drop their appends).
 @Suite("Container log journal lifecycle (routes)", .serialized)
 struct ContainerLogJournalLifecycleRouteTests {
+
+    /// Installs the process-wide test-owned directory for the SHARED journal,
+    /// exactly once: the first test to arrive configures it, every later
+    /// call returns the same directory and hits `configure`'s same-directory
+    /// no-op. An actor (not a static let) because the installation awaits
+    /// the journal actor.
+    private actor SharedJournalTestIsolation {
+        static let shared = SharedJournalTestIsolation()
+        private var directory: URL?
+
+        func install() async -> URL {
+            if let directory { return directory }
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("podm-journal-route-tests-\(UUID().uuidString)", isDirectory: true)
+            await ContainerLogJournal.shared.configure(storageDirectory: dir)
+            directory = dir
+            return dir
+        }
+    }
 
     /// Polls `condition` until true or the timeout passes. The budget is
     /// generous for the same reason the follower tests' is: CI's shared
@@ -34,21 +59,18 @@ struct ContainerLogJournalLifecycleRouteTests {
         return await condition()
     }
 
-    private func tempDirectory() -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("podm-journal-route-tests-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
-    }
-
-    /// Points the SHARED journal (the one the routes use) at a fresh temp
-    /// directory and seeds one entry for `nativeId`.
-    private func seedSharedJournal(dir: URL, nativeId: String, line: String) async {
-        await ContainerLogJournal.shared.configure(storageDirectory: dir)
+    /// Routes the SHARED journal (the one the routes use) at the test-owned
+    /// directory — once per process, see the suite doc — and seeds one entry
+    /// for `nativeId`. Returns the installed directory for tests that verify
+    /// the on-disk state through a fresh instance.
+    @discardableResult
+    private func seedSharedJournal(nativeId: String, line: String) async -> URL {
+        let dir = await SharedJournalTestIsolation.shared.install()
         await ContainerLogJournal.shared.beginBoot(nativeId: nativeId, epoch: 1)
         await ContainerLogJournal.shared.append(
             nativeId: nativeId, epoch: 1,
             [ContainerLogJournal.Entry(unixNano: 111, streamType: 1, bytes: Data(line.utf8))])
+        return dir
     }
 
     private func makeSnapshot(nativeId: String, status: RuntimeStatus) throws -> ContainerSnapshot {
@@ -56,13 +78,43 @@ struct ContainerLogJournalLifecycleRouteTests {
             nativeId: nativeId, networks: [("myapp_default", "192.168.65.90")], labels: [:], status: status)
     }
 
+    // MARK: - Test-owned journal isolation
+
+    /// Review round 7: the shared journal's unconfigured default is the
+    /// DEVELOPER'S real journal directory. The installer must route it at a
+    /// throwaway directory before this suite's route tests reset and delete
+    /// journal files, and repeated installs must not disturb it.
+    @Test("the shared journal runs test-owned once installed, never the developer's real directory")
+    func sharedJournalIsTestOwned() async {
+        let dir = await SharedJournalTestIsolation.shared.install()
+        let current = await ContainerLogJournal.shared.currentStorageDirectory()
+        #expect(
+            current.path == dir.appendingPathComponent("podm-log-journals", isDirectory: true).path,
+            "the installed directory must stick across installs")
+        #expect(
+            !current.path.contains("Application Support"),
+            "route tests must never reset or delete journals in the developer's real app-support root")
+
+        // A second install keeps live state: beginBoot + append, re-install,
+        // and the entry is still there (configure is idempotent per
+        // directory — see ContainerLogJournalTests for the unit-level pin).
+        await ContainerLogJournal.shared.beginBoot(nativeId: "isolation-ctr", epoch: 1)
+        await ContainerLogJournal.shared.append(
+            nativeId: "isolation-ctr", epoch: 1,
+            [ContainerLogJournal.Entry(unixNano: 111, streamType: 1, bytes: Data("alive\n".utf8))])
+        _ = await SharedJournalTestIsolation.shared.install()
+        #expect(
+            await ContainerLogJournal.shared.entries(nativeId: "isolation-ctr").map(\.bytes)
+                == [Data("alive\n".utf8)],
+            "a repeated install must not wipe live journal state")
+    }
+
     // MARK: - /start fresh-boot semantics
 
     @Test("a /start that boots a stopped container resets its log journal")
     func startResetsJournalOnRealBoot() async throws {
         let nativeId = "journal-start-stopped-ctr"
-        let dir = tempDirectory()
-        await seedSharedJournal(dir: dir, nativeId: nativeId, line: "previous boot\n")
+        let dir = await seedSharedJournal(nativeId: nativeId, line: "previous boot\n")
 
         let mock = StaticSnapshotClientMock(snapshot: try makeSnapshot(nativeId: nativeId, status: .stopped))
         try await withApp(configure: { _ in }) { app in
@@ -101,8 +153,7 @@ struct ContainerLogJournalLifecycleRouteTests {
     @Test("a redundant /start on a running container preserves its log journal")
     func redundantStartPreservesJournal() async throws {
         let nativeId = "journal-start-running-ctr"
-        let dir = tempDirectory()
-        await seedSharedJournal(dir: dir, nativeId: nativeId, line: "current boot\n")
+        await seedSharedJournal(nativeId: nativeId, line: "current boot\n")
 
         let mock = StaticSnapshotClientMock(snapshot: try makeSnapshot(nativeId: nativeId, status: .running))
         try await withApp(configure: { _ in }) { app in
@@ -138,8 +189,7 @@ struct ContainerLogJournalLifecycleRouteTests {
     @Test("a /start that lost a concurrent boot race preserves its log journal")
     func startThatLostBootRacePreservesJournal() async throws {
         let nativeId = "journal-start-raced-ctr"
-        let dir = tempDirectory()
-        await seedSharedJournal(dir: dir, nativeId: nativeId, line: "current boot\n")
+        await seedSharedJournal(nativeId: nativeId, line: "current boot\n")
 
         // The snapshot is stopped when observed, but start() reports that
         // THIS call did not boot it — a concurrent /start (or the attach
@@ -183,8 +233,7 @@ struct ContainerLogJournalLifecycleRouteTests {
     @Test("a /restart that booted the container resets its log journal")
     func restartResetsJournalOnRealBoot() async throws {
         let nativeId = "journal-restart-boot-ctr"
-        let dir = tempDirectory()
-        await seedSharedJournal(dir: dir, nativeId: nativeId, line: "previous boot\n")
+        await seedSharedJournal(nativeId: nativeId, line: "previous boot\n")
 
         // StaticSnapshotClientMock.restart reports a real boot (true), like
         // ClientContainerService.restart propagating startInternal's result.
@@ -220,8 +269,7 @@ struct ContainerLogJournalLifecycleRouteTests {
     @Test("a /restart that lost a concurrent boot race preserves its log journal")
     func restartThatLostBootRacePreservesJournal() async throws {
         let nativeId = "journal-restart-raced-ctr"
-        let dir = tempDirectory()
-        await seedSharedJournal(dir: dir, nativeId: nativeId, line: "current boot\n")
+        await seedSharedJournal(nativeId: nativeId, line: "current boot\n")
 
         // The restart succeeds, but its internal start lost the boot race to
         // a concurrent /start (or the attach route's bootstrap): restart
@@ -335,8 +383,7 @@ struct ContainerLogJournalLifecycleRouteTests {
     @Test("docker container prune tears down the pruned container's log journal")
     func pruneTearsDownJournal() async throws {
         let nativeId = "journal-prune-ctr"
-        let dir = tempDirectory()
-        await seedSharedJournal(dir: dir, nativeId: nativeId, line: "prune me\n")
+        let dir = await seedSharedJournal(nativeId: nativeId, line: "prune me\n")
 
         let mock = PruneReportingMock(snapshot: try makeSnapshot(nativeId: nativeId, status: .stopped))
         try await withApp(configure: { _ in }) { app in

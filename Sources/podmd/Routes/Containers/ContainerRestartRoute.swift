@@ -88,7 +88,11 @@ extension ContainerRestartRoute {
                     // suppressed no-op) stays non-disruptive — resetting
                     // anyway would cancel the winning follower and wipe its
                     // journal, exactly like a raced /start.
-                    freshLogBoot: restartedByThisCall
+                    freshLogBoot: restartedByThisCall,
+                    // The post-boot snapshot's startedDate identifies THIS
+                    // boot to the follower registry, so a delayed arm cannot
+                    // displace a newer boot's follower.
+                    logBootStartedAt: restartedSnapshot?.startedDate
                 )
             }
 

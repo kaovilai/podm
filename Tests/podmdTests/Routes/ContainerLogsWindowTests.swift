@@ -990,6 +990,40 @@ struct ContainerLogsWindowTests {
         #expect(sinceResult.payloads == ["kept\n"], "a bound below since still excludes the line")
     }
 
+    /// Review round 7: a REVERSED window (since > until) is empty — no
+    /// timestamp can satisfy both bounds. An evicted line whose only
+    /// recoverable time is an upper bound at 400 slipped through: since=300
+    /// passes (400 ≥ 300) and the bound skips the until check, so the line
+    /// was emitted although its true write time excludes it from either side.
+    @Test("a reversed window (since > until) emits nothing, even for upper-bound evicted lines")
+    func reversedWindowEmitsNothing() async throws {
+        // Two evicted lines with only the newest stamp (400) retained: the
+        // first is past the stamp window and inherits 400 as an UPPER BOUND
+        // — the exact shape that bypassed both single-bound checks.
+        let fixture = journal([(400, "kept\n")], dropped: 2, evictedNanos: [400])
+        let result = try await scan("a\nb\nkept\n", journal: fixture, since: 300, until: 200)
+        #expect(result.payloads.isEmpty, "no timestamp can satisfy since=300 and until=200 — the window is empty")
+    }
+
+    /// Review round 7: moby/dockerd treat a LITERAL `until=0` as absent, but
+    /// a PRE-EPOCH timestamp also clamps to 0 — it must stay a real bound
+    /// (excluding everything) instead of being mistaken for the absent form,
+    /// which returned the entire modern log.
+    @Test("a literal until=0 is absent, but a pre-epoch until stays a bound at 0")
+    func preEpochUntilIsNotAbsent() throws {
+        let absent = try ContainerLogsRoute.parseLogWindow(since: nil, until: "0")
+        #expect(absent.until == nil, "dockerd treats a literal until=0 as no bound")
+
+        let preEpoch = try ContainerLogsRoute.parseLogWindow(since: nil, until: "1969-12-31T23:59:59Z")
+        #expect(preEpoch.until == 0, "a pre-epoch until clamps to 0 but must remain a bound, not turn absent")
+
+        let modern = try ContainerLogsRoute.parseLogWindow(since: nil, until: "1136073600")
+        #expect(modern.until == 1_136_073_600_000_000_000, "a unix-seconds until parses to its nanoseconds")
+
+        let since = try ContainerLogsRoute.parseLogWindow(since: "0", until: nil)
+        #expect(since.since == 0, "since=0 stays 0 — it filters nothing either way")
+    }
+
     /// The same fix on the oversized-line paths: an oversized line whose gap
     /// marker the cap evicted keeps its retained stamp for the whole logical
     /// line (head fragment through terminator).

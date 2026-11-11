@@ -139,6 +139,36 @@ struct EXT4XattrReaderTests {
         #expect(reader.xattrs(inline: nil, block: 1) == nil)
     }
 
+    /// Review round 7: a block-backed xattr block truncated to its first
+    /// four bytes yields a short read that CONTAINS the xattr magic. The
+    /// complete-block check must reject it as unreadable — a weaker
+    /// magic-only check would accept the 4-byte buffer and decode an empty
+    /// set (parseEntries sees no complete entry header in 4 bytes).
+    @Test("a block-backed xattr block truncated to its magic header is unreadable")
+    func blockTruncatedToMagicIsUnreadable() throws {
+        let fixture = Ext4TreeFixture(name: "xattr-reader-magic")
+        defer { fixture.cleanUp() }
+        // The 256-byte value spills to a block-backed xattr block.
+        let device = try fixture.write(
+            files: ["/blockbacked": "b"],
+            xattrs: ["/blockbacked": ["user.big": Data(repeating: 0x42, count: 256)]])
+        let ext4Reader = try EXT4.EXT4Reader(blockDevice: FilePath(device.path))
+        let reader = EXT4XattrReader(blockDevice: FilePath(device.path), superBlock: ext4Reader.superBlock)
+        let (_, inode) = try ext4Reader.stat(FilePath("/blockbacked"))
+        let block = UInt64(inode.xattrBlockLow)
+        #expect(block != 0, "the fixture must produce a block-backed xattr")
+
+        // Keep only the block's first four bytes (the magic header).
+        let blockSize = UInt64(ext4Reader.superBlock.blockSize)
+        let handle = try FileHandle(forWritingTo: device)
+        try handle.truncate(atOffset: block * blockSize + 4)
+        try handle.close()
+
+        #expect(
+            reader.xattrs(inline: nil, block: block) == nil,
+            "a short read containing only the magic must be rejected as unreadable, not decoded as an empty set")
+    }
+
     @Test("system.data is representation, not a reported attribute")
     func systemDataIsSkipped() throws {
         let (fixture, _, reader) = try makeReader()

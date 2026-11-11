@@ -54,10 +54,13 @@ struct LibpodSystemDfImageReport: Content {
     static func from(_ s: RESTImageSummary) -> LibpodSystemDfImageReport {
         // podman's libimage DiskUsage reports "<none>"/"<none>" for untagged
         // images; split the first repo tag at the last colon so registry
-        // ports (localhost:5000/foo:tag) survive.
+        // ports (localhost:5000/foo:tag) survive. Digest references
+        // (`alpine@sha256:<digest>`) are not tags — skip them so a
+        // digest-only image reports the untagged placeholders instead of
+        // splitting into Repository `alpine@sha256` + Tag `<digest>`.
         var repository = "<none>"
         var tag = "<none>"
-        if let first = s.RepoTags.first {
+        if let first = s.RepoTags.first(where: { !$0.contains("@") }) {
             // Split at the last colon only when what follows it is a TAG (no
             // slash): a registry port without a tag ("localhost:5000/foo")
             // must not split into repository "localhost" + tag "5000/foo" —
