@@ -404,7 +404,6 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | ✅ | `POST` | `/secrets/create` | docker |  |
 | ✅ | `DELETE` | `/secrets/{id}` | docker |  |
 | ✅ | `GET` | `/secrets/{id}` | docker |  |
-| 🚫 | `POST` | `/secrets/{id}/update` | docker | A local file-backed secret store cannot update in place (podman's compat route answers 501 too); the route exists for CLI compatibility. |
 | 🚫 | `GET` | `/services` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
 | 🚫 | `POST` | `/services/create` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
 | 🚫 | `GET` | `/services/{id}` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |

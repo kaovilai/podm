@@ -64,9 +64,6 @@ enum RouteSupportManifest {
             method: "POST", pattern: "/nodes/{id}/update",
             reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
-            method: "POST", pattern: "/secrets/{id}/update",
-            reason: "A local file-backed secret store cannot update in place (podman's compat route answers 501 too); the route exists for CLI compatibility."),
-        DeliberateStub(
             method: "GET", pattern: "/services",
             reason: "Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility."),
         DeliberateStub(
