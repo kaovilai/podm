@@ -156,6 +156,30 @@ enum ProcessSpawn {
         exit(1)
     }
 
+    /// Run a short-lived helper command capturing ONLY stdout; stderr is
+    /// discarded. For callers that parse stdout (e.g. JSON listings): a CLI
+    /// can legitimately emit warnings to stderr while succeeding, and
+    /// merging the streams corrupts the parse.
+    static func runCaptureStdout(
+        _ executable: String,
+        _ arguments: [String]
+    ) -> (exitStatus: Int32, output: String?) {
+        let process = Foundation.Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return (127, nil)
+        }
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+        process.waitUntilExit()
+        return (process.terminationStatus, output)
+    }
+
     /// Run a short-lived helper command. Output handling:
     ///   - captureOutput: both stdout and stderr are captured and returned.
     ///   - discardOutput: both streams are sent to /dev/null (quiet mode).

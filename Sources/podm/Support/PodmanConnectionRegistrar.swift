@@ -25,16 +25,19 @@ enum PodmanConnectionRegistrar {
     /// Production wraps `ProcessSpawn.run`; tests inject a recorder.
     typealias Spawn = (_ executable: String, _ arguments: [String]) -> (exitStatus: Int32, output: String?)
 
-    /// Default seam over the real process spawn. Output capture is ON: the
-    /// JSON listing must be readable in production (ProcessSpawn.run
-    /// defaults to discarding both streams, which would make every listing
-    /// parse as nil — "unknown" status and a skipped uninstall — while the
-    /// injected test fixtures, which hand back strings directly, bypassed
-    /// exactly that).
+    /// Default seam over the real process spawn. Output capture is ON and
+    /// STDOUT-ONLY: the JSON listing must be readable in production
+    /// (ProcessSpawn.run defaults to discarding both streams, which would
+    /// make every listing parse as nil — "unknown" status and a skipped
+    /// uninstall — while the injected test fixtures, which hand back
+    /// strings directly, bypassed exactly that), and stderr must NOT be
+    /// merged in: podman can legitimately emit a config warning to stderr
+    /// while still printing a successful JSON listing, and the merged
+    /// stream then fails to parse.
     static func realSpawn(_ executable: String, _ arguments: [String]) -> (
         exitStatus: Int32, output: String?
     ) {
-        ProcessSpawn.run(executable, arguments, captureOutput: true)
+        ProcessSpawn.runCaptureStdout(executable, arguments)
     }
 
     /// One entry of `podman system connection list --format json`.
@@ -66,18 +69,39 @@ enum PodmanConnectionRegistrar {
     /// remove first: podman 6's `system connection add` updates an existing
     /// name in place, and removing would clear the user's default selection
     /// (remove of the default connection leaves no default; the re-add does
-    /// not restore it). Does NOT change the default either way — primacy
-    /// stays the user's decision (`podman system connection default podm`).
+    /// not restore it). Does NOT change an existing default — primacy stays
+    /// the user's decision (`podman system connection default podm`).
     ///
-    /// Returns true when the connection is registered after the call.
-    @discardableResult
+    /// ONE caveat podman itself imposes: on a CLEAN profile (no connections
+    /// at all), podman's add makes the new connection the DEFAULT
+    /// (cmd/podman/system/connection/add.go: `Connections == nil` →
+    /// `Default = connection`) — podman's native rule for any first-ever
+    /// connection, not something podm opts into. The result reports
+    /// `becameDefaultOnCleanProfile` so the caller can tell the user
+    /// explicitly instead of it happening silently.
+    ///
+    /// Returns nil when registration failed entirely.
     static func register(
         podmanPath: String, uri: String, connectionName: String = connectionName,
         spawn: Spawn = realSpawn
-    ) -> Bool {
+    ) -> RegistrationResult? {
         // The destination is POSITIONAL (podman-system-connection(1):
         // "add [options] NAME DESTINATION").
-        spawn(podmanPath, ["system", "connection", "add", connectionName, uri]).exitStatus == 0
+        let cleanProfile = listConnections(podmanPath: podmanPath, spawn: spawn)?.isEmpty == true
+        guard
+            spawn(podmanPath, ["system", "connection", "add", connectionName, uri]).exitStatus == 0
+        else { return nil }
+        return RegistrationResult(
+            connectionName: connectionName, becameDefaultOnCleanProfile: cleanProfile)
+    }
+
+    /// The outcome of a `register` call.
+    struct RegistrationResult: Equatable {
+        let connectionName: String
+        /// True when this was the first-ever connection on a clean podman
+        /// profile — podman's own rule then makes it the default; the caller
+        /// should say so loudly.
+        let becameDefaultOnCleanProfile: Bool
     }
 
     /// Removes the connection. Returns true only when it is verifiably gone:

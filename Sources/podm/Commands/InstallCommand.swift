@@ -77,10 +77,25 @@ struct InstallCommand: ParsableCommand {
         //    podman remote. Primacy stays the user's decision — this never
         //    changes the default connection.
         if let podmanPath = recorded["podman"] ?? ClientPaths.read()["podman"] {
-            if PodmanConnectionRegistrar.register(
+            if let result = PodmanConnectionRegistrar.register(
                 podmanPath: podmanPath, uri: PodmPaths.containerHostURL)
             {
-                print("Registered podman connection 'podm' -> \(PodmPaths.containerHostURL)")
+                print(
+                    "Registered podman connection '\(result.connectionName)' -> \(PodmPaths.containerHostURL)"
+                )
+                if result.becameDefaultOnCleanProfile {
+                    // podman's own rule for any FIRST-ever connection (a
+                    // clean profile has `Connections == nil`, and its add
+                    // then sets Default) — podm didn't opt in, but the user
+                    // must be told their unqualified podman commands now
+                    // target podm.
+                    print(
+                        """
+                        NOTE: this was the first podman connection on this profile, so podman made it the DEFAULT —
+                        unqualified podman commands now target podm. Change it with:
+                            podman system connection default <name>
+                        """)
+                }
             } else {
                 print("warning: real podman CLI exited non-zero registering the 'podm' connection")
             }
