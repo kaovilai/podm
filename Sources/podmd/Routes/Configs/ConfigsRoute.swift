@@ -186,11 +186,12 @@ extension ConfigsRoute {
             }
             let removed: StoredConfig
             do {
-                // Remove by the RESOLVED full ID: the snapshot above may be
-                // stale by the time the actor runs, and store.remove
-                // re-resolves internally (nil → 404, like moby's getConfig
-                // miss on a lost race).
-                guard let found = try await store.remove(nameOrID: resolved.id) else {
+                // Remove by the RESOLVED full ID, EXACT-ID-only: the
+                // snapshot above may be stale by the time the actor runs,
+                // and re-resolving by name could hit an unrelated config
+                // created in between whose NAME equals the old ID. A lost
+                // race is nil → 404, like moby's getConfig miss.
+                guard let found = try await store.remove(id: resolved.id) else {
                     throw Abort(.notFound, reason: "config \(input) not found")
                 }
                 removed = found
@@ -251,10 +252,11 @@ extension ConfigsRoute {
     /// `filter.Validate` rejects unaccepted keys for configs, and so does
     /// podm. Both the array form (`{"name": ["a"]}`) and the map form
     /// (`{"name": {"a": true}}`) are accepted — Go's `filters.FromJSON`
-    /// decodes both. Malformed JSON, unknown keys, or non-string values are
-    /// CLIENT errors (podm-wide deviation from moby's 500s: silently
-    /// treating them as "no filter" would return every config where the
-    /// caller asked for a subset).
+    /// decodes both, and its map fallback retains EVERY key regardless of
+    /// the boolean. Malformed JSON, unknown keys, non-string array values,
+    /// or non-boolean map values are CLIENT errors (podm-wide deviation
+    /// from moby's 500s: silently treating them as "no filter" would
+    /// return every config where the caller asked for a subset).
     static func parseFilters(_ filtersParam: String?) throws -> [String: [String]] {
         guard let filtersParam, !filtersParam.isEmpty else { return [:] }
         guard let data = filtersParam.data(using: .utf8),
@@ -274,7 +276,21 @@ extension ConfigsRoute {
             if let arr = value as? [String] {
                 filters[key] = arr
             } else if let dict = value as? [String: Any] {
-                filters[key] = dict.compactMap { (key, value) in (value as? Bool == true) ? key : nil }
+                // Go's fallback decode is map[string]map[string]bool: EVERY
+                // key becomes a filter value regardless of its bool, and a
+                // non-bool value fails the decode (moby 500s there; podm's
+                // standing deviation makes client-input errors 400s).
+                var values: [String] = []
+                for (filterValue, flag) in dict {
+                    guard flag is Bool else {
+                        throw Abort(
+                            .badRequest,
+                            reason: "invalid filter value for \(key): expected a boolean"
+                        )
+                    }
+                    values.append(filterValue)
+                }
+                filters[key] = values
             } else {
                 throw Abort(
                     .badRequest,
@@ -288,19 +304,22 @@ extension ConfigsRoute {
     /// moby/swarmkit list semantics (`manager/controlapi/config.go`
     /// `ListConfigs`): `name`/`id` are OR'd together (one `store.Or` of
     /// name-prefix and ID-prefix lookups — a config matching ANY value
-    /// qualifies when either key is present), and `label` entries are AND'd
-    /// on top (`filterMatchLabels`: every filter label must be present; a
-    /// value requires an exact match, an empty value only presence).
+    /// qualifies when either key is present), each prefix applied to its
+    /// OWN field only (`ByNamePrefix` for `name`, `ByIDPrefix` for `id` —
+    /// a name filter must never match an ID and vice versa, or
+    /// `docker config ls -f name=… -q | xargs docker config rm` would
+    /// delete configs the user did not select), and `label` entries are
+    /// AND'd on top (`filterMatchLabels`: every filter label must be
+    /// present; a value requires an exact match, an empty value only
+    /// presence).
     static func passesFilters(_ config: StoredConfig, filters: [String: [String]]) -> Bool {
-        var keySelectors: [(String) -> Bool] = []
-        for prefix in filters["name"] ?? [] {
-            keySelectors.append { $0.hasPrefix(prefix) }
-        }
-        for prefix in filters["id"] ?? [] {
-            keySelectors.append { $0.hasPrefix(prefix) }
-        }
-        if !keySelectors.isEmpty, !keySelectors.contains(where: { $0(config.name) || $0(config.id) }) {
-            return false
+        let namePrefixes = filters["name"] ?? []
+        let idPrefixes = filters["id"] ?? []
+        if !namePrefixes.isEmpty || !idPrefixes.isEmpty {
+            let matched =
+                namePrefixes.contains { config.name.hasPrefix($0) }
+                || idPrefixes.contains { config.id.hasPrefix($0) }
+            if !matched { return false }
         }
         for entry in filters["label"] ?? [] {
             // convertKVStringsToMap: "k=v" → exact value, bare "k" (or
@@ -308,7 +327,7 @@ extension ConfigsRoute {
             if let eq = entry.firstIndex(of: "=") {
                 let key = String(entry[entry.startIndex..<eq])
                 let value = String(entry[entry.index(after: eq)...])
-                guard let actual = config.labels[key], !value.isEmpty || actual.isEmpty else { return false }
+                guard let actual = config.labels[key] else { return false }
                 if !value.isEmpty, actual != value { return false }
             } else {
                 guard config.labels[entry] != nil else { return false }

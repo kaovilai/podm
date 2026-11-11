@@ -207,21 +207,53 @@ struct ConfigsRouteTests {
                 app,
                 filters: ["name": ["other"], "id": [String(a.ID.prefix(12))]],
                 names: ["app-config", "other"])
-            // label k=v AND presence forms.
+            // label k=v AND presence forms — including "k=" (empty value),
+            // which swarmkit's filterMatchLabels treats as presence-only.
             try await expectNames(app, filters: ["label": ["team=db"]], names: ["db-password"])
             try await expectNames(app, filters: ["label": ["team"]], names: ["db-password", "other"])
+            try await expectNames(app, filters: ["label": ["team="]], names: ["db-password", "other"])
+            try await expectNames(app, filters: ["label": ["missing="]], names: [])
             // labels AND with an id selector.
             try await expectNames(
                 app,
                 filters: ["id": [String(a.ID.prefix(12))], "label": ["team=db"]],
                 names: [])
-            // The docker map form ({"name": {"db-": true}}) is accepted.
+            // The docker map form ({"name": {"db-": true}}) is accepted —
+            // and EVERY key is retained regardless of the boolean, like
+            // Go's map[string]map[string]bool fallback decode.
             let mapForm = "/v1.51/configs?filters=%7B%22name%22%3A%7B%22db-%22%3Atrue%7D%7D"
             try await app.testing().test(.GET, mapForm) { res async throws in
                 #expect(res.status == .ok)
                 let reports = try JSONDecoder().decode([DockerConfigReport].self, from: Data(buffer: res.body))
                 #expect(reports.map(\.Spec.Name) == ["db-password"])
             }
+            let mapFormFalse = "/v1.51/configs?filters=%7B%22name%22%3A%7B%22db-%22%3Afalse%7D%7D"
+            try await app.testing().test(.GET, mapFormFalse) { res async throws in
+                #expect(res.status == .ok)
+                let reports = try JSONDecoder().decode([DockerConfigReport].self, from: Data(buffer: res.body))
+                #expect(reports.map(\.Spec.Name) == ["db-password"])
+            }
+        }
+    }
+
+    @Test("name filters match names only and id filters match ids only (ByNamePrefix/ByIDPrefix)")
+    func filterKeysSelectTheirOwnField() async throws {
+        try await withConfigsApp { app in
+            // Names whose first characters are NOT hex digits, so a hex ID
+            // prefix can never legitimately match them.
+            let zebra = try await createConfig(app, name: "zebra", payload: "x")
+            _ = try await createConfig(app, name: "target-name", payload: "y")
+            // A `name` filter equal to zebra's ID first char must not
+            // select zebra via its ID.
+            let idFirst = String(zebra.ID.prefix(1))
+            try await expectNames(app, filters: ["name": [idFirst]], names: [])
+            // An `id` filter equal to a name prefix must not select via the
+            // name ("target" contains non-hex characters, so no hex ID can
+            // start with it either).
+            try await expectNames(app, filters: ["id": ["target"]], names: [])
+            // Positive controls: each key still selects its own field.
+            try await expectNames(app, filters: ["name": ["zeb"]], names: ["zebra"])
+            try await expectNames(app, filters: ["id": [String(zebra.ID.prefix(12))]], names: ["zebra"])
         }
     }
 
@@ -248,6 +280,13 @@ struct ConfigsRouteTests {
             }
             try await app.testing().test(.GET, "/v1.51/configs?filters=%7B%22name%22%3A%22somename%22%7D") { res async in
                 #expect(res.status == .badRequest)
+            }
+            // Map-form values must be booleans: a non-bool fails Go's
+            // map[string]map[string]bool decode (moby 500s; podm's 400
+            // deviation) — never a silent "no filter".
+            try await app.testing().test(.GET, "/v1.51/configs?filters=%7B%22name%22%3A%7B%22somename%22%3A%22invalid%22%7D%7D") { res async in
+                #expect(res.status == .badRequest)
+                #expect(res.body.string.contains("expected a boolean"))
             }
         }
     }
@@ -279,24 +318,19 @@ struct ConfigsRouteTests {
     @Test("an ambiguous ID prefix is a 400 (moby's InvalidParameter), never a silent pick")
     func ambiguousPrefixRejected() async throws {
         try await withConfigsApp { app in
-            // Create several configs, then find a prefix shared by ≥2 of
-            // their 25-hex IDs (hex alphabet is small enough that a short
-            // prefix over a handful of IDs usually collides; walk down
-            // until one does).
+            // 17 IDs over a 16-symbol hex alphabet: by pigeonhole at least
+            // two share their first character, so a 1-character prefix is
+            // ALWAYS ambiguous — no probabilistic fallback needed.
             var ids: [String] = []
-            for i in 0..<12 {
+            for i in 0..<17 {
                 ids.append(try await createConfig(app, name: "amb-\(i)", payload: "x").ID)
             }
-            var ambiguous: String?
-            for length in 1...4 {
-                let prefixes = ids.map { String($0.prefix(length)) }
-                if Set(prefixes).count < prefixes.count {
-                    ambiguous = prefixes.first { prefix in prefixes.filter { $0 == prefix }.count > 1 }
-                    break
-                }
+            var firstCharCounts: [String: Int] = [:]
+            for id in ids {
+                firstCharCounts[String(id.prefix(1)), default: 0] += 1
             }
-            guard let ambiguous else {
-                Issue.record("no ambiguous prefix found over 12 IDs — statistically very unlikely")
+            guard let ambiguous = firstCharCounts.first(where: { $0.value > 1 })?.key else {
+                Issue.record("17 hex IDs over a 16-symbol alphabet must share a first character (pigeonhole)")
                 return
             }
             try await app.testing().test(.GET, "/v1.51/configs/\(ambiguous)") { res async in

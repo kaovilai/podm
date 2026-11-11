@@ -305,6 +305,22 @@ actor ConfigStore {
             throw StoreError.nameInUse(name)
         }
 
+        // Config name uniqueness is case-INSENSITIVE, matching swarmkit's
+        // store: the name index keys are lowercased (`api.ConfigIndexerByName`
+        // does strings.ToLower) and `CreateConfig` looks up
+        // strings.ToLower(name) — "CaseSensitive" and "casesensitive"
+        // conflict (ErrNameConflict → podm's 409). Names are
+        // charset-validated ASCII above, so Swift's lowercased() matches
+        // Go's strings.ToLower byte-for-byte here. RESOLUTION below stays
+        // byte-wise (`sameName`): swarmkit's ByName query is NOT lowercased
+        // (raw input vs the lowercase index — a mixed-case lookup misses,
+        // a lowercase one hits), an asymmetric quirk podm deliberately does
+        // not mirror; exact-spelling lookups keep working instead.
+        let lowered = name.lowercased()
+        if configs.contains(where: { $0.name.lowercased() == lowered }) {
+            throw StoreError.nameInUse(name)
+        }
+
         let now = Date()
         let config = StoredConfig(
             id: Self.generateID(existing: Set(configs.map(\.id))),
@@ -344,13 +360,32 @@ actor ConfigStore {
         guard let config = lookup(nameOrID: nameOrID),
             let index = configs.firstIndex(where: { $0.id == config.id })
         else { return nil }
-        // Reads (the nil above) still work on a blocked store; the mutation
-        // does not — persisting would overwrite the only copy of the
-        // unreadable file.
+        return try remove(at: index, loggingAs: nameOrID)
+    }
+
+    /// Removes a config by EXACT full ID — no name fallback, no prefix
+    /// resolution. The docker DELETE route resolves name/prefix → full ID
+    /// from a snapshot, then removes by that ID: between the snapshot and
+    /// this actor hop a concurrent remove+create can mint a NEW config
+    /// whose NAME equals the old ID (charset-legal once the ID is free),
+    /// and `remove(nameOrID:)`'s name fallback would delete that unrelated
+    /// config. ID-exact removal turns the lost race into a nil (the route's
+    /// 404), never a misfire.
+    @discardableResult
+    func remove(id: String) throws -> StoredConfig? {
+        guard let index = configs.firstIndex(where: { $0.id == id }) else { return nil }
+        return try remove(at: index, loggingAs: id)
+    }
+
+    /// Shared mutation body for both removal entry points. Snapshot BEFORE
+    /// mutating, same rationale as create(): a failed remove left applied
+    /// in memory would let the next mutation's payload write drop data the
+    /// on-disk metadata still references.
+    private func remove(at index: Int, loggingAs nameOrID: String) throws -> StoredConfig? {
+        // The caller's nil lookup still works on a blocked store; the
+        // mutation does not — persisting would overwrite the only copy of
+        // the unreadable file.
         try ensureNotBlocked()
-        // Snapshot BEFORE mutating, same rationale as create(): a failed
-        // remove left applied in memory would let the next mutation's
-        // payload write drop data the on-disk metadata still references.
         let savedConfigs = configs
         let savedPayloads = payloads
         let removed = configs.remove(at: index)

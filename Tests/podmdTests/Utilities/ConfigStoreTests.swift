@@ -86,20 +86,50 @@ struct ConfigStoreTests {
         }
     }
 
-    @Test("name equality is byte-wise: no case folding, no canonical equivalence")
-    func unicodeNameEquivalenceIsByteWise() async throws {
+    @Test("name uniqueness is case-insensitive (swarmkit's lowercased index); resolution stays byte-wise")
+    func nameUniquenessCaseInsensitive() async throws {
         let dir = uniqueTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let store = ConfigStore(storageDirectory: dir)
-        // Swarmkit's charset is ASCII-only, so NFC/NFD collisions cannot
-        // arise for configs; byte-wise equality still means NO case folding
-        // — Go string comparison, like the secret store's sameName.
+        // swarmkit's ConfigIndexerByName indexes strings.ToLower(name) and
+        // CreateConfig looks up the lowercased name — a case-variant
+        // duplicate is ErrNameConflict (podm's 409), never a second config.
         _ = try await store.create(name: "CaseSensitive", data: Data("x".utf8), labels: [:])
-        _ = try await store.create(name: "casesensitive", data: Data("y".utf8), labels: [:])
-        let a = await store.lookup(nameOrID: "CaseSensitive")
-        let b = await store.lookup(nameOrID: "casesensitive")
-        #expect(a?.id != b?.id, "Go string equality is byte-wise: no case folding")
-        #expect(await store.list().count == 2)
+        await #expect(throws: ConfigStore.StoreError.self) {
+            _ = try await store.create(name: "casesensitive", data: Data("y".utf8), labels: [:])
+        }
+        await #expect(throws: ConfigStore.StoreError.self) {
+            _ = try await store.create(name: "CASESENSITIVE", data: Data("y".utf8), labels: [:])
+        }
+        #expect(await store.list().count == 1)
+        // Resolution keeps byte-wise equality (`sameName`, like the secret
+        // store): the exact spelling resolves, a case variant does not.
+        // (Swarmkit's ByName query is raw against its lowercase index — a
+        // quirk podm deliberately does not mirror.)
+        #expect(await store.lookup(nameOrID: "CaseSensitive") != nil)
+        #expect(await store.lookup(nameOrID: "casesensitive") == nil)
+    }
+
+    @Test("remove(id:) is exact-ID only — no name fallback (route TOCTOU guard)")
+    func removeByExactIDHasNoNameFallback() async throws {
+        let dir = uniqueTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = ConfigStore(storageDirectory: dir)
+        let first = try await store.create(name: "original", data: Data("x".utf8), labels: [:])
+        // The race the docker DELETE route must survive: the original is
+        // removed, then a concurrent request creates a NEW config whose
+        // NAME is the now-free old ID (charset-legal hex). The route
+        // resolved the old full ID from its snapshot; a name-fallback
+        // removal would delete this unrelated config.
+        _ = try await store.remove(nameOrID: first.id)
+        let hijacker = try await store.create(name: first.id, data: Data("y".utf8), labels: [:])
+        #expect(try await store.remove(id: first.id) == nil, "exact-ID removal must not fall back to a name")
+        let survivor = await store.lookup(nameOrID: hijacker.id)
+        #expect(survivor?.name == first.id, "the name-hijacking config must survive")
+        // remove(nameOrID:) keeps its name resolution for the callers that
+        // pass a genuine name (the store's own API surface).
+        let byName = try await store.remove(nameOrID: first.id)
+        #expect(byName?.id == hijacker.id)
     }
 
     // MARK: - Lookup
