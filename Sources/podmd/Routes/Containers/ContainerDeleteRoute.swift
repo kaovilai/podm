@@ -98,14 +98,13 @@ extension ContainerDeleteRoute {
                     // The force-stop shares the no-timeout XPC path that
                     // wedges the apiserver behind a stuck runtime job
                     // (issue #45) — bound it with the same recovery the
-                    // delete uses. Force semantics make booting the job out
+                    // delete uses. The guard lives inside the service's
+                    // VMLifecycleAdmission slot, so the wedge timer starts
+                    // only once the stop is executing — a healthy queue of
+                    // concurrent VM transitions is never mistaken for a
+                    // wedge. Force semantics make booting the job out
                     // (killing the runtime) legitimate here.
-                    try await ContainerRuntimeJobRecovery.withHangRecovery(
-                        nativeId: container.id,
-                        runtimeHandler: container.configuration.runtimeHandler
-                    ) {
-                        try await client.stop(id: id, signal: nil, timeout: nil)
-                    }
+                    try await client.stopForForceRemoval(id: id)
                 }
                 try await client.delete(id: id)
             } catch ClientContainerError.notFound {

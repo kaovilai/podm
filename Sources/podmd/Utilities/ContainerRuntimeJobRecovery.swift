@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Hang detection and recovery for Apple Container operations that touch a
@@ -42,10 +43,20 @@ enum ContainerRuntimeJobRecovery {
     /// path (the job dies with the container anyway).
     static let firstWindowNs: UInt64 = 15_000_000_000
 
-    /// Second chance after the recovery bootout. Once the stuck job is gone,
-    /// the queued apiserver operations complete near-instantly; anything
-    /// still pending after this window is wedged by something else.
+    /// Second chance, started CONCURRENTLY with the recovery bootout. Once
+    /// the stuck job is gone the queued apiserver operations complete
+    /// near-instantly, so this window covers the (capped) bootout plus the
+    /// operation's completion; anything still pending after it is wedged by
+    /// something else. Starting it only after the bootout returns would let
+    /// a stalled `launchctl` extend the deadline — and the DELETE response —
+    /// indefinitely.
     static let secondWindowNs: UInt64 = 10_000_000_000
+
+    /// How long `launchctl bootout` is given before it is terminated. The
+    /// recovery must stay bounded even when launchd stalls: a wedged job is
+    /// unwedged by the bootout having been ATTEMPTED as much as by it
+    /// succeeding, and the follow-up window decides the outcome either way.
+    static let bootoutCapNs: UInt64 = 5_000_000_000
 
     /// The launchd label apple/container registers for a container's runtime
     /// job — `ContainersService.fullLaunchdServiceLabel` upstream:
@@ -63,23 +74,49 @@ enum ContainerRuntimeJobRecovery {
     }
 
     /// Boots a (possibly wedged) runtime job out of launchd. Synchronous —
-    /// `launchctl bootout` blocks until launchd answers — so callers keep it
-    /// off the cooperative pool (`withHangRecovery` runs it on a detached
-    /// task). A non-zero status is not fatal: the follow-up window decides
-    /// whether the operation recovered.
+    /// `launchctl bootout` blocks until launchd answers — so callers must
+    /// keep it off Swift's cooperative pool (`withHangRecovery` dispatches
+    /// it to a blocking-capable GCD queue). The wait is bounded by
+    /// `bootoutCapNs`: a stalled launchctl is SIGTERMed (then SIGKILLed)
+    /// rather than allowed to hang the recovery. A non-zero status is not
+    /// fatal: the follow-up window decides whether the operation recovered.
     static func liveBootout(_ domainQualifiedLabel: String) -> Int32 {
         let process = Foundation.Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         process.arguments = ["bootout", domainQualifiedLabel]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
+        return runBounded(process, capNs: bootoutCapNs)
+    }
+
+    /// Runs a not-yet-launched `Process` to completion, bounded: on
+    /// `capNs` it is SIGTERMed, after a further grace SIGKILLed, and a
+    /// synthetic -1 is returned if even that never reaped it. Returns the
+    /// process's termination status, or -1 if it could not be launched or
+    /// never exited. Blocking — keep off the cooperative pool, like
+    /// `liveBootout`.
+    static func runBounded(_ process: Foundation.Process, capNs: UInt64) -> Int32 {
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
         do {
             try process.run()
         } catch {
             return -1
         }
-        process.waitUntilExit()
-        return process.terminationStatus
+        // Each successful wait implies the handler ran, i.e. the process
+        // exited — reading terminationStatus then is safe.
+        if exited.wait(timeout: DispatchTime.now() + .nanoseconds(Int(clamping: capNs))) == .success {
+            return process.terminationStatus
+        }
+        process.terminate()  // SIGTERM
+        if exited.wait(timeout: DispatchTime.now() + .seconds(2)) == .success {
+            return process.terminationStatus
+        }
+        kill(process.processIdentifier, SIGKILL)
+        if exited.wait(timeout: DispatchTime.now() + .seconds(2)) == .success {
+            return process.terminationStatus
+        }
+        return -1
     }
 
     /// Runs a container delete or force-stop with hang detection and
@@ -87,12 +124,20 @@ enum ContainerRuntimeJobRecovery {
     ///
     /// The operation is raced against `firstWindowNs`. On timeout the
     /// container's runtime job is booted out of launchd — unwedging the
-    /// apiserver so the STILL-RUNNING operation can complete — and the same
-    /// operation is awaited for `secondWindowNs` more. The operation task is
-    /// deliberately unstructured and never cancelled: its XPC continuation
-    /// only resumes on the apiserver's reply (Task cancellation cannot reach
-    /// it), and it is exactly the reply we are waiting for once the wedge
-    /// clears.
+    /// apiserver so the STILL-RUNNING operation can complete — while the
+    /// SAME operation is raced against `secondWindowNs` CONCURRENTLY with
+    /// the bootout: a stalled launchctl must not delay the deadline (or the
+    /// response) at all. The operation task is deliberately unstructured
+    /// and never cancelled: its XPC continuation only resumes on the
+    /// apiserver's reply (Task cancellation cannot reach it), and it is
+    /// exactly the reply we are waiting for once the wedge clears.
+    ///
+    /// The bootout task is likewise never awaited: production's
+    /// `liveBootout` is internally bounded (its subprocess is terminated
+    /// after `bootoutCapNs`), and its result is advisory anyway — the
+    /// follow-up window decides whether the operation recovered. A bootout
+    /// that lands after the operation completed on its own targets a job
+    /// the apiserver has since deregistered, which is a harmless no-op.
     ///
     /// `bootout` is injectable so tests can model the blocking interaction
     /// without a real launchd; production uses `liveBootout`.
@@ -116,8 +161,13 @@ enum ContainerRuntimeJobRecovery {
         }
 
         let label = domainQualifiedLabel(runtimeHandler: runtimeHandler, nativeId: nativeId)
-        // launchctl bootout blocks; keep the wait off the cooperative pool.
-        _ = await Task.detached(priority: .utility) { bootout(label) }.value
+        // The hook blocks (launchctl waits for launchd to answer) — a
+        // detached task would still occupy a cooperative-pool worker, so it
+        // runs on a blocking-capable GCD queue instead. Deliberately NOT
+        // awaited: see the doc comment above.
+        _ = Task<Int32, Never>(priority: .utility) {
+            await runBootout(bootout, label: label)
+        }
 
         switch await race(task, timeoutNs: secondWindowNs) {
         case .succeeded:
@@ -126,6 +176,22 @@ enum ContainerRuntimeJobRecovery {
             throw error
         case nil:
             throw ClientContainerError.runtimeJobWedged(nativeId: nativeId, label: label)
+        }
+    }
+
+    /// Runs the (blocking, synchronous) bootout hook off Swift's cooperative
+    /// pool: `Task.detached` does NOT move blocking work off the global
+    /// concurrent executor, and a blocking `waitUntilExit` on a cooperative
+    /// worker starves the daemon's operation and timeout tasks under
+    /// concurrent recoveries. A plain GCD global-queue thread blocks freely.
+    private static func runBootout(
+        _ bootout: @escaping @Sendable (_ domainQualifiedLabel: String) -> Int32,
+        label: String
+    ) async -> Int32 {
+        await withCheckedContinuation { (cont: CheckedContinuation<Int32, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                cont.resume(returning: bootout(label))
+            }
         }
     }
 
