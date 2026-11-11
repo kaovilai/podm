@@ -32,8 +32,10 @@ struct RouteConformanceTests {
     /// - pause/unpause: Apple container has no pause primitive.
     /// - commit/changes/rename: tracked gaps (socktainer#14 parity work).
     /// - session: dockerd-only buildx channel; podm answers not-supported.
-    /// - swarm family (configs/nodes/secrets/services/swarm/tasks): single-node
-    ///   Apple container has no swarm; the routes exist for CLI compat.
+    /// - swarm family (configs/nodes/services/swarm/tasks, plus the secrets
+    ///   update route): single-node Apple container has no swarm; the routes
+    ///   exist for CLI compat. (The other /secrets routes are live over the
+    ///   local SecretStore — see SecretsRoute.)
     /// - plugins family: podman/docker plugin system is out of scope.
     ///
     /// Adding an entry requires a reason here; implementing a route requires

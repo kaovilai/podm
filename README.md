@@ -317,7 +317,7 @@ gives you; the point is nothing above it stays resident.
      overwritten on the next run. Regenerate locally with:
      swift build && .build/debug/podmd --docgen /tmp/podm-docs -->
 
-183 routes registered (141 supported, 42 deliberately not
+184 routes registered (145 supported, 39 deliberately not
 implemented — every gap carries its reason and its tracking context in
 [RouteSupportManifest.swift](Sources/podmd/Utilities/RouteSupportManifest.swift)).
 Full, searchable version: **[podm route coverage site](https://github.tig.pw/podm/)**.
@@ -399,10 +399,11 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | 🚫 | `POST` | `/plugins/{name}/push` | docker | The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility. |
 | 🚫 | `POST` | `/plugins/{name}/set` | docker | The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility. |
 | 🚫 | `POST` | `/plugins/{name}/upgrade` | docker | The docker plugin system is out of scope; the route answers not-implemented for CLI compatibility. |
-| 🚫 | `GET` | `/secrets` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `POST` | `/secrets/create` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `GET` | `/secrets/{id}` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
-| 🚫 | `POST` | `/secrets/{id}/update` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
+| ✅ | `GET` | `/secrets` | docker |  |
+| ✅ | `POST` | `/secrets/create` | docker |  |
+| ✅ | `DELETE` | `/secrets/{id}` | docker |  |
+| ✅ | `GET` | `/secrets/{id}` | docker |  |
+| 🚫 | `POST` | `/secrets/{id}/update` | docker | A local file-backed secret store cannot update in place (podman's compat route answers 501 too); the route exists for CLI compatibility. |
 | 🚫 | `GET` | `/services` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
 | 🚫 | `POST` | `/services/create` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |
 | 🚫 | `GET` | `/services/{id}` | docker | Swarm object — single-node Apple container has no swarm mode; the route exists for CLI compatibility. |

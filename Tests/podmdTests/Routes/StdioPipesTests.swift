@@ -4,9 +4,14 @@ import Testing
 @testable import podmd
 
 // All fd-ownership tests share a single parent suite that is .serialized.
-// Each child suite's tests run sequentially within the parent, preventing the
-// fd-reuse race where a parallel test opens a new pipe and gets the same fd
-// number that a just-closed pipe held (causing fcntl checks to see ≥0).
+// Each child suite's tests run sequentially within the parent. That alone
+// does NOT make the closure assertions below safe: Swift Testing still runs
+// OTHER suites concurrently, and POSIX allocates the lowest free fd NUMBER —
+// between a close() under test and the fcntl that verifies it, another
+// suite's open()/pipe()/socket() can claim the just-freed number, making
+// `fcntl(fd, F_GETFD) == -1` false-fail. Every closure assertion therefore
+// uses markFd() + assertClosed() (see below), which tags the fd with
+// FD_CLOEXEC so a recycled number is distinguishable from a real leak.
 @Suite("Pipe fd ownership", .serialized)
 struct PipeFdOwnershipTests {
 
@@ -73,12 +78,12 @@ struct PipeFdOwnershipTests {
                     pipes.stdin!.read.fileDescriptor, pipes.stdin!.write.fileDescriptor,
                     pipes.stdout!.read.fileDescriptor, pipes.stdout!.write.fileDescriptor,
                     pipes.stderr!.read.fileDescriptor, pipes.stderr!.write.fileDescriptor,
-                ]
+                ].map(markFd)
                 pipes.closeAll()
                 // pipes released here — closeOnDealloc:false means deinit won't re-close
             }
             for fd in fds {
-                #expect(Darwin.fcntl(fd, F_GETFD) == -1, "fd \(fd) should be closed after closeAll()")
+                assertClosed(fd, "fd \(fd) should be closed after closeAll()")
             }
         }
 
@@ -100,18 +105,18 @@ struct PipeFdOwnershipTests {
                     return
                 }
                 stdinRead = pipes.stdin!.read.fileDescriptor
-                stdinWrite = pipes.stdin!.write.fileDescriptor
-                stdoutRead = pipes.stdout!.read.fileDescriptor
+                stdinWrite = markFd(pipes.stdin!.write.fileDescriptor)
+                stdoutRead = markFd(pipes.stdout!.read.fileDescriptor)
                 stdoutWrite = pipes.stdout!.write.fileDescriptor
-                stderrRead = pipes.stderr!.read.fileDescriptor
+                stderrRead = markFd(pipes.stderr!.read.fileDescriptor)
                 stderrWrite = pipes.stderr!.write.fileDescriptor
                 pipes.closeAfterHandoff()
             }
 
             // Caller-owned ends are closed
-            #expect(Darwin.fcntl(stdinWrite, F_GETFD) == -1, "stdin.write (caller-owned) must be closed")
-            #expect(Darwin.fcntl(stdoutRead, F_GETFD) == -1, "stdout.read (caller-owned) must be closed")
-            #expect(Darwin.fcntl(stderrRead, F_GETFD) == -1, "stderr.read (caller-owned) must be closed")
+            assertClosed(stdinWrite, "stdin.write (caller-owned) must be closed")
+            assertClosed(stdoutRead, "stdout.read (caller-owned) must be closed")
+            assertClosed(stderrRead, "stderr.read (caller-owned) must be closed")
 
             // Apple-owned ends remain open (closeAfterHandoff must not touch them)
             #expect(Darwin.fcntl(stdinRead, F_GETFD) >= 0, "stdin.read (Apple-owned) must stay open")
@@ -136,8 +141,8 @@ struct PipeFdOwnershipTests {
             callCount += 1
             guard let pipe = ProcessPipe.make() else { return nil }
             if callCount == 1 {
-                capturedRead = pipe.read.fileDescriptor
-                capturedWrite = pipe.write.fileDescriptor
+                capturedRead = markFd(pipe.read.fileDescriptor)
+                capturedWrite = markFd(pipe.write.fileDescriptor)
                 return pipe  // first allocation succeeds
             }
             // Simulate EMFILE on the second allocation; close the real pipe we made.
@@ -149,8 +154,10 @@ struct PipeFdOwnershipTests {
         #expect(result == nil, "make() must return nil when any required pipe fails")
         #expect(callCount == 2, "factory called twice: once for stdin (ok), once for stdout (fail)")
         // The guard-else block must have closed the first pipe's fds.
-        #expect(Darwin.fcntl(capturedRead, F_GETFD) == -1, "first pipe read fd must be closed by guard-else")
-        #expect(Darwin.fcntl(capturedWrite, F_GETFD) == -1, "first pipe write fd must be closed by guard-else")
+        // assertClosed (not a bare fcntl == -1): under parallel-suite load a
+        // concurrent test can recycle the freed fd NUMBER before this runs.
+        assertClosed(capturedRead, "first pipe read fd must be closed by guard-else")
+        assertClosed(capturedWrite, "first pipe write fd must be closed by guard-else")
     }
 
     // MARK: - collectOutput
@@ -293,8 +300,8 @@ struct PipeFdOwnershipTests {
 
             let byte: [UInt8] = [0x42]
             _ = Darwin.write(writeFd, byte, 1)
-            Darwin.close(writeFd)
-            #expect(Darwin.fcntl(writeFd, F_GETFD) == -1, "write fd should be closed")
+            Darwin.close(markFd(writeFd))
+            assertClosed(writeFd, "write fd should be closed")
 
             let readHandle = FileHandle(fileDescriptor: readFd, closeOnDealloc: false)
             let data = try readHandle.readToEnd()
@@ -306,3 +313,41 @@ struct PipeFdOwnershipTests {
     }
 
 }  // end PipeFdOwnershipTests
+
+// MARK: - Recycle-tolerant fd-closure assertions
+
+/// Tags `fd` with FD_CLOEXEC so `assertClosed` can tell "our fd, never
+/// closed" apart from "number recycled by a concurrent test". FD_CLOEXEC is
+/// the marker of choice because the fds under test come from plain
+/// `pipe(2)` (fd flags 0): a fresh fd opened elsewhere in the process does
+/// not carry it.
+@discardableResult
+private func markFd(_ fd: Int32) -> Int32 {
+    _ = Darwin.fcntl(fd, F_SETFD, FD_CLOEXEC)
+    return fd
+}
+
+/// fd-closure assertion that tolerates fd-NUMBER recycling under parallel
+/// test load.
+///
+/// Mechanism: POSIX hands out the LOWEST free fd number, and Swift Testing
+/// runs other suites concurrently with this one — between the close() under
+/// test and this fcntl, another suite's open()/pipe()/socket() can claim the
+/// just-freed NUMBER, so a bare `fcntl(fd, F_GETFD) == -1` false-fails even
+/// though the close happened (the CI flake; the parent suite's .serialized
+/// cannot prevent it, since the recycler lives in a DIFFERENT suite). The
+/// FD_CLOEXEC marker set by `markFd` before the close disambiguates:
+///
+///   - closed, not recycled → fcntl == -1 → pass
+///   - closed, recycled → fresh fd without the marker → pass
+///   - NOT closed (real bug) → marker still set → fail
+///
+/// Only a recycler that itself sets FD_CLOEXEC on its fresh fd could still
+/// false-fail; nothing else in this test target does.
+private func assertClosed(_ fd: Int32, _ message: @autoclosure () -> String = "") {
+    let flags = Darwin.fcntl(fd, F_GETFD)
+    #expect(
+        flags == -1 || (flags & FD_CLOEXEC) == 0,
+        "\(message()) fd \(fd) must be closed — fcntl flags \(flags): nonnegative WITH FD_CLOEXEC means the fd was never closed; nonnegative WITHOUT it means the number was recycled by a concurrent test"
+    )
+}

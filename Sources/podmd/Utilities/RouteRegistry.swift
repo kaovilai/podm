@@ -175,11 +175,9 @@ enum RouteRegistry {
         try app.register(collection: TasksIdRoute())
         try app.register(collection: TasksRoute())
 
-        // --- Swarm secret routes ---
-        try app.register(collection: SecretsCreateRoute())
-        try app.register(collection: SecretsIdRoute())
-        try app.register(collection: SecretsIdUpdateRoute())
-        try app.register(collection: SecretsRoute())
+        // --- docker-dialect secret routes (compat /secrets, moby swarm shapes
+        // over the same local SecretStore the libpod family uses) ---
+        try app.register(collection: SecretsRoute(store: secretStore))
 
         // --- swarm config routes ---
         try app.register(collection: ConfigsCreateRoute())
