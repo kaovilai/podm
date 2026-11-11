@@ -170,7 +170,7 @@ struct ContainerRenameRouteTests {
                 // full Docker id of the container that holds it.
                 #expect(
                     body.reason
-                        == "Conflict. The container name \"/\(first.id)\" is already in use by container \"\(firstHex)\". You have to remove (or rename) that container to be able to reuse that name."
+                        == "Error when allocating new name: Conflict. The container name \"/\(first.id)\" is already in use by container \"\(firstHex)\". You have to remove (or rename) that container to be able to reuse that name."
                 )
             }
         }
@@ -194,7 +194,7 @@ struct ContainerRenameRouteTests {
                 let body = try res.content.decode(RenameErrorBody.self)
                 #expect(
                     body.reason
-                        == "Conflict. The container name \"/\(first.id)-renamed\" is already in use by container \"\(firstHex)\". You have to remove (or rename) that container to be able to reuse that name."
+                        == "Error when allocating new name: Conflict. The container name \"/\(first.id)-renamed\" is already in use by container \"\(firstHex)\". You have to remove (or rename) that container to be able to reuse that name."
                 )
             }
             // The shadowed native id is still resolvable, so it stays reserved
@@ -235,8 +235,9 @@ struct ContainerRenameRouteTests {
         #expect(event?.Actor.ID == hexId)
         #expect(event?.Actor.Attributes["name"] == "\(id)-renamed")
         // moby's attribute key is "oldName" (daemon/rename.go
-        // LogContainerEventWithAttributes), not snake_case.
-        #expect(event?.Actor.Attributes["oldName"] == id)
+        // LogContainerEventWithAttributes), not snake_case — and the value
+        // carries the name registry's leading slash: "/<name>".
+        #expect(event?.Actor.Attributes["oldName"] == "/\(id)")
     }
 
     @Test("a running container's DNS alias swaps from the old name to the new one")

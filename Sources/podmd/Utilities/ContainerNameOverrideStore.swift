@@ -95,15 +95,31 @@ actor ContainerNameOverrideStore {
     /// stale old name in its event or leave an abandoned DNS alias. One
     /// non-suspending actor operation — none of these checks can interleave
     /// with a concurrent claim.
-    func claim(hexId: String, name: String, expectedOverride: String?, reserved: Set<String>) -> Bool {
-        if reserved.contains(name) { return false }
-        if overrides.values.contains(name) { return false }
-        if pendingCreates.contains(name) { return false }
-        if overrides[hexId] != expectedOverride { return false }
-        if tombstones.contains(hexId) { return false }
+    ///
+    /// The failure carries the name's owner WHEN THE ACTOR CAN SEE IT — a
+    /// live override holding the name — resolved atomically with the check:
+    /// a separate owner snapshot taken before the claim can race a
+    /// concurrent winner (two renames snapshotting a free name both see no
+    /// owner; the loser must still be able to quote the winner).
+    func claim(hexId: String, name: String, expectedOverride: String?, reserved: Set<String>) -> ClaimOutcome {
+        if reserved.contains(name) { return .conflict(owner: nil) }
+        if overrides.values.contains(name) {
+            return .conflict(owner: overrides.first(where: { $0.value == name })?.key)
+        }
+        if pendingCreates.contains(name) { return .conflict(owner: nil) }
+        if overrides[hexId] != expectedOverride { return .conflict(owner: nil) }
+        if tombstones.contains(hexId) { return .conflict(owner: nil) }
         overrides[hexId] = name
         persist()
-        return true
+        return .claimed
+    }
+
+    /// The result of a `claim`: `.claimed` on success; `.conflict` on every
+    /// failure, with the owning container's hex id when the actor observed
+    /// one (see `claim`).
+    enum ClaimOutcome: Equatable {
+        case claimed
+        case conflict(owner: String?)
     }
 
     /// A copy of every recorded override (hexId → name) for batch lookups —

@@ -101,25 +101,31 @@ struct ContainerRenameRoute: RouteCollection {
                     conflictOwners[otherOverride] = otherHexId
                 }
             }
-            guard
-                await ContainerNameOverrideStore.shared.claim(
-                    hexId: hexId, name: newName, expectedOverride: currentOverride, reserved: reserved)
-            else {
-                // The owner is unknown only when no live container holds the
-                // name (an in-flight create reservation, or a concurrent
-                // rename of this same container won the compare-and-swap) —
-                // moby has no equivalent case to quote.
-                if let ownerId = conflictOwners[newName] {
+            let claimOutcome = await ContainerNameOverrideStore.shared.claim(
+                hexId: hexId, name: newName, expectedOverride: currentOverride, reserved: reserved)
+            guard case .claimed = claimOutcome else {
+                // moby wraps the conflict (daemon/rename.go): "Error when
+                // allocating new name: %w". The owner comes ATOMICALLY from
+                // the rejected claim when the actor saw a live override —
+                // a pre-claim owner snapshot can race a concurrent winner
+                // (two renames to a free name both see no owner; the loser
+                // must still quote the winner's id).
+                let atomicOwner: String?
+                if case .conflict(let owner) = claimOutcome { atomicOwner = owner } else { atomicOwner = nil }
+                // The fallback mapping is built from the container list —
+                // valid for native/hex ids (they never move) and for owners
+                // that held the name before this request started.
+                if let ownerId = atomicOwner ?? conflictOwners[newName] {
                     throw Abort(
                         .conflict,
                         reason:
-                            "Conflict. The container name \"/\(newName)\" is already in use by container \"\(ownerId)\". You have to remove (or rename) that container to be able to reuse that name."
+                            "Error when allocating new name: Conflict. The container name \"/\(newName)\" is already in use by container \"\(ownerId)\". You have to remove (or rename) that container to be able to reuse that name."
                     )
                 }
                 throw Abort(
                     .conflict,
                     reason:
-                        "name is already in use: \(newName)"
+                        "Error when allocating new name: name is already in use: \(newName)"
                 )
             }
             // Swap the container's DNS hostname alias while it runs so peers
@@ -169,8 +175,9 @@ struct ContainerRenameRoute: RouteCollection {
                         labels: LabelNormalization.restore(container.configuration.labels),
                         // moby's rename event carries the old name under the
                         // "oldName" attribute key (daemon/rename.go
-                        // LogContainerEventWithAttributes).
-                        extraAttributes: ["oldName": currentName]
+                        // LogContainerEventWithAttributes), WITH the name
+                        // registry's leading slash: "/web", not "web".
+                        extraAttributes: ["oldName": "/" + currentName]
                     ))
             }
             // moby answers 204 No Content on a successful rename.
