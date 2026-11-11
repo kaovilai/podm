@@ -80,10 +80,22 @@ extension ContainerLogsRoute {
                 : ContainerLogJournal.Contents()
             // `until` in the past bounds the response: backlog only, no stream.
             let followActive = follow && (until == nil || until! > ContainerLogJournal.currentUnixNano())
+            // The container's request-start status bounds the backlog scan:
+            // a stopped container's log can never grow again, a running
+            // one's may (see `backlogScanBounds`).
+            let containerRunning = container.status == .running
+            let scanBounds = ContainerLogsRoute.backlogScanBounds(
+                followActive: followActive, containerRunning: containerRunning)
 
             let body = Response.Body.idleTracked(stream: { writer in
                 Task.detached {
                     var buffer = Data()
+                    // An oversized line still open at a read boundary — its
+                    // head fragment was already emitted (or window-dropped)
+                    // with a fixed time and decision. Later fragments
+                    // continue it across follow batches and final flushing
+                    // instead of being restamped as fresh lines.
+                    var openLine: ContainerLogsRoute.WindowedOpenLine?
 
                     // Flushes any trailing line left in `buffer` with no terminating
                     // newline yet, then closes out the response. Only call this once
@@ -95,6 +107,7 @@ extension ContainerLogsRoute {
                     func finish() {
                         ContainerLogsRoute.flushFinalLogLine(
                             buffer, ttyMode: isTTY, timestamps: timestamps, since: since, until: until,
+                            openLine: openLine,
                             emitWithoutTimestamps: windowed
                         ) { outputBuffer in
                             _ = writer.write(.buffer(outputBuffer))
@@ -111,7 +124,7 @@ extension ContainerLogsRoute {
                                 finish()
                                 return
                             }
-                            buffer = try await ContainerLogsRoute.scanWindowedBacklog(
+                            let handoff = try await ContainerLogsRoute.scanWindowedBacklog(
                                 read: { try fileHandle.read(upToCount: 4096) },
                                 journal: bootJournal,
                                 since: since,
@@ -120,12 +133,15 @@ extension ContainerLogsRoute {
                                 ttyMode: isTTY,
                                 timestamps: timestamps,
                                 nowNanos: { ContainerLogJournal.currentUnixNano() },
-                                streamEnded: !followActive
+                                streamEnded: scanBounds.streamEnded,
+                                maxScanBytes: scanBounds.maxScanBytes
                             ) { frame in
                                 // Await each write so a client disconnect aborts the
                                 // response instead of queueing the whole window.
                                 try await writer.write(.buffer(frame)).get()
                             }
+                            buffer = handoff.pending
+                            openLine = handoff.openLine
                         } else if let tail {
                             // tail=0 without follow returns an empty backlog; skip
                             // reading the log at all. With follow the read-through
@@ -202,7 +218,8 @@ extension ContainerLogsRoute {
                                     until: until,
                                     ttyMode: isTTY,
                                     timestamps: timestamps,
-                                    nowNanos: { ContainerLogJournal.currentUnixNano() })
+                                    nowNanos: { ContainerLogJournal.currentUnixNano() },
+                                    openLine: &openLine)
                             } catch {
                                 break
                             }
@@ -509,6 +526,68 @@ extension ContainerLogsRoute {
         }
     }
 
+    /// Backlog-scan boundaries for a windowed logs request, derived from
+    /// whether follow is active and whether the container was running when
+    /// the request arrived.
+    ///
+    /// Without follow the scan must read to EOF — the response is the whole
+    /// backlog — so EOF is always final. With follow on a STOPPED container
+    /// the log can never grow again either: EOF is final too, so the scanner
+    /// counts the trailing partial line toward `tail` (moby's `logs -f` on a
+    /// stopped container prints the backlog, final partial line included,
+    /// then exits) instead of holding it back for a follow loop that can
+    /// only confirm what the request-start status already knew — holding it
+    /// back mis-selected the tail: `a\nb` with `tail=1` returned both lines.
+    ///
+    /// With follow on a RUNNING container the scan is byte-bounded: a log
+    /// growing faster than it is scanned would otherwise keep the backlog
+    /// pass reading — with `tail` set, emitting nothing — indefinitely, out
+    /// of reach of the follow loop's `until` deadline and client-disconnect
+    /// checks. At the budget the scan yields to the follow loop, which
+    /// continues the stream deadline- and disconnect-aware in bounded
+    /// batches. (Lines read past the budget are stamped with arrival time
+    /// rather than journal time; the budget is twice the journal's cap, so
+    /// every journal-covered line — the only ones with recorded write
+    /// times — still completes inside the scan.)
+    static func backlogScanBounds(
+        followActive: Bool, containerRunning: Bool
+    ) -> (streamEnded: Bool, maxScanBytes: Int?) {
+        guard followActive, containerRunning else { return (true, nil) }
+        return (false, ContainerLogsRoute.backlogScanMaxBytes)
+    }
+
+    /// The windowed backlog scan yields to the follow loop after at most
+    /// this much input — twice the journal's byte cap, so the whole
+    /// journal-covered portion of the backlog (the only portion with
+    /// recorded write times) still completes inside the scan.
+    static let backlogScanMaxBytes = 2 * ContainerLogJournal.maxJournalBytes
+
+    /// A logical line still open at a read boundary: an oversized line whose
+    /// head fragment was already emitted (or window-dropped). Its write time
+    /// and window decision were fixed at the first fragment, so every later
+    /// fragment — across follow batches, the backlog-to-follow handoff, and
+    /// final flushing — continues that decision instead of being restamped
+    /// and re-windowed as a fresh line (which spliced extra timestamp
+    /// prefixes into the middle of the line, or emitted a window-dropped
+    /// line's terminating fragment once `since` had passed).
+    struct WindowedOpenLine {
+        /// The line's write time, fixed at its first fragment.
+        let unixNano: UInt64
+        /// Whether the line passed the since/until window: in-window
+        /// continuations are emitted verbatim (any timestamp prefix went out
+        /// with the head fragment); out-of-window ones are dropped.
+        let inWindow: Bool
+    }
+
+    /// What `scanWindowedBacklog` hands onward to a follow loop: the
+    /// trailing partial line, plus its open-line state when those bytes
+    /// continue an oversized line whose head fragment was already emitted
+    /// or window-dropped.
+    struct BacklogHandoff {
+        var pending: Data
+        var openLine: WindowedOpenLine?
+    }
+
     /// Reads the Apple log stream through once, resolving each complete line's
     /// write time from the journal (falling back to read time for lines the
     /// journal does not cover), applying the `since`/`until` window, and
@@ -537,7 +616,14 @@ extension ContainerLogsRoute {
     /// through the same window check, counts toward the `tail` limit (moby's
     /// tail counts an unterminated final line, like `lastLines` does) and is
     /// emitted with the ring, stamped with read time. It can never be
-    /// journal-covered (the journal records only complete lines).
+    /// journal-covered (the journal records only complete lines). When the
+    /// partial line continues a spilled oversized line, the handoff also
+    /// carries that line's fixed state (see `WindowedOpenLine`) so the follow
+    /// reader does not restamp its remaining fragments.
+    ///
+    /// `maxScanBytes` bounds how much input one scan consumes before
+    /// yielding; it requires a follow loop to continue the stream, so it must
+    /// only be set together with `streamEnded == false`.
     static func scanWindowedBacklog(
         read: () throws -> Data?,
         journal: ContainerLogJournal.Contents,
@@ -548,8 +634,9 @@ extension ContainerLogsRoute {
         timestamps: Bool,
         nowNanos: () -> UInt64,
         streamEnded: Bool = false,
+        maxScanBytes: Int? = nil,
         emit: (ByteBuffer) async throws -> Void
-    ) async throws -> Data {
+    ) async throws -> BacklogHandoff {
         var alignment = ContainerLogJournal.Alignment(entries: journal.entries, droppedLines: journal.droppedLines)
         var ring = tail.map { WindowTailRing(limit: $0) }
         defer { ring?.cleanUp() }
@@ -574,12 +661,21 @@ extension ContainerLogsRoute {
             if ring != nil {
                 try ring?.append(line, unixNano: unixNano, position: position)
             } else {
-                try await emit(stampedFrame(line, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
+                // Only the FIRST fragment of a spilled line carries the
+                // timestamp prefix — continuations are emitted verbatim, or
+                // the frames would splice extra prefixes into the middle of
+                // the line (the ring's emit applies the same rule).
+                try await emit(
+                    stampedFrame(
+                        line, unixNano: unixNano, ttyMode: ttyMode,
+                        timestamps: timestamps && position != .spillContinuation))
             }
         }
 
+        var scannedBytes = 0
         while let chunk = try read(), !chunk.isEmpty {
             pending.append(chunk)
+            scannedBytes += chunk.count
             while let newline = pending.firstIndex(of: 0x0A) {
                 let line = pending.subdata(in: pending.startIndex..<pending.index(after: newline))
                 pending = pending.subdata(in: pending.index(after: newline)..<pending.endIndex)
@@ -622,6 +718,11 @@ extension ContainerLogsRoute {
                 }
                 pending.removeAll(keepingCapacity: true)
             }
+            // Bound the backlog pass when a follow loop will continue the
+            // stream: a log growing faster than it is scanned must not keep
+            // this scan reading indefinitely, out of reach of the follow
+            // loop's deadline and disconnect checks.
+            if let maxScanBytes, !streamEnded, scannedBytes >= maxScanBytes { break }
         }
         if streamEnded, !pending.isEmpty {
             // The stream genuinely ends here: the unterminated trailing line is
@@ -639,7 +740,15 @@ extension ContainerLogsRoute {
         if ring != nil {
             try await ring?.emit(ttyMode: ttyMode, timestamps: timestamps, emit: emit)
         }
-        return pending
+        // A spilled line still open at a read gap (or at the scan budget)
+        // continues into the follow loop with its fixed time and decision.
+        if inOversizedLine, !streamEnded {
+            let nano = oversizedLineNano ?? nowNanos()
+            let dropped = (since.map { nano < $0 } ?? false) || (until.map { nano > $0 } ?? false)
+            return BacklogHandoff(
+                pending: pending, openLine: WindowedOpenLine(unixNano: nano, inWindow: !dropped))
+        }
+        return BacklogHandoff(pending: pending, openLine: nil)
     }
 
     /// One follow batch reads at most this many bytes before returning, so the
@@ -657,11 +766,15 @@ extension ContainerLogsRoute {
     /// must still emit the accepted frames — dropping them would lose
     /// in-window output that already passed the window check), and whether any
     /// bytes were read. `buffer` carries the trailing partial line across
-    /// passes.
+    /// passes, and `openLine` carries the state of an oversized line still
+    /// open across a pass boundary (see `WindowedOpenLine`) so its later
+    /// fragments keep the line's fixed time, window decision and prefix
+    /// state instead of being restamped as fresh lines.
     ///
     /// An unterminated line is spilled at
     /// `ContainerLogFollower.maxPendingLineBytes` — the accumulated bytes are
-    /// emitted instead of buffered — and the batch yields after
+    /// emitted instead of buffered, FIXING the line's time and window
+    /// decision at that first fragment — and the batch yields after
     /// `followBatchMaxBytes` of input even when the stream still has data, so
     /// neither memory nor output latency can grow without bound while
     /// following a noisy container.
@@ -672,7 +785,8 @@ extension ContainerLogsRoute {
         until: UInt64?,
         ttyMode: Bool,
         timestamps: Bool,
-        nowNanos: () -> UInt64
+        nowNanos: () -> UInt64,
+        openLine: inout WindowedOpenLine?
     ) rethrows -> (frames: [ByteBuffer], reachedUntil: Bool, gotData: Bool) {
         var frames: [ByteBuffer] = []
         var gotData = false
@@ -685,6 +799,16 @@ extension ContainerLogsRoute {
             while let newline = buffer.firstIndex(of: 0x0A) {
                 let line = buffer.subdata(in: buffer.startIndex..<buffer.index(after: newline))
                 buffer = buffer.subdata(in: buffer.index(after: newline)..<buffer.endIndex)
+                if let open = openLine {
+                    // Terminating fragment of an open spilled line: keep the
+                    // line's fixed window decision and prefix state — verbatim
+                    // if its head was emitted, dropped if it was not.
+                    openLine = nil
+                    if open.inWindow {
+                        frames.append(stampedFrame(line, unixNano: open.unixNano, ttyMode: ttyMode, timestamps: false))
+                    }
+                    continue
+                }
                 let unixNano = nowNanos()
                 if let since, unixNano < since { continue }
                 if let until, unixNano > until {
@@ -694,18 +818,31 @@ extension ContainerLogsRoute {
                 frames.append(stampedFrame(line, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
             }
             if buffer.count > ContainerLogFollower.maxPendingLineBytes {
-                // Spill the head of an unterminated line at the bound: emit
-                // the accumulated bytes (preserving the requested output)
-                // instead of buffering a newline-free stream without limit.
-                let unixNano = nowNanos()
-                if let since, unixNano < since {
+                if let open = openLine {
+                    // Continuation fragment of an open line: its decision is
+                    // already fixed — emit verbatim or drop, never restamp.
+                    if open.inWindow {
+                        frames.append(stampedFrame(buffer, unixNano: open.unixNano, ttyMode: ttyMode, timestamps: false))
+                    }
                     buffer.removeAll(keepingCapacity: true)
-                } else if let until, unixNano > until {
-                    reachedUntil = true
-                    break
                 } else {
-                    frames.append(stampedFrame(buffer, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
-                    buffer.removeAll(keepingCapacity: true)
+                    // Spill the head of an unterminated line at the bound:
+                    // emit the accumulated bytes (preserving the requested
+                    // output) instead of buffering a newline-free stream
+                    // without limit — and FIX the line's time, window
+                    // decision and prefix state for its later fragments.
+                    let unixNano = nowNanos()
+                    if let since, unixNano < since {
+                        openLine = WindowedOpenLine(unixNano: unixNano, inWindow: false)
+                        buffer.removeAll(keepingCapacity: true)
+                    } else if let until, unixNano > until {
+                        reachedUntil = true
+                        break
+                    } else {
+                        frames.append(stampedFrame(buffer, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
+                        openLine = WindowedOpenLine(unixNano: unixNano, inWindow: true)
+                        buffer.removeAll(keepingCapacity: true)
+                    }
                 }
             }
             // Yield after a bounded amount of input so the caller can write
@@ -731,6 +868,12 @@ extension ContainerLogsRoute {
     /// complete lines), so it is stamped with the flush time and must still pass
     /// the since/until window, if any.
     ///
+    /// When the trailing bytes continue an oversized line whose head fragment
+    /// was already emitted (or window-dropped), `openLine` carries that
+    /// line's fixed state: the fragment is flushed verbatim under the line's
+    /// own decision — a new prefix or a flush-time re-windowing would splice
+    /// a second timestamp into the line or resurrect a dropped one.
+    ///
     /// In the plain (non-windowed) path, an unstamped trailing line was already
     /// emitted inline by `processDockerLogFrames`, so flushing there would
     /// double-emit — hence `emitWithoutTimestamps` is only set by the windowed
@@ -741,11 +884,18 @@ extension ContainerLogsRoute {
         timestamps: Bool,
         since: UInt64? = nil,
         until: UInt64? = nil,
+        openLine: WindowedOpenLine? = nil,
         nowNanos: () -> UInt64 = { ContainerLogJournal.currentUnixNano() },
         emitWithoutTimestamps: Bool = false,
         writeOutput: (ByteBuffer) -> Void
     ) {
         guard !buffer.isEmpty, timestamps || emitWithoutTimestamps else { return }
+        if let open = openLine {
+            if open.inWindow {
+                emitFrame(buffer, ttyMode: ttyMode, writeOutput: writeOutput)
+            }
+            return
+        }
         let unixNano = nowNanos()
         if let since, unixNano < since { return }
         if let until, unixNano > until { return }

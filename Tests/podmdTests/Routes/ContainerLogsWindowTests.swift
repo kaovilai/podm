@@ -39,7 +39,7 @@ struct ContainerLogsWindowTests {
         let bytes = Array(stream.utf8)
         var offset = 0
         var payloads: [String] = []
-        let remainder = try await ContainerLogsRoute.scanWindowedBacklog(
+        let handoff = try await ContainerLogsRoute.scanWindowedBacklog(
             read: {
                 guard offset < bytes.count else { return nil }
                 let next = min(offset + 3, bytes.count)  // tiny chunks split lines mid-way
@@ -60,7 +60,7 @@ struct ContainerLogsWindowTests {
             let payload = frame.readData(length: frame.readableBytes)!
             payloads.append(String(decoding: payload, as: UTF8.self))
         }
-        return (payloads, remainder)
+        return (payloads, handoff.pending)
     }
 
     @Test("since drops lines written before it, using journal timestamps")
@@ -180,6 +180,7 @@ struct ContainerLogsWindowTests {
         let bytes = Array("keep\npast\n".utf8)
         var offset = 0
         var buffer = Data()
+        var openLine: ContainerLogsRoute.WindowedOpenLine?
         var nowValues: [UInt64] = [300, 600]
         let (frames, reachedUntil, gotData) = ContainerLogsRoute.readWindowedFollowBatch(
             from: &buffer,
@@ -192,7 +193,8 @@ struct ContainerLogsWindowTests {
             until: 500,
             ttyMode: true,
             timestamps: false,
-            nowNanos: { nowValues.removeFirst() }
+            nowNanos: { nowValues.removeFirst() },
+            openLine: &openLine
         )
         #expect(gotData)
         #expect(reachedUntil, "the line past until must end the follow")
@@ -285,7 +287,7 @@ struct ContainerLogsWindowTests {
 
         var offset = 0
         var payloads: [Data] = []
-        let remainder = try await ContainerLogsRoute.scanWindowedBacklog(
+        let handoff = try await ContainerLogsRoute.scanWindowedBacklog(
             read: {
                 guard offset < stream.count else { return nil }
                 let next = min(offset + 4096, stream.count)
@@ -312,7 +314,7 @@ struct ContainerLogsWindowTests {
         #expect(payloads.count >= 3, "the oversized line is split across frames, not buffered whole")
         #expect(payloads.last == Data("after\n".utf8))
         #expect(payloads[0].last != 0x0A, "the first spilled fragment is an unterminated line head")
-        #expect(remainder.isEmpty)
+        #expect(handoff.pending.isEmpty)
     }
 
     /// The journal records an oversized line as a gap marker, never its
@@ -507,6 +509,7 @@ struct ContainerLogsWindowTests {
         // can: the batch must spill what crosses the bound, not buffer it.
         var delivered = false
         var buffer = Data()
+        var openLine: ContainerLogsRoute.WindowedOpenLine?
         let (frames, reachedUntil, gotData) = ContainerLogsRoute.readWindowedFollowBatch(
             from: &buffer,
             read: {
@@ -518,7 +521,8 @@ struct ContainerLogsWindowTests {
             until: nil,
             ttyMode: true,
             timestamps: false,
-            nowNanos: { 999 }
+            nowNanos: { 999 },
+            openLine: &openLine
         )
         #expect(gotData)
         #expect(!reachedUntil)
@@ -536,6 +540,7 @@ struct ContainerLogsWindowTests {
         let chunk = Data(String(repeating: "line\n", count: 819).utf8)  // ~4 KiB per read
         var reads = 0
         var buffer = Data()
+        var openLine: ContainerLogsRoute.WindowedOpenLine?
         let (frames, reachedUntil, gotData) = ContainerLogsRoute.readWindowedFollowBatch(
             from: &buffer,
             read: {
@@ -546,13 +551,288 @@ struct ContainerLogsWindowTests {
             until: nil,
             ttyMode: true,
             timestamps: false,
-            nowNanos: { 999 }
+            nowNanos: { 999 },
+            openLine: &openLine
         )
         #expect(gotData, "data was available")
         #expect(!reachedUntil)
         #expect(!frames.isEmpty)
         let maxReads = ContainerLogsRoute.followBatchMaxBytes / chunk.count + 2
         #expect(reads <= maxReads, "the batch must stop reading after a bounded amount of input")
+    }
+
+    // MARK: - Backlog scan bounds (review round 4)
+
+    /// follow=1 on a container that is already stopped: its log can never
+    /// grow again, so the backlog scanner must treat EOF as the log's
+    /// genuine end and count the trailing partial line toward `tail` — the
+    /// follow loop only confirms what the request-start status knew, and
+    /// holding the final partial line back mis-selected the tail (`a\nb`
+    /// with tail=1 emitted both lines).
+    @Test("a stopped container's EOF is final for backlog tail selection even with follow=1")
+    func stoppedContainerBacklogEOFFinal() {
+        #expect(ContainerLogsRoute.backlogScanBounds(followActive: false, containerRunning: true).streamEnded)
+        #expect(ContainerLogsRoute.backlogScanBounds(followActive: false, containerRunning: false).streamEnded)
+
+        let running = ContainerLogsRoute.backlogScanBounds(followActive: true, containerRunning: true)
+        #expect(!running.streamEnded, "a running container's log may still grow: EOF is just a read gap")
+        #expect(running.maxScanBytes != nil, "a running container's follow backlog scan is byte-bounded")
+
+        let stopped = ContainerLogsRoute.backlogScanBounds(followActive: true, containerRunning: false)
+        #expect(stopped.streamEnded, "a stopped container's EOF is final even with follow=1")
+        #expect(stopped.maxScanBytes == nil, "a stopped container's log cannot grow: no scan budget is needed")
+    }
+
+    /// With `timestamps=1` and no `tail`, a spilled oversized line's
+    /// fragments are emitted as they cross the retention bound: only the
+    /// FIRST fragment may carry the timestamp prefix — prefixing every
+    /// fragment spliced extra timestamp strings into the middle of the
+    /// original log line.
+    @Test("timestamps prefixes a spilled oversized line once, not per fragment")
+    func timestampsPrefixOncePerSpilledLine() async throws {
+        let bound = ContainerLogFollower.maxPendingLineBytes
+        var stream = Data(repeating: 0x78, count: bound + (1 << 18))  // no newline inside
+        stream.append(Data("\nafter\n".utf8))
+
+        var offset = 0
+        var payloads: [Data] = []
+        _ = try await ContainerLogsRoute.scanWindowedBacklog(
+            read: {
+                guard offset < stream.count else { return nil }
+                let next = min(offset + 4096, stream.count)
+                defer { offset = next }
+                return stream[offset..<next]
+            },
+            journal: ContainerLogJournal.Contents(),
+            since: nil,
+            until: nil,
+            tail: nil,  // no ring: fragments emit directly as they spill
+            ttyMode: true,
+            timestamps: true,
+            nowNanos: { 1_357_133_017_000_000_000 },  // 2013-01-02T13:23:37Z
+            streamEnded: true
+        ) { frame in
+            var frame = frame
+            payloads.append(frame.readData(length: frame.readableBytes)!)
+        }
+
+        let joined = String(decoding: payloads.reduce(Data(), +), as: UTF8.self)
+        let stamps = joined.components(separatedBy: "2013-01-02T13:23:37").count - 1
+        #expect(stamps == 2, "one prefix for the spilled line and one for the following line — continuations must be verbatim, found \(stamps)")
+        #expect(payloads.count >= 3, "the oversized line is split across fragments, not buffered whole")
+    }
+
+    /// The finding-3 liveness case: follow=1&tail=0&since=0 on a log growing
+    /// faster than it is scanned. The backlog pass must stop after a bounded
+    /// amount of input and yield to the deadline- and disconnect-aware
+    /// follow loop — without the budget this scan never returns.
+    @Test("the backlog scan yields after a bounded amount of input when a follow will continue")
+    func backlogScanYieldsAtBudget() async throws {
+        let chunk = Data(String(repeating: "line\n", count: 819).utf8)  // ~4 KiB per read
+        var reads = 0
+        let budget = 64 * 1024
+        let handoff = try await ContainerLogsRoute.scanWindowedBacklog(
+            read: {
+                reads += 1
+                return chunk  // always more data: a fast writer
+            },
+            journal: ContainerLogJournal.Contents(),
+            since: 0,
+            until: nil,
+            tail: 0,  // the finding's exact shape: nothing retained, nothing emitted
+            ttyMode: true,
+            timestamps: false,
+            nowNanos: { 999 },
+            maxScanBytes: budget
+        ) { _ in
+            Issue.record("tail=0 must not emit during the scan")
+        }
+        #expect(reads <= budget / chunk.count + 2, "the scan must stop reading after a bounded amount of input")
+        #expect(handoff.openLine == nil)
+    }
+
+    // MARK: - Open spilled-line state across follow batches (review round 4)
+
+    /// A follow batch that spills the head of an oversized line BEFORE
+    /// `since` passes must keep that drop decision for the line's later
+    /// fragments: without the carried state, the terminating fragment —
+    /// arriving after `since` passed — was emitted as a fresh in-window
+    /// line.
+    @Test("a follow batch keeps a window-dropped spilled line dropped across batches")
+    func followBatchKeepsDroppedLineDropped() throws {
+        let bound = ContainerLogFollower.maxPendingLineBytes
+        let head = Data(repeating: 0x61, count: bound + 1024)
+        var buffer = Data()
+        var openLine: ContainerLogsRoute.WindowedOpenLine?
+
+        // Batch 1: the head arrives while now()=100 < since=500 — dropped.
+        var deliveredHead = false
+        let batch1 = ContainerLogsRoute.readWindowedFollowBatch(
+            from: &buffer,
+            read: {
+                guard !deliveredHead else { return nil }
+                deliveredHead = true
+                return head
+            },
+            since: 500,
+            until: nil,
+            ttyMode: true,
+            timestamps: true,
+            nowNanos: { 100 },
+            openLine: &openLine
+        )
+        #expect(batch1.frames.isEmpty, "the head written before since is dropped")
+        #expect(openLine != nil, "the line stays open with its fixed drop decision")
+
+        // Batch 2: the terminating fragment arrives after since passed — it
+        // must stay dropped, not be emitted as a fresh timestamped line.
+        var deliveredTail = false
+        let batch2 = ContainerLogsRoute.readWindowedFollowBatch(
+            from: &buffer,
+            read: {
+                guard !deliveredTail else { return nil }
+                deliveredTail = true
+                return Data("tail\n".utf8)
+            },
+            since: 500,
+            until: nil,
+            ttyMode: true,
+            timestamps: true,
+            nowNanos: { 600 },
+            openLine: &openLine
+        )
+        #expect(batch2.frames.isEmpty, "the terminating fragment keeps the head's drop decision")
+        #expect(openLine == nil, "the newline closed the line")
+    }
+
+    /// An in-window spilled line carries ONE prefix: the head fragment is
+    /// stamped, and every later fragment — across batches and the final
+    /// flush — is a verbatim continuation.
+    @Test("a follow batch keeps one prefix and one decision per spilled line, through the final flush")
+    func followBatchOpenLinePrefixContinuity() throws {
+        let bound = ContainerLogFollower.maxPendingLineBytes
+        let head = Data(repeating: 0x61, count: bound + 1024)
+        let nano: UInt64 = 1_357_133_017_000_000_000
+        var buffer = Data()
+        var openLine: ContainerLogsRoute.WindowedOpenLine?
+        var frames: [ByteBuffer] = []
+
+        // Batch 1: the head spills in-window — one stamped frame.
+        var deliveredHead = false
+        let batch1 = ContainerLogsRoute.readWindowedFollowBatch(
+            from: &buffer,
+            read: {
+                guard !deliveredHead else { return nil }
+                deliveredHead = true
+                return head
+            },
+            since: nil,
+            until: nil,
+            ttyMode: true,
+            timestamps: true,
+            nowNanos: { nano },
+            openLine: &openLine
+        )
+        frames.append(contentsOf: batch1.frames)
+        #expect(batch1.frames.count == 1, "the spilled head is one stamped frame")
+
+        // Batch 2: a continuation fragment below the bound waits in the
+        // buffer — no newline, no spill, nothing emitted.
+        var deliveredMid = false
+        let batch2 = ContainerLogsRoute.readWindowedFollowBatch(
+            from: &buffer,
+            read: {
+                guard !deliveredMid else { return nil }
+                deliveredMid = true
+                return Data("mid".utf8)
+            },
+            since: nil,
+            until: nil,
+            ttyMode: true,
+            timestamps: true,
+            nowNanos: { nano },
+            openLine: &openLine
+        )
+        #expect(batch2.frames.isEmpty)
+        #expect(buffer == Data("mid".utf8))
+
+        // The follow ends with the line still open: the final flush emits
+        // the carried fragment verbatim — no second prefix, no re-windowing.
+        var flushed: [ByteBuffer] = []
+        ContainerLogsRoute.flushFinalLogLine(
+            buffer, ttyMode: true, timestamps: true, since: nil, until: nil,
+            openLine: openLine, nowNanos: { nano }, emitWithoutTimestamps: true
+        ) { flushed.append($0) }
+        #expect(flushed.count == 1)
+
+        let joined = String(
+            decoding: (frames + flushed).reduce(Data()) { acc, frame in
+                var frame = frame
+                return acc + frame.readData(length: frame.readableBytes)!
+            }, as: UTF8.self)
+        let stamps = joined.components(separatedBy: "2013-01-02T13:23:37").count - 1
+        #expect(stamps == 1, "exactly one prefix for the whole logical line, found \(stamps)")
+        #expect(joined.hasSuffix("mid"), "the flushed fragment is a verbatim continuation")
+    }
+
+    /// The backlog-to-follow handoff: when the backlog scan ends (read gap)
+    /// in the middle of a spilled oversized line whose head was already
+    /// window-dropped, the follow reader must keep dropping the line's
+    /// remaining fragments instead of treating them as fresh lines.
+    @Test("the backlog scan hands an open spilled line's decision to the follow reader")
+    func backlogHandoffContinuesOpenLine() async throws {
+        let bound = ContainerLogFollower.maxPendingLineBytes
+        let stream = Data(repeating: 0x78, count: bound + 1024)  // head only, read gap before the newline
+        // The journal recorded the oversized line as a gap marker at 100 —
+        // before since=500, so the scanner drops the head fragments.
+        let fixture = ContainerLogJournal.Contents(
+            entries: [ContainerLogJournal.Entry.gapMarker(unixNano: 100)])
+
+        var offset = 0
+        var emitted: [Data] = []
+        let handoff = try await ContainerLogsRoute.scanWindowedBacklog(
+            read: {
+                guard offset < stream.count else { return nil }
+                let next = min(offset + 4096, stream.count)
+                defer { offset = next }
+                return stream[offset..<next]
+            },
+            journal: fixture,
+            since: 500,
+            until: nil,
+            tail: nil,
+            ttyMode: true,
+            timestamps: true,
+            nowNanos: { 999 },
+            streamEnded: false  // a follow loop will continue the stream
+        ) { frame in
+            var frame = frame
+            emitted.append(frame.readData(length: frame.readableBytes)!)
+        }
+        #expect(emitted.isEmpty, "the pre-since head fragments are dropped")
+        #expect(handoff.openLine?.inWindow == false, "the open line's drop decision is handed off")
+
+        // The terminating fragment arrives in the follow phase, after since
+        // passed (now=600): it must keep the line's fixed drop decision.
+        var buffer = handoff.pending
+        var openLine = handoff.openLine
+        var delivered = false
+        let batch = ContainerLogsRoute.readWindowedFollowBatch(
+            from: &buffer,
+            read: {
+                guard !delivered else { return nil }
+                delivered = true
+                return Data("tail\n".utf8)
+            },
+            since: 500,
+            until: nil,
+            ttyMode: true,
+            timestamps: true,
+            nowNanos: { 600 },
+            openLine: &openLine
+        )
+        #expect(batch.frames.isEmpty, "no resurrection of the window-dropped line after since passed")
+        #expect(openLine == nil)
     }
 
     // MARK: - HTTP level

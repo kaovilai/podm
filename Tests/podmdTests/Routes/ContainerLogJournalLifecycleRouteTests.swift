@@ -20,8 +20,12 @@ import VaporTesting
 @Suite("Container log journal lifecycle (routes)", .serialized)
 struct ContainerLogJournalLifecycleRouteTests {
 
-    /// Polls `condition` until true or the timeout passes.
-    private func waitFor(_ condition: () async -> Bool, timeout: TimeInterval = 5) async -> Bool {
+    /// Polls `condition` until true or the timeout passes. The budget is
+    /// generous for the same reason the follower tests' is: CI's shared
+    /// 3-core macOS runners periodically stall the whole test process for
+    /// ~10s, and these waits observe background journaling that completes
+    /// within milliseconds once scheduled.
+    private func waitFor(_ condition: () async -> Bool, timeout: TimeInterval = 30) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if await condition() { return true }

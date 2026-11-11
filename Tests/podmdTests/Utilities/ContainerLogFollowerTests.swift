@@ -61,9 +61,17 @@ struct ContainerLogFollowerTests {
     }
 
     /// Polls `condition` until true or the timeout passes.
+    ///
+    /// The budget must survive a transiently starved cooperative pool, not
+    /// just a slow poll: CI's shared 3-core macOS runners periodically stall
+    /// the whole test process for ~10s (every test in the run, down to pure
+    /// unit tests, completes only after the stall lifts — see the round-1
+    /// live-broadcast de-flake for the same runner class). The follower
+    /// journals within milliseconds once scheduled, so a generous deadline
+    /// only ever waits out the stall; a tight one fails a correct follower.
     private func waitFor(
         _ condition: () async -> Bool,
-        timeout: TimeInterval = 5
+        timeout: TimeInterval = 30
     ) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -671,6 +679,86 @@ struct ContainerLogFollowerTests {
         client.stopContainer()
         _ = await waitFor {
             let armed = await registry.isArmed(nativeId: "heal-prefix-ctr")
+            return !armed
+        }
+    }
+
+    /// A stale journal meeting an oversized line followed by a mismatching
+    /// normal line: the heal counts the oversized line as dropped, so the
+    /// gap marker recorded for it against the stale journal must be cleared
+    /// — surviving into the replacement journal it double-counted the line's
+    /// ordinal and made the mismatching line skip as evicted, losing its
+    /// recorded timestamp.
+    @Test("a stale journal heal clears pending gap markers so an oversized line counts once")
+    func staleJournalHealClearsPendingGapMarkers() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("output.log")
+        var contents = Data(repeating: 0x78, count: ContainerLogFollower.maxPendingLineBytes + (1 << 18))
+        contents.append(Data("\ndiverges\nthird\n".utf8))
+        FileManager.default.createFile(atPath: logFile.path, contents: contents)
+        let journal = await seedJournal(
+            dir: dir, nativeId: "heal-marker-ctr",
+            entries: [
+                ContainerLogJournal.Entry(unixNano: 111, streamType: 1, bytes: Data("stale boot\n".utf8))
+            ])
+
+        let stampBefore = ContainerLogJournal.currentUnixNano()
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        await registry.arm(
+            nativeId: "heal-marker-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: false,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+
+        let journaled = await waitFor {
+            await journal.entries(nativeId: "heal-marker-ctr").map(\.bytes)
+                == [Data("diverges\n".utf8), Data("third\n".utf8)]
+        }
+        #expect(journaled)
+        let stampAfter = ContainerLogJournal.currentUnixNano()
+        let healed = await journal.contents(nativeId: "heal-marker-ctr")
+        #expect(
+            !healed.entries.contains { $0.isGapMarker },
+            "the oversized line is accounted by droppedLines alone — a surviving marker would double-count its ordinal")
+        #expect(healed.droppedLines == 1)
+
+        // End to end: windowed replay over the same stream keeps the
+        // replacement lines' timestamps — with a surviving marker,
+        // "diverges" mismatches it, alignment fails, and both lines fall
+        // back to read time 999, which since drops.
+        var offset = 0
+        var payloads: [String] = []
+        _ = try await ContainerLogsRoute.scanWindowedBacklog(
+            read: {
+                guard offset < contents.count else { return nil }
+                // 4096-byte chunks, like the route's real reads: tiny chunks
+                // make the newline-free head's rescan of `pending` quadratic
+                // (each chunk rescans the whole unterminated buffer).
+                let next = min(offset + 4096, contents.count)
+                defer { offset = next }
+                return contents[offset..<next]
+            },
+            journal: ContainerLogJournal.Contents(entries: healed.entries, droppedLines: healed.droppedLines),
+            since: stampBefore - 1,
+            until: stampAfter,
+            tail: nil,
+            ttyMode: true,
+            timestamps: false,
+            nowNanos: { 999 },
+            streamEnded: true
+        ) { frame in
+            var frame = frame
+            payloads.append(String(decoding: frame.readData(length: frame.readableBytes)!, as: UTF8.self))
+        }
+        #expect(payloads == ["diverges\n", "third\n"], "the retained suffix must stay timestamp-recoverable after the heal")
+
+        client.stopContainer()
+        _ = await waitFor {
+            let armed = await registry.isArmed(nativeId: "heal-marker-ctr")
             return !armed
         }
     }

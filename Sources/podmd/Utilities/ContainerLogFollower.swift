@@ -241,6 +241,13 @@ enum ContainerLogFollower {
             /// batch later. The lines already consumed against the stale
             /// journal are accounted as dropped, keeping the suffix aligned.
             func healStaleJournal() async {
+                // Gap markers recorded while aligning against the journal
+                // that just proved stale account lines the reset itself
+                // counts as dropped (`linesConsumedUnretained`): keeping one
+                // would count its line twice — replay would skip the line as
+                // evicted AND mismatch the next retained line against the
+                // marker, losing its recorded timestamp.
+                fresh.removeAll { $0.isGapMarker }
                 await journal.beginBoot(nativeId: nativeId, epoch: epoch, droppedLines: linesConsumedUnretained)
                 alignment = ContainerLogJournal.Alignment(entries: [])
                 linesConsumedUnretained = 0
