@@ -39,6 +39,23 @@ struct StatusCommand: ParsableCommand {
             print("apple containers: `container` CLI not found")
         }
 
+        // The podman-side remote registration (issue #47). The locator
+        // skips the shim itself, so this finds the real CLI — or nothing.
+        if let podmanPath = CLILocator.locate(cli: "podman", skippingRealPath: ShimLocator.selfRealPath) {
+            // Three states: the lookup itself can fail (nil), which must not
+            // read as a confident "not registered".
+            switch PodmanConnectionRegistrar.isRegistered(podmanPath: podmanPath) {
+            case .some(true):
+                print("podman connection: '\(PodmanConnectionRegistrar.connectionName)' registered")
+            case .some(false):
+                print("podman connection: not registered (run: podm install)")
+            case .none:
+                print("podman connection: unknown (podman system connection list failed)")
+            }
+        } else {
+            print("podman connection: unknown (real podman CLI not found)")
+        }
+
         if !healthy {
             throw ExitCode(1)
         }

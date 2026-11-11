@@ -71,6 +71,15 @@ let package = Package(
                 .product(name: "VaporTesting", package: "vapor"),
             ],
         ),
+        // Unit tests for the podm client shim. SwiftPM compiles the
+        // executable's sources (minus main.swift's top-level dispatch) as
+        // an importable module for testing.
+        .testTarget(
+            name: "podmTests",
+            dependencies: [
+                .target(name: "podm")
+            ],
+        ),
         .target(
             name: "BuildInfo",
             dependencies: [],

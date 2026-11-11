@@ -32,7 +32,46 @@ struct UninstallCommand: ParsableCommand {
             }
         }
 
-        // 3. Report what deliberately stays behind.
+        // 3. Zsh completion, from either install location.
+        let removedCompletions = CompletionInstaller.uninstallZsh(
+            userCompletionsDir: PodmPaths.zshCompletionsDir,
+            fallbackDir: PodmPaths.completionsFallbackDir)
+        for path in removedCompletions {
+            print("Removed zsh completion: \(path.path)")
+        }
+
+        // 4. Podman connection (issue #47). Uses the recorded real CLI;
+        //    without it there is nothing registered to remove. The result is
+        //    checked — a failed removal must not print success while the
+        //    connection stays behind.
+        // The recorded CLI first, then a fresh PATH/record lookup — the
+        // recorded binary may have moved since install. When registration
+        // can only be checked through podman and that check itself fails,
+        // say so instead of silently skipping: an unremoved connection
+        // silently outlives the uninstall.
+        let podmanPath =
+            ClientPaths.read()["podman"]
+            ?? CLILocator.locate(cli: "podman", skippingRealPath: ShimLocator.selfRealPath)
+        if let podmanPath {
+            switch PodmanConnectionRegistrar.isRegistered(podmanPath: podmanPath) {
+            case .some(true):
+                if PodmanConnectionRegistrar.unregister(podmanPath: podmanPath) {
+                    print("Removed podman connection '\(PodmanConnectionRegistrar.connectionName)'")
+                } else {
+                    print(
+                        "warning: could not remove the '\(PodmanConnectionRegistrar.connectionName)' podman connection (podman CLI failed; remove it with: podman system connection remove \(PodmanConnectionRegistrar.connectionName))"
+                    )
+                }
+            case .some(false):
+                break  // nothing registered — nothing to do
+            case .none:
+                print(
+                    "warning: could not verify the '\(PodmanConnectionRegistrar.connectionName)' podman connection (podman CLI failed) — if it is still registered, remove it with: podman system connection remove \(PodmanConnectionRegistrar.connectionName)"
+                )
+            }
+        }
+
+        // 5. Report what deliberately stays behind.
         print(
             """
             Kept (untouched):

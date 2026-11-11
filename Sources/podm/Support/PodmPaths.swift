@@ -28,6 +28,20 @@ enum PodmPaths {
         podmDir.appendingPathComponent("client-paths.json")
     }
 
+    /// The user's zsh custom-completions directory — the common convention
+    /// (`fpath=(~/.zsh/completions $fpath)`), honored only when it already
+    /// exists so podm never presumes a zsh layout the user didn't choose.
+    static var zshCompletionsDir: URL {
+        URL(fileURLWithPath: homePath, isDirectory: true)
+            .appendingPathComponent(".zsh/completions", isDirectory: true)
+    }
+
+    /// Fallback completions directory inside podm's own state, used when
+    /// the user has no custom completions dir.
+    static var completionsFallbackDir: URL {
+        podmDir.appendingPathComponent("completions/zsh", isDirectory: true)
+    }
+
     static var launchAgentDir: URL {
         URL(fileURLWithPath: homePath, isDirectory: true).appendingPathComponent("Library/LaunchAgents", isDirectory: true)
     }

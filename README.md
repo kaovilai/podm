@@ -122,6 +122,32 @@ export PATH="$HOME/.podm/bin:$PATH"
 (`unix://$HOME/.podm/container.sock`). Because it's the actual `podman` and
 `docker` binaries doing the talking, every flag and subcommand they support works.
 
+### Zsh completions
+
+`podm install` also installs a zsh completion for the `podm` command:
+podm-specific subcommands (`install`, `uninstall`, `status`, `doctor`,
+`serve`) are completed directly, and everything else delegates to your
+installed `_podman` completion — the mirrored surface is podman's own, so
+podm reuses it rather than duplicating it. When `~/.zsh/completions/`
+exists the `_podm` file lands there (the common fpath convention);
+otherwise it lands in `~/.podm/completions/zsh/` and `podm install`
+prints the `fpath` line to add before `compinit`.
+
+### podman system connection (secondary or primary remote)
+
+`podm install` registers a `podm` podman connection pointing at the
+daemon socket, so the real podman CLI can select podm explicitly —
+alongside the local machine, `podman machine`, or SSH remotes:
+
+```bash
+podman --connection podm ps          # dial podm explicitly
+podman system connection default podm   # or make it the primary remote
+```
+
+Registration never changes the default connection; primacy is your call.
+`podm uninstall` removes the connection, `podm status` reports whether
+it is registered.
+
 ### Optional: `/var/run/docker.sock` compatibility
 
 Tools that hardcode `/var/run/docker.sock` work with one symlink (one-time sudo):
@@ -155,7 +181,7 @@ docker context use podm
 
 | Command | Purpose |
 |---|---|
-| `podm install` | One-time setup: symlinks, LaunchAgent, client-path discovery |
+| `podm install` | One-time setup: symlinks, LaunchAgent, client-path discovery, zsh completion, podman connection |
 | `podm uninstall` | Remove symlinks, LaunchAgent, and podm-managed state |
 | `podm status` | Daemon state, socket, LaunchAgent, running containers |
 | `podm doctor` | Diagnose the install (socket reachable, CLIs found, versions) |
