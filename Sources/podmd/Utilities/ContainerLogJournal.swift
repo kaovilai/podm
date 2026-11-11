@@ -26,10 +26,15 @@ import Logging
 /// salvaged to its last complete entry at load.
 ///
 /// The file header is `PDLJ` + version (u32 LE) + droppedLines (u64 LE,
-/// version 2 only): the count of stream lines the cap has evicted before the
+/// version 2+): the count of stream lines the cap has evicted before the
 /// first retained entry, so a reloaded journal can still align its retained
 /// suffix against a log read from byte zero. Version 1 files (no count) load
-/// with a count of zero.
+/// with a count of zero. Version 3 appends the evicted prefix's per-line
+/// arrival stamps (`evictedNanoCount: u32 LE` + `unixNano: u64 LE` each,
+/// bounded by `maxEvictedNanos`): without them, a windowed reader could only
+/// stamp evicted lines with the CURRENT read time, so a recent `--since`
+/// included old output and a past `--until` excluded output that belonged in
+/// the window. Version 2 files load with no stamps (read-time fallback).
 actor ContainerLogJournal {
     static let shared = ContainerLogJournal()
 
@@ -62,31 +67,48 @@ actor ContainerLogJournal {
     /// The journal's current-boot view of one container: the retained
     /// entries plus the count of stream lines the cap evicted before
     /// `entries.first` — alignment must skip that many log lines to line
-    /// the suffix up with a stream read from byte zero.
+    /// the suffix up with a stream read from byte zero — and the evicted
+    /// prefix's retained arrival stamps (see `maxEvictedNanos`), which let
+    /// a windowed reader judge evicted lines by WHEN they were written
+    /// instead of by the current read time.
     struct Contents: Sendable {
         let entries: [Entry]
         let droppedLines: Int
+        /// Arrival stamps of the most recently evicted lines, in stream
+        /// order — a suffix of the evicted prefix (older evictions beyond
+        /// the bound are dropped; see `maxEvictedNanos`).
+        let evictedNanos: [UInt64]
 
-        init(entries: [Entry] = [], droppedLines: Int = 0) {
+        init(entries: [Entry] = [], droppedLines: Int = 0, evictedNanos: [UInt64] = []) {
             self.entries = entries
             self.droppedLines = droppedLines
+            self.evictedNanos = evictedNanos
         }
     }
 
     /// Drop-oldest cap per container, counted in framed (on-disk) bytes.
     static let maxJournalBytes = 4 * 1024 * 1024
 
+    /// How many evicted lines' arrival stamps are retained (drop-oldest,
+    /// with hysteresis, like the entry cap): 8 bytes per line keeps the
+    /// windowed readers' `--since`/`--until` judgments exact for the most
+    /// recent evictions while bounding the metadata a chatty container can
+    /// accumulate. Evictions older than the retained window fall back to
+    /// the oldest retained stamp — an upper bound on their write time.
+    static let maxEvictedNanos = 65_536
+
     /// A single entry payload may never exceed this; a corrupt length field
     /// must not make load allocate gigabytes.
     private static let maxEntryBytes = 16 * 1024 * 1024
 
     private static let magic = Data("PDLJ".utf8)
-    private static let version: UInt32 = 2
+    private static let version: UInt32 = 3
 
     private struct State {
         var entries: [Entry] = []
         var totalFramedBytes = 0
         var droppedLines = 0
+        var evictedNanos: [UInt64] = []
         var fileHandle: FileHandle?
     }
 
@@ -133,7 +155,8 @@ actor ContainerLogJournal {
     func contents(nativeId: String) -> Contents {
         loadIfNeeded(nativeId)
         guard let state = states[nativeId] else { return Contents() }
-        return Contents(entries: state.entries, droppedLines: state.droppedLines)
+        return Contents(
+            entries: state.entries, droppedLines: state.droppedLines, evictedNanos: state.evictedNanos)
     }
 
     /// Current-boot journal entries for the container, in stream order.
@@ -177,6 +200,7 @@ actor ContainerLogJournal {
         state.entries = []
         state.totalFramedBytes = 0
         state.droppedLines = droppedLines
+        state.evictedNanos = []
         // The closed handle must NOT survive into the new State: `persist`
         // would skip reopening and write through the dead descriptor, so
         // the new boot's entries would live only in memory until a cap
@@ -191,7 +215,9 @@ actor ContainerLogJournal {
         if droppedLines > 0 {
             // Persist the accounted prefix: a reload must keep the count, or
             // the retained suffix stops aligning with a scan from byte zero.
-            rewriteFile(fileURL(nativeId), entries: [], droppedLines: droppedLines)
+            // The replacement journal holds no evicted stamps — the stale
+            // boot's lines (and their times) are gone for good.
+            rewriteFile(fileURL(nativeId), entries: [], droppedLines: droppedLines, evictedNanos: [])
         }
     }
 
@@ -221,6 +247,15 @@ actor ContainerLogJournal {
                 evicted += 1
             }
             if evicted > 0 {
+                // Retain the evicted lines' arrival stamps (drop-oldest, with
+                // hysteresis): a windowed reader uses them to judge evicted
+                // lines by their write time rather than the read time.
+                state.evictedNanos.append(
+                    contentsOf: state.entries[0..<evicted].map(\.unixNano))
+                if state.evictedNanos.count > Self.maxEvictedNanos {
+                    state.evictedNanos.removeFirst(
+                        state.evictedNanos.count - Self.maxEvictedNanos / 2)
+                }
                 state.entries.removeFirst(evicted)
                 state.droppedLines += evicted
                 trimmed = true
@@ -249,15 +284,16 @@ actor ContainerLogJournal {
         var state = State()
         let url = fileURL(nativeId)
         if let data = try? Data(contentsOf: url), !data.isEmpty {
-            let (entries, droppedLines, salvaged) = Self.parse(data)
+            let (entries, droppedLines, evictedNanos, salvaged) = Self.parse(data)
             state.entries = entries
             state.droppedLines = droppedLines
+            state.evictedNanos = evictedNanos
             state.totalFramedBytes = entries.reduce(0) { $0 + $1.framedByteCount }
             if salvaged {
                 // A crash mid-write left a partial trailing entry; keep the
                 // parseable prefix so appends land on a valid boundary again.
                 log.warning("log journal for \(nativeId) had a partial trailing entry — salvaged \(entries.count) entries")
-                rewriteFile(url, entries: entries, droppedLines: droppedLines)
+                rewriteFile(url, entries: entries, droppedLines: droppedLines, evictedNanos: evictedNanos)
             }
         }
         states[nativeId] = state
@@ -271,14 +307,23 @@ actor ContainerLogJournal {
             // it so the next append reopens and seeks to the actual end.
             try? state.fileHandle?.close()
             state.fileHandle = nil
-            rewriteFile(url, entries: state.entries, droppedLines: state.droppedLines)
+            rewriteFile(
+                url, entries: state.entries, droppedLines: state.droppedLines, evictedNanos: state.evictedNanos)
             return
         }
         if state.fileHandle == nil {
             do {
                 try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
                 if !FileManager.default.fileExists(atPath: url.path) {
-                    guard FileManager.default.createFile(atPath: url.path, contents: Self.headerData()) else {
+                    // The in-memory state's evicted count and stamps must land
+                    // in the recreated header too (the file vanished under a
+                    // live state), or a reload would lose the prefix metadata.
+                    guard
+                        FileManager.default.createFile(
+                            atPath: url.path,
+                            contents: Self.headerData(
+                                droppedLines: state.droppedLines, evictedNanos: state.evictedNanos))
+                    else {
                         log.error("could not create log journal file at \(url.path)")
                         return
                     }
@@ -299,12 +344,12 @@ actor ContainerLogJournal {
         }
     }
 
-    private func rewriteFile(_ url: URL, entries: [Entry], droppedLines: Int) {
+    private func rewriteFile(_ url: URL, entries: [Entry], droppedLines: Int, evictedNanos: [UInt64]) {
         // The first append of a container can already exceed the cap (a huge
         // backlog batch), landing here before the plain append path has ever
         // created the journal directory — createFile does not create parents.
         try? FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
-        var contents = Self.headerData(droppedLines: droppedLines)
+        var contents = Self.headerData(droppedLines: droppedLines, evictedNanos: evictedNanos)
         for entry in entries { contents.append(Self.encode(entry)) }
         if !FileManager.default.createFile(atPath: url.path, contents: contents, attributes: nil) {
             log.error("could not rewrite log journal file at \(url.path)")
@@ -313,10 +358,14 @@ actor ContainerLogJournal {
 
     // MARK: - Framing
 
-    private static func headerData(droppedLines: Int = 0) -> Data {
+    private static func headerData(droppedLines: Int = 0, evictedNanos: [UInt64] = []) -> Data {
         var data = magic
         withUnsafeBytes(of: version.littleEndian) { data.append(contentsOf: $0) }
         withUnsafeBytes(of: UInt64(droppedLines).littleEndian) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt32(evictedNanos.count).littleEndian) { data.append(contentsOf: $0) }
+        for nano in evictedNanos {
+            withUnsafeBytes(of: nano.littleEndian) { data.append(contentsOf: $0) }
+        }
         return data
     }
 
@@ -332,26 +381,51 @@ actor ContainerLogJournal {
     }
 
     /// Parses a journal file image. Returns the complete entries, the evicted
-    /// prefix's line count (0 for version-1 files), and whether the file had
-    /// to be salvaged (bad magic/version, or a truncated or oversized
+    /// prefix's line count (0 for version-1 files), the evicted prefix's
+    /// retained arrival stamps (empty before version 3), and whether the file
+    /// had to be salvaged (bad magic/version, or a truncated or oversized
     /// trailing record).
-    static func parse(_ data: Data) -> (entries: [Entry], droppedLines: Int, salvaged: Bool) {
+    static func parse(_ data: Data) -> (entries: [Entry], droppedLines: Int, evictedNanos: [UInt64], salvaged: Bool) {
         let bytes = [UInt8](data)
-        guard bytes.count >= 8 else { return ([], 0, true) }
-        guard Data(bytes[0..<4]) == magic else { return ([], 0, true) }
+        guard bytes.count >= 8 else { return ([], 0, [], true) }
+        guard Data(bytes[0..<4]) == magic else { return ([], 0, [], true) }
         let version = UInt32(bytes[4]) | UInt32(bytes[5]) << 8 | UInt32(bytes[6]) << 16 | UInt32(bytes[7]) << 24
         var droppedLines = 0
+        var evictedNanos: [UInt64] = []
         var offset = 8
-        if version == 2 {
-            // Version 2 carries the evicted-prefix line count; a short header
+        if version >= 2 {
+            // Version 2+ carries the evicted-prefix line count; a short header
             // is a truncated file, salvaged to nothing.
-            guard bytes.count >= 16 else { return ([], 0, true) }
+            guard bytes.count >= 16 else { return ([], 0, [], true) }
             droppedLines =
                 Int(bytes[8]) | Int(bytes[9]) << 8 | Int(bytes[10]) << 16 | Int(bytes[11]) << 24
                 | Int(bytes[12]) << 32 | Int(bytes[13]) << 40 | Int(bytes[14]) << 48 | Int(bytes[15]) << 56
             offset = 16
         } else {
-            guard version == 1 else { return ([], 0, true) }
+            guard version == 1 else { return ([], 0, [], true) }
+        }
+        if version >= 3 {
+            // Version 3 appends the evicted prefix's retained arrival stamps:
+            // a u32 count followed by that many u64 nanosecond stamps. A
+            // count running past the file is a truncated header — salvaged
+            // to nothing, like a truncated entry (the stamps are a suffix
+            // window; losing them only degrades evicted lines to the
+            // read-time fallback).
+            guard bytes.count >= offset + 4 else { return ([], 0, [], true) }
+            let stampCount =
+                Int(bytes[offset]) | Int(bytes[offset + 1]) << 8 | Int(bytes[offset + 2]) << 16
+                | Int(bytes[offset + 3]) << 24
+            offset += 4
+            let stampsEnd = offset + stampCount * 8
+            guard stampsEnd <= bytes.count else { return ([], 0, [], true) }
+            for _ in 0..<stampCount {
+                var nano: UInt64 = 0
+                for i in 0..<8 {
+                    nano |= UInt64(bytes[offset + i]) << (8 * i)
+                }
+                evictedNanos.append(nano)
+                offset += 8
+            }
         }
         var entries: [Entry] = []
         while offset + Entry.headerByteCount <= bytes.count {
@@ -367,13 +441,13 @@ actor ContainerLogJournal {
             let payloadStart = offset + Entry.headerByteCount
             let payloadByteCount = Int(payloadLength)
             guard payloadByteCount >= 0, payloadByteCount <= maxEntryBytes, payloadStart + payloadByteCount <= bytes.count else {
-                return (entries, droppedLines, true)
+                return (entries, droppedLines, evictedNanos, true)
             }
             entries.append(
                 Entry(unixNano: nano, streamType: streamType, bytes: Data(bytes[payloadStart..<(payloadStart + payloadByteCount)])))
             offset = payloadStart + payloadByteCount
         }
-        return (entries, droppedLines, offset != bytes.count)
+        return (entries, droppedLines, evictedNanos, offset != bytes.count)
     }
 
     /// Wall-clock unix nanoseconds — the arrival timestamp a follower stamps
@@ -400,23 +474,31 @@ extension ContainerLogJournal {
     struct Alignment {
         private let entries: [Entry]
         private let droppedLines: Int
+        /// Arrival stamps retained for the most recently evicted lines — a
+        /// SUFFIX of the evicted prefix (see `maxEvictedNanos`), so the stamp
+        /// for evicted ordinal `i` is `evictedNanos[i - base]` with
+        /// `base = droppedLines - evictedNanos.count`.
+        private let evictedNanos: [UInt64]
         private var index = 0
         private var skipped = 0
         private var usable = true
 
-        init(entries: [Entry], droppedLines: Int = 0) {
+        init(entries: [Entry], droppedLines: Int = 0, evictedNanos: [UInt64] = []) {
             self.entries = entries
             self.droppedLines = droppedLines
+            self.evictedNanos = evictedNanos
         }
 
         /// How one stream line relates to the journal.
         enum Coverage {
             /// Journal-recorded write time for the line.
             case covered(UInt64)
-            /// The line falls in the evicted prefix: no time is recoverable,
-            /// but it was already accounted for — a follower must not
-            /// re-journal it.
-            case evicted
+            /// The line falls in the evicted prefix: it was already
+            /// accounted for (a follower must not re-journal it), and its
+            /// write time is the retained evicted stamp when the journal
+            /// still holds one — nil only for evictions older than the
+            /// retained stamp window, where no time is recoverable.
+            case evicted(unixNano: UInt64?)
             /// Not covered by the journal (follower behind, or alignment
             /// failed) — a follower records it, a reader falls back to read
             /// time.
@@ -424,16 +506,20 @@ extension ContainerLogJournal {
 
             /// The journal-recorded time, when this line is covered by one.
             var recordedNano: UInt64? {
-                if case .covered(let unixNano) = self { return unixNano }
-                return nil
+                switch self {
+                case .covered(let unixNano): return unixNano
+                case .evicted(let unixNano): return unixNano
+                case .fresh: return nil
+                }
             }
         }
 
         mutating func classify(_ line: Data) -> Coverage {
             guard usable else { return .fresh }
             if skipped < droppedLines {
+                let nano = evictedNano(at: skipped)
                 skipped += 1
-                return .evicted
+                return .evicted(unixNano: nano)
             }
             guard index < entries.count else { return .fresh }
             let entry = entries[index]
@@ -445,12 +531,25 @@ extension ContainerLogJournal {
             return .covered(entry.unixNano)
         }
 
+        /// The retained stamp for evicted ordinal `ordinal`, or the oldest
+        /// retained stamp (an upper bound on the write time) for evictions
+        /// older than the retained window, or nil when no stamps are held.
+        private func evictedNano(at ordinal: Int) -> UInt64? {
+            guard !evictedNanos.isEmpty else { return nil }
+            let base = max(droppedLines - evictedNanos.count, 0)
+            if ordinal < base { return evictedNanos.first }
+            let index = ordinal - base
+            if index < evictedNanos.count { return evictedNanos[index] }
+            return evictedNanos.last
+        }
+
         /// The journal-recorded time for `line`, or nil when the line is not
-        /// covered by the journal (follower behind, evicted, or alignment
-        /// has failed).
+        /// covered by the journal (follower behind, or alignment has failed).
+        /// Evicted lines report their retained evicted stamp — treating them
+        /// as newly written (read time) let a recent `--since` include old
+        /// output and a past `--until` exclude in-window output.
         mutating func timestamp(for line: Data) -> UInt64? {
-            if case .covered(let unixNano) = classify(line) { return unixNano }
-            return nil
+            classify(line).recordedNano
         }
 
         /// Consumes the gap marker recording one oversized stream line the
@@ -469,14 +568,16 @@ extension ContainerLogJournal {
         /// and a resumed follower would append a duplicate marker for a
         /// line the evicted prefix already accounts. Returns `.covered`
         /// with the marker's recorded time, `.evicted` when the line was in
-        /// the evicted prefix (already accounted, no time recoverable), or
-        /// `.fresh` when no marker is at the head (the journal does not
-        /// cover this line — follower behind, or a pre-marker journal).
+        /// the evicted prefix (already accounted, with its retained evicted
+        /// stamp when one is held), or `.fresh` when no marker is at the
+        /// head (the journal does not cover this line — follower behind, or
+        /// a pre-marker journal).
         mutating func consumeGapMarker() -> Coverage {
             guard usable else { return .fresh }
             if skipped < droppedLines {
+                let nano = evictedNano(at: skipped)
                 skipped += 1
-                return .evicted
+                return .evicted(unixNano: nano)
             }
             guard index < entries.count, entries[index].isGapMarker else { return .fresh }
             let unixNano = entries[index].unixNano

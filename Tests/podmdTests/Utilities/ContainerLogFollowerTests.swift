@@ -762,4 +762,207 @@ struct ContainerLogFollowerTests {
             return !armed
         }
     }
+
+    // MARK: - Attach-bootstrap fresh-boot registration (review round 5)
+
+    /// The attach routes' bootstrap performs the container's boot, so IT must
+    /// register the fresh log boot: the /start the CLI sends next sees the
+    /// container already running and arms with freshBoot false. When the new
+    /// boot's startup lines are IDENTICAL to the previous boot's (same
+    /// banner), the resume alignment classifies them covered and they keep
+    /// the old boot's timestamps — a coincidence the first-mismatch
+    /// self-heal can never catch.
+    @Test("an attach bootstrap's fresh-boot arm restamps identical banners; the later no-op /start keeps them")
+    func attachBootstrapFreshBootRestampsIdenticalBanners() async throws {
+        let dir = tempDirectory()
+        // The previous boot's journal, persisted: its banner stamped at 111.
+        let journal = await seedJournal(dir: dir, nativeId: "attach-fresh-ctr", lines: [(111, "boot banner\n")])
+        // The new boot writes the SAME banner (Apple truncated the log, the
+        // content repeats) — the exact case the self-heal misses.
+        let logFile = dir.appendingPathComponent("attach-fresh.log")
+        FileManager.default.createFile(atPath: logFile.path, contents: Data("boot banner\n".utf8))
+
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+
+        // What the attach route's bootstrap registers: a FRESH boot.
+        let stampBefore = ContainerLogJournal.currentUnixNano()
+        await registry.arm(
+            nativeId: "attach-fresh-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: true,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+        let restamped = await waitFor {
+            let entries = await journal.entries(nativeId: "attach-fresh-ctr")
+            return entries.count == 1 && entries.first!.unixNano >= stampBefore
+        }
+        #expect(restamped, "the fresh-boot arm must reset the journal and restamp the identical banner")
+
+        // What the CLI's later /start does on the now-running container: a
+        // no-op arm (freshBoot false) that must leave the current-boot
+        // follower and its timestamps alone.
+        await registry.arm(
+            nativeId: "attach-fresh-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: false,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+        try await Task.sleep(for: .milliseconds(300))
+        let afterStart = await journal.entries(nativeId: "attach-fresh-ctr")
+        #expect(
+            afterStart.count == 1 && afterStart.first!.unixNano >= stampBefore,
+            "the no-op /start arm must not reset or restamp the boot the attach bootstrap registered")
+
+        client.stopContainer()
+        _ = await waitFor {
+            let armed = await registry.isArmed(nativeId: "attach-fresh-ctr")
+            return !armed
+        }
+
+        // The contrast — the pre-fix behavior this test pins out: arming the
+        // identical banner as a plain resume (what happened when only the
+        // no-op /start armed) classifies it covered and keeps the stale 111
+        // stamp, so a recent --since would omit the new boot's output.
+        let staleJournal = await seedJournal(dir: dir, nativeId: "attach-stale-ctr", lines: [(111, "boot banner\n")])
+        let staleLog = dir.appendingPathComponent("attach-stale.log")
+        FileManager.default.createFile(atPath: staleLog.path, contents: Data("boot banner\n".utf8))
+        await registry.arm(
+            nativeId: "attach-stale-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: false,
+            journal: staleJournal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: staleLog) }
+        )
+        try await Task.sleep(for: .milliseconds(300))
+        let staleEntries = await staleJournal.entries(nativeId: "attach-stale-ctr")
+        #expect(
+            staleEntries.count == 1 && staleEntries.first?.unixNano == 111,
+            "without the fresh-boot registration the identical banner inherits the previous boot's stamp")
+
+        _ = await waitFor {
+            let armed = await registry.isArmed(nativeId: "attach-stale-ctr")
+            return !armed
+        }
+    }
+
+    // MARK: - Cancellation inside the drain loop (review round 5)
+
+    /// A noisy container keeps data available faster than it is read, so the
+    /// drain loop never reaches a read gap on its own: a cancelled (disarmed
+    /// or superseded) follower must stop draining at the next chunk instead
+    /// of reading and journaling alongside its replacement indefinitely.
+    @Test("a cancelled follower stops draining a log that keeps growing")
+    func cancelledFollowerStopsDraining() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("output.log")
+        FileManager.default.createFile(atPath: logFile.path, contents: nil)
+        let writer = try FileHandle(forWritingTo: logFile)
+
+        let journal = ContainerLogJournal()
+        await journal.configure(storageDirectory: dir)
+        let nativeId = "cancel-drain-ctr"
+
+        // Appends to the log faster than the follower drains, so the drain
+        // loop's read gap (EOF) never arrives while this runs — the exact
+        // shape of a container writing faster than it is read.
+        let writerTask = Task.detached {
+            let block = Data(String(repeating: "spam\n", count: 8192).utf8)  // ~40 KiB per write
+            while !Task.isCancelled {
+                try? writer.write(contentsOf: block)
+            }
+        }
+
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+        await registry.arm(
+            nativeId: nativeId,
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: true,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+        let started = await waitFor { await journal.entries(nativeId: nativeId).count >= 1 }
+        #expect(started, "the follower should journal the growing log promptly")
+
+        // The delete-path teardown: cancels the follower task.
+        await registry.disarm(nativeId: nativeId)
+
+        // At most one in-flight batch may flush after the cancel; after that
+        // the journal must go quiet even though the log keeps growing.
+        try await Task.sleep(for: .milliseconds(500))
+        let settled = await journal.entries(nativeId: nativeId).count
+        try await Task.sleep(for: .milliseconds(500))
+        let after = await journal.entries(nativeId: nativeId).count
+        #expect(
+            after == settled,
+            "a cancelled follower must stop draining a busy stream — the superseded task cannot keep reading and journaling")
+
+        writerTask.cancel()
+        _ = await writerTask.value
+        try? writer.close()
+    }
+
+    // MARK: - Final unterminated line (review round 5)
+
+    /// `printf hello` and exit: the confirmed-exit drain must journal the
+    /// final unterminated line (stamped with the drain time), or a windowed
+    /// read can only stamp that fragment with the CURRENT read time — an
+    /// `--until` after the exit but before the request then returns nothing.
+    /// A resume re-reading the same exit classifies the fragment covered and
+    /// must not duplicate it.
+    @Test("the confirmed-exit drain journals the final unterminated line, once")
+    func exitDrainJournalsFinalUnterminatedLine() async throws {
+        let dir = tempDirectory()
+        let logFile = dir.appendingPathComponent("output.log")
+        FileManager.default.createFile(atPath: logFile.path, contents: Data("hello".utf8))
+
+        let journal = ContainerLogJournal()
+        await journal.configure(storageDirectory: dir)
+        let client = StatusFlipMock()
+        let registry = ContainerLogFollowerRegistry.shared
+
+        let before = ContainerLogJournal.currentUnixNano()
+        await registry.arm(
+            nativeId: "final-line-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: true,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+        client.stopContainer()
+        let finished = await waitFor {
+            let armed = await registry.isArmed(nativeId: "final-line-ctr")
+            return !armed
+        }
+        #expect(finished, "the follower should wind down after the exit drain")
+
+        let entries = await journal.entries(nativeId: "final-line-ctr")
+        #expect(entries.map(\.bytes) == [Data("hello".utf8)], "the final unterminated line must be journaled at exit")
+        #expect(entries.first!.unixNano >= before, "stamped with its exit-drain arrival time")
+
+        // A resumed follower (daemon restart) re-reading the same exit: the
+        // fragment classifies covered and must not be journaled again.
+        await registry.arm(
+            nativeId: "final-line-ctr",
+            client: client,
+            logger: .init(label: "test"),
+            freshBoot: false,
+            journal: journal,
+            openLogStream: { _ in try FileHandle(forReadingFrom: logFile) }
+        )
+        _ = await waitFor {
+            let armed = await registry.isArmed(nativeId: "final-line-ctr")
+            return !armed
+        }
+        let resumed = await journal.entries(nativeId: "final-line-ctr")
+        #expect(resumed.count == 1, "the resumed exit drain must not duplicate the final line")
+    }
 }

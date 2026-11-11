@@ -48,7 +48,7 @@ extension ContainerAttachWSRoute {
                 Task {
                     if container.status == .stopped {
                         await handleStopped(
-                            ws: ws, req: req, hexId: id, container: container, query: query)
+                            ws: ws, req: req, client: client, hexId: id, container: container, query: query)
                     } else {
                         await handleRunning(ws: ws, req: req, container: container, query: query)
                     }
@@ -62,6 +62,7 @@ extension ContainerAttachWSRoute {
     private static func handleStopped(
         ws: WebSocket,
         req: Request,
+        client: ClientContainerProtocol,
         hexId: String,
         container: ContainerSnapshot,
         query: ContainerAttachWSQuery
@@ -118,6 +119,13 @@ extension ContainerAttachWSRoute {
         }
 
         await ProcessRegistry.shared.set(id: container.id, process: process)
+
+        // The bootstrap above performed this container's boot — register a
+        // fresh log-journal boot NOW (see ContainerAttachRoute's
+        // attachStoppedOutputOnly for why the later no-op /start cannot be
+        // the one to do it).
+        await ContainerLogFollowerRegistry.shared.arm(
+            nativeId: container.id, client: client, logger: req.logger, freshBoot: true)
 
         let broadcaster = req.application.storage[EventBroadcasterKey.self]
         // A bootstrap attach streams the process stdio regardless of query flags.

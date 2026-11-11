@@ -101,13 +101,26 @@ extension ContainerLogsRoute {
                     // newline yet, then closes out the response. Only call this once
                     // the stream has genuinely ended — flushing on a mid-stream read
                     // gap could stamp and emit a line the writer hasn't finished yet.
-                    // The trailing line can never be journal-covered (the journal
-                    // records only complete lines), so it is stamped with the flush
-                    // time and still has to pass the since/until window, if any.
-                    func finish() {
+                    // The trailing line is stamped with the flush time unless the
+                    // follower's confirmed-exit drain journaled it (the container's
+                    // final, unterminated line) — its recorded time is recovered
+                    // below — and still has to pass the since/until window, if any.
+                    func finish() async {
+                        var recordedNano: UInt64? = nil
+                        if windowed, openLine == nil, !buffer.isEmpty {
+                            // The journal's last entry is the only candidate: a
+                            // complete line always ends in `\n` (the buffer never
+                            // does), so a match is necessarily the exit-drain's
+                            // final-line fragment.
+                            let contents = await ContainerLogJournal.shared.contents(nativeId: container.id)
+                            if let last = contents.entries.last, last.bytes == buffer {
+                                recordedNano = last.unixNano
+                            }
+                        }
                         ContainerLogsRoute.flushFinalLogLine(
                             buffer, ttyMode: isTTY, timestamps: timestamps, since: since, until: until,
                             openLine: openLine,
+                            recordedNano: recordedNano,
                             emitWithoutTimestamps: windowed
                         ) { outputBuffer in
                             _ = writer.write(.buffer(outputBuffer))
@@ -121,7 +134,7 @@ extension ContainerLogsRoute {
                             // tail=0 without follow returns an empty backlog; skip
                             // reading the log at all, like the plain tail path.
                             if tail == 0, !followActive {
-                                finish()
+                                await finish()
                                 return
                             }
                             let handoff = try await ContainerLogsRoute.scanWindowedBacklog(
@@ -134,7 +147,18 @@ extension ContainerLogsRoute {
                                 timestamps: timestamps,
                                 nowNanos: { ContainerLogJournal.currentUnixNano() },
                                 streamEnded: scanBounds.streamEnded,
-                                maxScanBytes: scanBounds.maxScanBytes
+                                maxScanBytes: scanBounds.maxScanBytes,
+                                yield: {
+                                    // Liveness probe between scan batches: a
+                                    // zero-byte write delivers no output but
+                                    // fails once the client is gone, and
+                                    // awaiting it lets the event loop run — a
+                                    // scan of a fast-growing log otherwise
+                                    // monopolizes this task between batches.
+                                    try await writer.write(
+                                        .buffer(ByteBufferAllocator().buffer(capacity: 0))
+                                    ).get()
+                                }
                             ) { frame in
                                 // Await each write so a client disconnect aborts the
                                 // response instead of queueing the whole window.
@@ -148,7 +172,7 @@ extension ContainerLogsRoute {
                             // below still runs so the handle reaches EOF and the
                             // follow loop emits only new lines.
                             if tail == 0, !follow {
-                                finish()
+                                await finish()
                                 return
                             }
                             // Apple Container's log API is a forward byte stream with
@@ -167,7 +191,7 @@ extension ContainerLogsRoute {
                                 do {
                                     try await writer.write(.buffer(frame)).get()
                                 } catch {
-                                    finish()
+                                    await finish()
                                     return
                                 }
                             }
@@ -186,11 +210,11 @@ extension ContainerLogsRoute {
                         }
 
                         if !followActive {
-                            finish()
+                            await finish()
                             return
                         }
                     } catch {
-                        finish()
+                        await finish()
                         return
                     }
 
@@ -240,7 +264,7 @@ extension ContainerLogsRoute {
                                 try? await Task.sleep(for: .milliseconds(150))
                             }
                         }
-                        finish()
+                        await finish()
                         return
                     }
                     follow: while true {
@@ -273,7 +297,7 @@ extension ContainerLogsRoute {
                             try? await Task.sleep(for: .milliseconds(150))
                         }
                     }
-                    finish()
+                    await finish()
                 }
             })
 
@@ -539,16 +563,20 @@ extension ContainerLogsRoute {
     /// only confirm what the request-start status already knew — holding it
     /// back mis-selected the tail: `a\nb` with `tail=1` returned both lines.
     ///
-    /// With follow on a RUNNING container the scan is byte-bounded: a log
-    /// growing faster than it is scanned would otherwise keep the backlog
-    /// pass reading — with `tail` set, emitting nothing — indefinitely, out
-    /// of reach of the follow loop's `until` deadline and client-disconnect
-    /// checks. At the budget the scan yields to the follow loop, which
-    /// continues the stream deadline- and disconnect-aware in bounded
-    /// batches. (Lines read past the budget are stamped with arrival time
-    /// rather than journal time; the budget is twice the journal's cap, so
-    /// every journal-covered line — the only ones with recorded write
-    /// times — still completes inside the scan.)
+    /// With follow on a RUNNING container the scan reads in bounded
+    /// batches: a log growing faster than it is scanned never reaches a
+    /// read gap on its own, so an unbatched backlog pass would read — with
+    /// `tail` set, emitting nothing — indefinitely, out of reach of the
+    /// `until` deadline and client-disconnect checks. The whole backlog
+    /// must still pass through the scanner (the follow reader applies
+    /// neither the tail ring nor journal alignment — handing it unread
+    /// backlog made `follow=1&tail=0` emit old output and nonzero tails
+    /// select the end of the first batch rather than the backlog's actual
+    /// tail), so the boundary the scan drains to is the first READ GAP:
+    /// everything written before it is the request's backlog, everything
+    /// after it is live output for the follow loop. Between batches the
+    /// scan yields (`maxScanBytes` of input per batch) to check the `until`
+    /// deadline and probe the client connection.
     static func backlogScanBounds(
         followActive: Bool, containerRunning: Bool
     ) -> (streamEnded: Bool, maxScanBytes: Int?) {
@@ -556,10 +584,11 @@ extension ContainerLogsRoute {
         return (false, ContainerLogsRoute.backlogScanMaxBytes)
     }
 
-    /// The windowed backlog scan yields to the follow loop after at most
-    /// this much input — twice the journal's byte cap, so the whole
+    /// The windowed backlog scan reads at most this much input between
+    /// yield points — twice the journal's byte cap, so the whole
     /// journal-covered portion of the backlog (the only portion with
-    /// recorded write times) still completes inside the scan.
+    /// recorded write times) is judged inside one batch even while evicted
+    /// stamps and gap markers straddle a boundary.
     static let backlogScanMaxBytes = 2 * ContainerLogJournal.maxJournalBytes
 
     /// A logical line still open at a read boundary: an oversized line whose
@@ -615,15 +644,25 @@ extension ContainerLogsRoute {
     /// run), in which case the partial line is a genuine final line: it passes
     /// through the same window check, counts toward the `tail` limit (moby's
     /// tail counts an unterminated final line, like `lastLines` does) and is
-    /// emitted with the ring, stamped with read time. It can never be
-    /// journal-covered (the journal records only complete lines). When the
+    /// emitted with the ring, stamped with the journal-recorded time of the
+    /// follower's confirmed-exit drain when it covered the fragment, else the
+    /// read time. When the
     /// partial line continues a spilled oversized line, the handoff also
     /// carries that line's fixed state (see `WindowedOpenLine`) so the follow
     /// reader does not restamp its remaining fragments.
     ///
-    /// `maxScanBytes` bounds how much input one scan consumes before
+    /// `maxScanBytes` bounds how much input one scan BATCH consumes before
     /// yielding; it requires a follow loop to continue the stream, so it must
-    /// only be set together with `streamEnded == false`.
+    /// only be set together with `streamEnded == false`. At each batch
+    /// boundary the scan checks the `until` deadline and invokes `yield` —
+    /// which must be non-nil whenever `maxScanBytes` is set — to probe the
+    /// client connection and let the event loop run; it then CONTINUES the
+    /// scan (same alignment, ring and open-line state) rather than handing
+    /// the rest of the backlog to the follow reader, which applies neither
+    /// the tail ring nor journal alignment. The scan ends at the first read
+    /// gap (the backlog boundary: everything before it belongs to this
+    /// response's backlog, everything after is live output) or, without
+    /// `maxScanBytes`, at EOF.
     static func scanWindowedBacklog(
         read: () throws -> Data?,
         journal: ContainerLogJournal.Contents,
@@ -635,9 +674,11 @@ extension ContainerLogsRoute {
         nowNanos: () -> UInt64,
         streamEnded: Bool = false,
         maxScanBytes: Int? = nil,
+        yield: (() async throws -> Void)? = nil,
         emit: (ByteBuffer) async throws -> Void
     ) async throws -> BacklogHandoff {
-        var alignment = ContainerLogJournal.Alignment(entries: journal.entries, droppedLines: journal.droppedLines)
+        var alignment = ContainerLogJournal.Alignment(
+            entries: journal.entries, droppedLines: journal.droppedLines, evictedNanos: journal.evictedNanos)
         var ring = tail.map { WindowTailRing(limit: $0) }
         defer { ring?.cleanUp() }
         var pending = Data()
@@ -718,11 +759,18 @@ extension ContainerLogsRoute {
                 }
                 pending.removeAll(keepingCapacity: true)
             }
-            // Bound the backlog pass when a follow loop will continue the
-            // stream: a log growing faster than it is scanned must not keep
-            // this scan reading indefinitely, out of reach of the follow
-            // loop's deadline and disconnect checks.
-            if let maxScanBytes, !streamEnded, scannedBytes >= maxScanBytes { break }
+            // Batch boundary while a follow loop will continue the stream:
+            // yield (deadline check + client liveness probe) and keep
+            // scanning with the same ring/alignment state. Cutting over to
+            // the follow reader here instead would hand it unread backlog —
+            // it applies neither the tail ring nor journal alignment, so
+            // `follow=1&tail=0` emitted old output and nonzero tails
+            // selected the end of the first batch, not the backlog's tail.
+            if let maxScanBytes, !streamEnded, scannedBytes >= maxScanBytes {
+                if let until, nowNanos() > until { break }
+                try await yield?()
+                scannedBytes = 0
+            }
         }
         if streamEnded, !pending.isEmpty {
             // The stream genuinely ends here: the unterminated trailing line is
@@ -733,7 +781,13 @@ extension ContainerLogsRoute {
             if inOversizedLine {
                 try await accept(pending, unixNano: oversizedLineNano ?? nowNanos(), position: .spillContinuation)
             } else {
-                try await accept(pending, unixNano: nowNanos())
+                // The follower's confirmed-exit drain journals the final
+                // unterminated line (without its missing newline): recover
+                // that recorded time — stamping it with the read time made
+                // an `--until` after the exit but before this request
+                // return nothing for the container's only output.
+                let unixNano = alignment.timestamp(for: pending) ?? nowNanos()
+                try await accept(pending, unixNano: unixNano)
             }
             pending.removeAll()
         }
@@ -864,9 +918,12 @@ extension ContainerLogsRoute {
     /// Stamps and frames a trailing line left over with no terminating newline —
     /// called once the stream has genuinely ended, not on a mid-stream read gap that
     /// might just mean the writer hasn't flushed the rest of the line yet. The
-    /// trailing line can never be journal-covered (the journal records only
+    /// trailing line is normally not journal-covered (the journal records only
     /// complete lines), so it is stamped with the flush time and must still pass
-    /// the since/until window, if any.
+    /// the since/until window, if any. The exception is the container's FINAL
+    /// line, which the follower's confirmed-exit drain journals without its
+    /// missing newline: pass its recorded time via `recordedNano` so the window
+    /// and the timestamp prefix use the exit-time stamp, not the flush time.
     ///
     /// When the trailing bytes continue an oversized line whose head fragment
     /// was already emitted (or window-dropped), `openLine` carries that
@@ -885,6 +942,7 @@ extension ContainerLogsRoute {
         since: UInt64? = nil,
         until: UInt64? = nil,
         openLine: WindowedOpenLine? = nil,
+        recordedNano: UInt64? = nil,
         nowNanos: () -> UInt64 = { ContainerLogJournal.currentUnixNano() },
         emitWithoutTimestamps: Bool = false,
         writeOutput: (ByteBuffer) -> Void
@@ -896,7 +954,7 @@ extension ContainerLogsRoute {
             }
             return
         }
-        let unixNano = nowNanos()
+        let unixNano = recordedNano ?? nowNanos()
         if let since, unixNano < since { return }
         if let until, unixNano > until { return }
         guard timestamps else {

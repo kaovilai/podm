@@ -16,11 +16,12 @@ import VaporTesting
 struct ContainerLogsWindowTests {
 
     private func journal(
-        _ lines: [(nano: UInt64, line: String)], dropped: Int = 0
+        _ lines: [(nano: UInt64, line: String)], dropped: Int = 0, evictedNanos: [UInt64] = []
     ) -> ContainerLogJournal.Contents {
         ContainerLogJournal.Contents(
             entries: lines.map { ContainerLogJournal.Entry(unixNano: $0.nano, streamType: 1, bytes: Data($0.line.utf8)) },
-            droppedLines: dropped)
+            droppedLines: dropped,
+            evictedNanos: evictedNanos)
     }
 
     /// Drives the scanner over `stream` in fixed-size chunks and collects the
@@ -622,33 +623,127 @@ struct ContainerLogsWindowTests {
         #expect(payloads.count >= 3, "the oversized line is split across fragments, not buffered whole")
     }
 
-    /// The finding-3 liveness case: follow=1&tail=0&since=0 on a log growing
-    /// faster than it is scanned. The backlog pass must stop after a bounded
-    /// amount of input and yield to the deadline- and disconnect-aware
-    /// follow loop — without the budget this scan never returns.
-    @Test("the backlog scan yields after a bounded amount of input when a follow will continue")
-    func backlogScanYieldsAtBudget() async throws {
-        let chunk = Data(String(repeating: "line\n", count: 819).utf8)  // ~4 KiB per read
+    /// The follow=1 backlog scan must drain the WHOLE backlog (up to the
+    /// first read gap) through the scanner — the follow reader applies
+    /// neither the tail ring nor journal alignment, so the round-4 budget
+    /// break handed it unread history: `follow=1&tail=0&since=0` emitted old
+    /// backlog, and nonzero tails selected the end of the first batch
+    /// instead of the backlog's actual tail. The scan still reads in
+    /// bounded batches (yielding between them), so a huge backlog cannot
+    /// starve the deadline and disconnect checks.
+    @Test("a follow backlog scan drains to the read gap in bounded batches, keeping the tail ring")
+    func followBacklogDrainsToReadGapInBoundedBatches() async throws {
+        // ~40 KiB of backlog — several batches at the 64 KiB... use a small
+        // budget so the boundary is crossed multiple times.
+        let lines = (0..<8000).map { "line\($0)\n" }
+        let stream = Data(lines.joined().utf8)
+        let budget = 16 * 1024
+        let chunkSize = 4096
+        var offset = 0
         var reads = 0
-        let budget = 64 * 1024
+        var yields = 0
+        var batchStartReads = 0
+        var maxBatchReads = 0
+        var payloads: [String] = []
         let handoff = try await ContainerLogsRoute.scanWindowedBacklog(
             read: {
+                guard offset < stream.count else { return nil }  // the read gap: backlog boundary
                 reads += 1
-                return chunk  // always more data: a fast writer
+                let next = min(offset + chunkSize, stream.count)
+                defer { offset = next }
+                return stream[offset..<next]
             },
             journal: ContainerLogJournal.Contents(),
             since: 0,
             until: nil,
-            tail: 0,  // the finding's exact shape: nothing retained, nothing emitted
+            tail: 1,  // the tail must select the LAST line of the whole backlog
             ttyMode: true,
             timestamps: false,
             nowNanos: { 999 },
-            maxScanBytes: budget
-        ) { _ in
-            Issue.record("tail=0 must not emit during the scan")
+            streamEnded: false,  // a follow loop will continue the stream
+            maxScanBytes: budget,
+            yield: {
+                yields += 1
+                maxBatchReads = max(maxBatchReads, reads - batchStartReads)
+                batchStartReads = reads
+            }
+        ) { frame in
+            var frame = frame
+            payloads.append(String(decoding: frame.readData(length: frame.readableBytes)!, as: UTF8.self))
         }
-        #expect(reads <= budget / chunk.count + 2, "the scan must stop reading after a bounded amount of input")
+        #expect(offset == stream.count, "the scan itself must consume the whole backlog, not hand it to the follow reader")
+        #expect(yields >= stream.count / budget, "the scan must yield between bounded batches")
+        #expect(maxBatchReads <= budget / chunkSize + 2, "each batch reads a bounded amount of input")
+        #expect(payloads == [lines.last!], "tail=1 selects the backlog's actual last line, not the first batch's")
+        #expect(handoff.pending.isEmpty)
         #expect(handoff.openLine == nil)
+    }
+
+    /// The finding's exact shape: `follow=1&tail=0&since=0` over a backlog
+    /// larger than the scan budget. The whole backlog passes through the
+    /// scanner (whose tail=0 ring retains nothing), so nothing is emitted —
+    /// the follow reader must be the one to see post-gap output, never the
+    /// unread backlog.
+    @Test("follow=1&tail=0&since=0 emits none of the oversized backlog during the scan")
+    func followBacklogTailZeroEmitsNothing() async throws {
+        let stream = Data(String(repeating: "line\n", count: 20_000).utf8)  // ~100 KiB
+        let budget = 16 * 1024
+        var offset = 0
+        var reads = 0
+        let handoff = try await ContainerLogsRoute.scanWindowedBacklog(
+            read: {
+                guard offset < stream.count else { return nil }
+                reads += 1
+                let next = min(offset + 4096, stream.count)
+                defer { offset = next }
+                return stream[offset..<next]
+            },
+            journal: ContainerLogJournal.Contents(),
+            since: 0,
+            until: nil,
+            tail: 0,
+            ttyMode: true,
+            timestamps: false,
+            nowNanos: { 999 },
+            streamEnded: false,
+            maxScanBytes: budget,
+            yield: {}
+        ) { _ in
+            Issue.record("tail=0 must not emit backlog during the scan")
+        }
+        #expect(offset == stream.count, "the scan drains the whole backlog itself")
+        #expect(handoff.pending.isEmpty)
+        #expect(handoff.openLine == nil)
+    }
+
+    /// A log growing faster than it is scanned never reaches a read gap, so
+    /// the only exits from the backlog scan are the read gap and the
+    /// `until` deadline: a deadline that already passed must stop the scan
+    /// after a bounded amount of input instead of reading indefinitely.
+    @Test("a follow backlog scan stops at a passed until deadline")
+    func followBacklogScanStopsAtDeadline() async throws {
+        let chunk = Data(String(repeating: "line\n", count: 819).utf8)  // ~4 KiB per read
+        var reads = 0
+        let budget = 64 * 1024
+        _ = try await ContainerLogsRoute.scanWindowedBacklog(
+            read: {
+                reads += 1
+                return chunk  // always more data: a fast writer, no read gap
+            },
+            journal: ContainerLogJournal.Contents(),
+            since: 0,
+            until: 500,  // already behind the injected now (999)
+            tail: 0,
+            ttyMode: true,
+            timestamps: false,
+            nowNanos: { 999 },
+            streamEnded: false,
+            maxScanBytes: budget,
+            yield: {}
+        ) { _ in
+            Issue.record("a line stamped past until must not be emitted")
+        }
+        #expect(reads <= budget / chunk.count + 2, "the passed deadline must stop the scan after one bounded batch")
     }
 
     // MARK: - Open spilled-line state across follow batches (review round 4)
@@ -833,6 +928,143 @@ struct ContainerLogsWindowTests {
         )
         #expect(batch.frames.isEmpty, "no resurrection of the window-dropped line after since passed")
         #expect(openLine == nil)
+    }
+
+    // MARK: - Evicted-prefix timestamps (review round 5)
+
+    /// The cap evicts entries but the journal retains their arrival stamps:
+    /// a windowed read must judge evicted lines by THOSE stamps, not by the
+    /// current read time — read-time stamping let a recent `--since` include
+    /// old output (the stamp was always "now") and a past `--until` exclude
+    /// output that belonged in the window.
+    @Test("evicted lines keep their retained arrival stamps for since/until")
+    func evictedLinesKeepRetainedStamps() async throws {
+        // "a\n" and "b\n" were evicted (stamps 100/200 retained); "c\n" is
+        // still retained at 300. Read time is 999.
+        let fixture = journal([(300, "c\n")], dropped: 2, evictedNanos: [100, 200])
+
+        // A past until keeps the evicted lines their stamps qualify for —
+        // read-time stamping (999) dropped both.
+        let untilResult = try await scan("a\nb\nc\n", journal: fixture, until: 250)
+        #expect(untilResult.payloads == ["a\n", "b\n"], "evicted lines must be judged by their retained stamps, not read time")
+
+        // A recent since drops the evicted lines their stamps exclude —
+        // read-time stamping (999) included both.
+        let sinceResult = try await scan("a\nb\nc\n", journal: fixture, since: 150)
+        #expect(sinceResult.payloads == ["b\n", "c\n"], "an old evicted line must fail a recent since")
+
+        // With no retained stamps (a version-2 journal), the read-time
+        // fallback still applies: the evicted lines are dropped by an until
+        // their real write times would have passed.
+        let legacy = journal([(300, "c\n")], dropped: 2)
+        let legacyResult = try await scan("a\nb\nc\n", journal: legacy, until: 350)
+        #expect(legacyResult.payloads == ["c\n"], "without retained stamps the evicted lines fall back to read time")
+    }
+
+    /// The same fix on the oversized-line paths: an oversized line whose gap
+    /// marker the cap evicted keeps its retained stamp for the whole logical
+    /// line (head fragment through terminator).
+    @Test("an evicted oversized line keeps its retained stamp")
+    func evictedOversizedLineKeepsRetainedStamp() async throws {
+        let bound = ContainerLogFollower.maxPendingLineBytes
+        var stream = Data(repeating: 0x78, count: bound + (1 << 18))
+        stream.append(Data("\nafter\n".utf8))
+        // The oversized line's marker was evicted with stamp 100 retained;
+        // only the following line is retained, at 200.
+        let fixture = ContainerLogJournal.Contents(
+            entries: [ContainerLogJournal.Entry(unixNano: 200, streamType: 1, bytes: Data("after\n".utf8))],
+            droppedLines: 1,
+            evictedNanos: [100])
+
+        var offset = 0
+        var payloads: [Data] = []
+        _ = try await ContainerLogsRoute.scanWindowedBacklog(
+            read: {
+                guard offset < stream.count else { return nil }
+                let next = min(offset + 4096, stream.count)
+                defer { offset = next }
+                return stream[offset..<next]
+            },
+            journal: fixture,
+            since: nil,
+            until: 250,  // retained stamps 100/200 pass; read time 999 would not
+            tail: nil,
+            ttyMode: true,
+            timestamps: false,
+            nowNanos: { 999 },
+            streamEnded: true
+        ) { frame in
+            var frame = frame
+            payloads.append(frame.readData(length: frame.readableBytes)!)
+        }
+
+        #expect(
+            payloads.reduce(0) { $0 + $1.count } == stream.count,
+            "the whole evicted oversized line is emitted under its retained stamp (100), not dropped as read-time-fresh")
+        #expect(payloads.last == Data("after\n".utf8))
+    }
+
+    // MARK: - Final unterminated line (review round 5)
+
+    /// A container whose last line never met its newline (`printf hello`)
+    /// gets that fragment journaled by the follower's confirmed-exit drain:
+    /// the backlog scanner must recover the recorded time — stamping it
+    /// with the read time made an `--until` after the exit but before the
+    /// request return nothing.
+    @Test("the final unterminated line keeps its exit-drain stamp")
+    func finalUnterminatedLineKeepsExitDrainStamp() async throws {
+        // "a\n" journaled complete at 100; the final fragment "hello" (no
+        // newline) journaled by the exit drain at 200. Read time is 999.
+        let fixture = journal([(100, "a\n"), (200, "hello")])
+
+        let kept = try await scan("a\nhello", journal: fixture, until: 250, streamEnded: true)
+        #expect(kept.payloads == ["a\n", "hello"], "the final fragment must be judged by its recorded time (200), not read time")
+
+        let dropped = try await scan("a\nhello", journal: fixture, until: 150, streamEnded: true)
+        #expect(dropped.payloads == ["a\n"], "an until before the exit-drain stamp drops the final fragment")
+
+        // Without the exit-drain entry the fragment is unstamped: read time.
+        let unstamped = journal([(100, "a\n")])
+        let fallback = try await scan("a\nhello", journal: unstamped, until: 250, streamEnded: true)
+        #expect(fallback.payloads == ["a\n"], "an unjournaled final fragment still falls back to read time")
+    }
+
+    /// The follow loop's final flush honors the journal-recorded time of the
+    /// exit-drained final line (recovered by the route): the window and the
+    /// timestamp prefix use it instead of the flush time.
+    @Test("flushFinalLogLine honors the recorded final-line time")
+    func flushHonorsRecordedNano() {
+        let nano: UInt64 = 1_357_133_017_000_000_000  // 2013-01-02T13:23:37Z
+
+        // Window: recorded time passes, flush time (999) would not.
+        var frames: [ByteBuffer] = []
+        ContainerLogsRoute.flushFinalLogLine(
+            Data("hello".utf8), ttyMode: true, timestamps: false, since: 100, until: 500,
+            recordedNano: 200, nowNanos: { 999 }, emitWithoutTimestamps: true
+        ) { frames.append($0) }
+        #expect(frames.count == 1, "the recorded time (200) must pass the window, not the flush time (999)")
+
+        // Recorded time outside the window: dropped.
+        frames.removeAll()
+        ContainerLogsRoute.flushFinalLogLine(
+            Data("hello".utf8), ttyMode: true, timestamps: false, since: 100, until: 150,
+            recordedNano: 200, nowNanos: { 999 }, emitWithoutTimestamps: true
+        ) { frames.append($0) }
+        #expect(frames.isEmpty)
+
+        // Timestamps prefix carries the recorded time.
+        frames.removeAll()
+        ContainerLogsRoute.flushFinalLogLine(
+            Data("hello".utf8), ttyMode: true, timestamps: true, since: nil, until: nil,
+            recordedNano: nano, nowNanos: { 999 }
+        ) { frames.append($0) }
+        let payload = frames.first.map { frame -> String in
+            var frame = frame
+            return String(decoding: frame.readData(length: frame.readableBytes)!, as: UTF8.self)
+        }
+        #expect(
+            payload.map { $0.hasPrefix("2013-01-02T13:23:37") && $0.hasSuffix(" hello") } == true,
+            "the prefix must carry the recorded time, not the flush time")
     }
 
     // MARK: - HTTP level

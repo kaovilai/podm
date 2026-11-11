@@ -179,7 +179,8 @@ enum ContainerLogFollower {
         defer { try? handle.close() }
 
         let bootJournal = await journal.contents(nativeId: nativeId)
-        var alignment = ContainerLogJournal.Alignment(entries: bootJournal.entries, droppedLines: bootJournal.droppedLines)
+        var alignment = ContainerLogJournal.Alignment(
+            entries: bootJournal.entries, droppedLines: bootJournal.droppedLines, evictedNanos: bootJournal.evictedNanos)
         var pending = Data()
         // True while `pending` holds the continuation of an oversized line
         // whose head bytes were already discarded: everything up to (and
@@ -203,7 +204,18 @@ enum ContainerLogFollower {
         /// newline-free partial line beyond `maxPendingLineBytes` is
         /// discarded rather than buffered. Returns whether any bytes were
         /// read.
-        func readAvailable() async -> Bool {
+        ///
+        /// With `finalizeUnterminatedLine` — the confirmed-exit drain only —
+        /// the log's trailing unterminated line is persisted too (stamped with
+        /// the exit-drain time), so a container whose last line never met its
+        /// newline (`printf hello`) still gets a recorded write time: without
+        /// it, a windowed read could only stamp that fragment with the CURRENT
+        /// read time, and an `--until` after the exit but before the request
+        /// returned nothing. A resumed follower re-reading the same exit
+        /// classifies the fragment covered and does not duplicate it. An
+        /// oversized final line keeps its marker-only accounting (no payload
+        /// is ever retained for it).
+        func readAvailable(finalizeUnterminatedLine: Bool = false) async -> Bool {
             var gotData = false
             var fresh: [ContainerLogJournal.Entry] = []
 
@@ -254,6 +266,14 @@ enum ContainerLogFollower {
             }
 
             while let chunk = try? handle.read(upToCount: 4096), !chunk.isEmpty {
+                // A superseding arm or a disarm cancels this task: stop
+                // draining at the next chunk. A noisy container can keep
+                // data available faster than it is read, so the read loop
+                // would otherwise never reach the read gap that (only) the
+                // outer loop's checks act on — the cancelled follower kept
+                // reading and journaling alongside its replacement, and the
+                // log handle was never released.
+                if Task.isCancelled { break }
                 gotData = true
                 pending.append(chunk)
                 while let newline = pending.firstIndex(of: 0x0A) {
@@ -305,6 +325,30 @@ enum ContainerLogFollower {
                     discardingPartialLine = true
                 }
             }
+            if finalizeUnterminatedLine {
+                if discardingPartialLine {
+                    // The final line was oversized: its head bytes were
+                    // discarded and the tail bytes in `pending` are
+                    // unjournalable — record the marker for the line's
+                    // ordinal, so a resumed follower re-reading the same exit
+                    // consumes it instead of double-accounting.
+                    markOversizedLine()
+                } else if !pending.isEmpty {
+                    switch alignment.classify(pending) {
+                    case .covered, .evicted:
+                        break  // already recorded by an earlier exit drain
+                    case .fresh:
+                        if alignment.failed {
+                            await healStaleJournal()
+                        }
+                        fresh.append(
+                            ContainerLogJournal.Entry(
+                                unixNano: ContainerLogJournal.currentUnixNano(),
+                                streamType: DockerStreamFrame.StreamType.stdout.rawValue,
+                                bytes: pending))
+                    }
+                }
+            }
             await flushBatch()
             return gotData
         }
@@ -320,7 +364,7 @@ enum ContainerLogFollower {
                 // monitor grants pipe readers, journal the final writes, stop.
                 try? await Task.sleep(nanoseconds: ContainerProcessExitMonitor.outputFlushGraceNs)
                 guard await isCurrent() else { return }
-                _ = await readAvailable()
+                _ = await readAvailable(finalizeUnterminatedLine: true)
                 return
             }
             try? await Task.sleep(nanoseconds: pollIntervalNs)

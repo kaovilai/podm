@@ -59,7 +59,7 @@ struct ContainerLogJournalTests {
         withUnsafeBytes(of: UInt32(2).littleEndian) { file.append(contentsOf: $0) }
         withUnsafeBytes(of: UInt64(7).littleEndian) { file.append(contentsOf: $0) }
         for e in entries { file.append(ContainerLogJournal.encode(e)) }
-        let (parsed, droppedLines, salvaged) = ContainerLogJournal.parse(file)
+        let (parsed, droppedLines, _, salvaged) = ContainerLogJournal.parse(file)
         #expect(!salvaged)
         #expect(droppedLines == 7)
         #expect(parsed == entries)
@@ -71,10 +71,37 @@ struct ContainerLogJournalTests {
         var file = Data("PDLJ".utf8)
         withUnsafeBytes(of: UInt32(1).littleEndian) { file.append(contentsOf: $0) }
         file.append(ContainerLogJournal.encode(good))
-        let (parsed, droppedLines, salvaged) = ContainerLogJournal.parse(file)
+        let (parsed, droppedLines, _, salvaged) = ContainerLogJournal.parse(file)
         #expect(!salvaged)
         #expect(droppedLines == 0)
         #expect(parsed == [good])
+    }
+
+    @Test("version-3 files round-trip the evicted stamps; a truncated stamp section salvages")
+    func versionThreeEvictedStamps() {
+        let good = entry(7, "hello\n")
+        var file = Data("PDLJ".utf8)
+        withUnsafeBytes(of: UInt32(3).littleEndian) { file.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt64(2).littleEndian) { file.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt32(2).littleEndian) { file.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt64(100).littleEndian) { file.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt64(200).littleEndian) { file.append(contentsOf: $0) }
+        file.append(ContainerLogJournal.encode(good))
+        let (parsed, droppedLines, evictedNanos, salvaged) = ContainerLogJournal.parse(file)
+        #expect(!salvaged)
+        #expect(droppedLines == 2)
+        #expect(evictedNanos == [100, 200])
+        #expect(parsed == [good])
+
+        // A stamp count running past the file is a truncated header:
+        // salvaged to nothing, like a truncated entry.
+        var truncated = Data("PDLJ".utf8)
+        withUnsafeBytes(of: UInt32(3).littleEndian) { truncated.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt64(2).littleEndian) { truncated.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt32(5).littleEndian) { truncated.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt64(100).littleEndian) { truncated.append(contentsOf: $0) }
+        let (_, _, _, truncatedSalvaged) = ContainerLogJournal.parse(truncated)
+        #expect(truncatedSalvaged)
     }
 
     @Test("parse rejects bad magic and salvages a truncated trailing entry")
@@ -87,11 +114,11 @@ struct ContainerLogJournalTests {
         // Half of a second record's header — a crash mid-write.
         file.append(Data([0x01, 0x02, 0x03]))
 
-        let (parsed, _, salvaged) = ContainerLogJournal.parse(file)
+        let (parsed, _, _, salvaged) = ContainerLogJournal.parse(file)
         #expect(salvaged)
         #expect(parsed == [good])
 
-        let (bad, _, badSalvaged) = ContainerLogJournal.parse(Data("NOPEjunkjunkjunkjunkjunkjunkjunk".utf8))
+        let (bad, _, _, badSalvaged) = ContainerLogJournal.parse(Data("NOPEjunkjunkjunkjunkjunkjunkjunk".utf8))
         #expect(badSalvaged)
         #expect(bad.isEmpty)
     }
@@ -126,14 +153,23 @@ struct ContainerLogJournalTests {
         #expect(totalFramed <= ContainerLogJournal.maxJournalBytes)
         #expect(contents.droppedLines == entryCount - replayed.count, "the evicted line count is tracked")
 
+        // The evicted lines' arrival stamps are retained (all of them here —
+        // far below the stamp bound) in stream order, so a windowed reader
+        // can judge evicted lines by their write time instead of read time.
+        #expect(contents.evictedNanos.count == contents.droppedLines, "one retained stamp per evicted line")
+        #expect(contents.evictedNanos.first == 0, "the first evicted line's stamp is retained")
+        #expect(contents.evictedNanos.last == UInt64(contents.droppedLines - 1), "the last evicted line's stamp is retained")
+
         // A second instance re-reads the trimmed file from disk: the capped
-        // state (entries AND evicted-prefix count) genuinely persisted — the
-        // first append exceeded the cap before the directory existed.
+        // state (entries AND evicted-prefix count AND its stamps) genuinely
+        // persisted — the first append exceeded the cap before the directory
+        // existed.
         let reloaded = ContainerLogJournal()
         await reloaded.configure(storageDirectory: dir)
         let reloadedContents = await reloaded.contents(nativeId: "ctr")
         #expect(reloadedContents.entries == replayed)
         #expect(reloadedContents.droppedLines == contents.droppedLines)
+        #expect(reloadedContents.evictedNanos == contents.evictedNanos, "the evicted stamps persist (header v3)")
     }
 
     @Test("a small append after a cap trim lands on disk (no stale write handle)")
@@ -363,5 +399,35 @@ struct ContainerLogJournalTests {
             return
         }
         #expect(!uncovered.failed)
+    }
+
+    @Test("alignment reports retained stamps for evicted lines, evicted ordinals and the bound fallback")
+    func alignmentEvictedStamps() {
+        // Two evicted lines with retained stamps 100/200; the retained
+        // suffix starts at "c\n".
+        let retained = [entry(300, "c\n")]
+        var alignment = ContainerLogJournal.Alignment(entries: retained, droppedLines: 2, evictedNanos: [100, 200])
+        #expect(alignment.timestamp(for: Data("a\n".utf8)) == 100, "the first evicted line reports its retained stamp")
+        #expect(alignment.timestamp(for: Data("b\n".utf8)) == 200, "the second evicted line reports its retained stamp")
+        #expect(alignment.timestamp(for: Data("c\n".utf8)) == 300, "the retained suffix still aligns")
+
+        // Evicted ordinals consumed via consumeGapMarker (oversized lines)
+        // report the retained stamp too.
+        var marker = ContainerLogJournal.Alignment(entries: retained, droppedLines: 1, evictedNanos: [100])
+        guard case .evicted(100) = marker.consumeGapMarker() else {
+            Issue.record("an evicted ordinal must report its retained stamp, not nil")
+            return
+        }
+        #expect(marker.timestamp(for: Data("c\n".utf8)) == 300)
+
+        // Evictions OLDER than the retained stamp window fall back to the
+        // oldest retained stamp — an upper bound on their write time, so a
+        // past `--until` keeps them and a recent `--since` may keep them,
+        // never read-time.
+        var old = ContainerLogJournal.Alignment(entries: retained, droppedLines: 5, evictedNanos: [400])
+        guard case .evicted(400) = old.classify(Data("ancient\n".utf8)) else {
+            Issue.record("an eviction past the stamp window must report the bound")
+            return
+        }
     }
 }

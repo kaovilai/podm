@@ -139,6 +139,7 @@ extension ContainerAttachRoute {
                 // eliminates the race condition for fast-exiting containers (#220).
                 return try await attachStoppedOutputOnly(
                     req: req,
+                    client: client,
                     hexId: id,
                     container: container,
                     query: query,
@@ -282,6 +283,7 @@ extension ContainerAttachRoute {
     // Uses pipes instead of log-file polling to eliminate the race for fast-exiting containers.
     private static func attachStoppedOutputOnly(
         req: Request,
+        client: ClientContainerProtocol,
         hexId: String,
         container: ContainerSnapshot,
         query: ContainerAttachQuery,
@@ -332,6 +334,16 @@ extension ContainerAttachRoute {
         }
 
         await ProcessRegistry.shared.set(id: container.id, process: process)
+
+        // The bootstrap above performed this container's boot — register a
+        // fresh log-journal boot NOW. The /start the CLI sends next sees the
+        // container already running and arms with freshLogBoot false, so
+        // without this registration the previous boot's follower and journal
+        // would live on: startup lines identical to the old boot's (same
+        // banner) classify as covered and inherit stale timestamps — a
+        // coincidence the first-mismatch self-heal can never catch.
+        await ContainerLogFollowerRegistry.shared.arm(
+            nativeId: container.id, client: client, logger: req.logger, freshBoot: true)
 
         await broadcastAttach(
             container: container,
@@ -566,6 +578,12 @@ extension ContainerAttachRoute {
         }
 
         await ProcessRegistry.shared.set(id: container.id, process: process)
+
+        // The bootstrap above performed this container's boot — register a
+        // fresh log-journal boot NOW (see attachStoppedOutputOnly for why the
+        // later no-op /start cannot be the one to do it).
+        await ContainerLogFollowerRegistry.shared.arm(
+            nativeId: container.id, client: client, logger: req.logger, freshBoot: true)
 
         let broadcaster = req.application.storage[EventBroadcasterKey.self]
         await broadcastAttach(
