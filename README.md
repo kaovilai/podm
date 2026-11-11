@@ -396,17 +396,17 @@ Full, searchable version: **[podm route coverage site](https://github.tig.pw/pod
 | 🚫 | `GET` | `/nodes` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
 | 🚫 | `GET` | `/nodes/{id}` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
 | 🚫 | `POST` | `/nodes/{id}/update` | docker | Swarm object — Apple container has no swarm mode; the route answers moby's documented 503 for CLI compatibility. |
-| 🚫 | `GET` | `/plugins` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
-| 🚫 | `POST` | `/plugins/create` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
-| 🚫 | `GET` | `/plugins/privileges` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
-| 🚫 | `POST` | `/plugins/pull` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
-| 🚫 | `GET` | `/plugins/{name}` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
-| 🚫 | `POST` | `/plugins/{name}/disable` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
-| 🚫 | `POST` | `/plugins/{name}/enable` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
-| 🚫 | `GET` | `/plugins/{name}/json` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
-| 🚫 | `POST` | `/plugins/{name}/push` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
-| 🚫 | `POST` | `/plugins/{name}/set` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
-| 🚫 | `POST` | `/plugins/{name}/upgrade` | docker | The docker plugin system is out of scope (podman's compat layer answers 404); the route answers 501 for CLI compatibility. |
+| ✅ | `GET` | `/plugins` | docker |  |
+| ✅ | `POST` | `/plugins/create` | docker |  |
+| ✅ | `GET` | `/plugins/privileges` | docker |  |
+| 🚫 | `POST` | `/plugins/pull` | docker | The docker plugin runtime (privileged plugin container + /run/docker/plugins socket) has no mapping onto Apple's microVM isolation; the route answers not-implemented for CLI compatibility. |
+| ✅ | `GET` | `/plugins/{name}` | docker |  |
+| 🚫 | `POST` | `/plugins/{name}/disable` | docker | The docker plugin runtime (privileged plugin container + /run/docker/plugins socket) has no mapping onto Apple's microVM isolation; the route answers not-implemented for CLI compatibility. |
+| 🚫 | `POST` | `/plugins/{name}/enable` | docker | The docker plugin runtime (privileged plugin container + /run/docker/plugins socket) has no mapping onto Apple's microVM isolation; the route answers not-implemented for CLI compatibility. |
+| ✅ | `GET` | `/plugins/{name}/json` | docker |  |
+| 🚫 | `POST` | `/plugins/{name}/push` | docker | The docker plugin runtime (privileged plugin container + /run/docker/plugins socket) has no mapping onto Apple's microVM isolation; the route answers not-implemented for CLI compatibility. |
+| 🚫 | `POST` | `/plugins/{name}/set` | docker | The docker plugin runtime (privileged plugin container + /run/docker/plugins socket) has no mapping onto Apple's microVM isolation; the route answers not-implemented for CLI compatibility. |
+| 🚫 | `POST` | `/plugins/{name}/upgrade` | docker | The docker plugin runtime (privileged plugin container + /run/docker/plugins socket) has no mapping onto Apple's microVM isolation; the route answers not-implemented for CLI compatibility. |
 | ✅ | `GET` | `/secrets` | docker |  |
 | ✅ | `POST` | `/secrets/create` | docker |  |
 | ✅ | `DELETE` | `/secrets/{id}` | docker |  |
