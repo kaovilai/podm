@@ -69,16 +69,19 @@ enum PodmanConnectionRegistrar {
     /// remove first: podman 6's `system connection add` updates an existing
     /// name in place, and removing would clear the user's default selection
     /// (remove of the default connection leaves no default; the re-add does
-    /// not restore it). Does NOT change an existing default — primacy stays
-    /// the user's decision (`podman system connection default podm`).
+    /// not restore it).
     ///
-    /// ONE caveat podman itself imposes: on a CLEAN profile (no connections
-    /// at all), podman's add makes the new connection the DEFAULT
-    /// (cmd/podman/system/connection/add.go: `Connections == nil` →
-    /// `Default = connection`) — podman's native rule for any first-ever
-    /// connection, not something podm opts into. The result reports
-    /// `becameDefaultOnCleanProfile` so the caller can tell the user
-    /// explicitly instead of it happening silently.
+    /// The DEFAULT is actively preserved: podman's add can silently change
+    /// it in two situations — a clean writable profile (its `Connections ==
+    /// nil` rule makes any first-ever connection the default), and a profile
+    /// whose connections come entirely from a READ-ONLY layer (containers.conf
+    /// supplies them; the writable connections file is empty, so the same
+    /// nil rule fires and replaces the read-only default). Both are detected
+    /// by comparing the default BEFORE and AFTER: a changed default with a
+    /// pre-existing selection is RESTORED via `system connection default`;
+    /// when there was no default at all (the clean-profile case), podman
+    /// leaves no way to unset it — the result reports
+    /// `becameDefaultOnCleanProfile` so the caller can say so loudly.
     ///
     /// Returns nil when registration failed entirely.
     static func register(
@@ -87,20 +90,30 @@ enum PodmanConnectionRegistrar {
     ) -> RegistrationResult? {
         // The destination is POSITIONAL (podman-system-connection(1):
         // "add [options] NAME DESTINATION").
-        let cleanProfile = listConnections(podmanPath: podmanPath, spawn: spawn)?.isEmpty == true
+        let priorDefault = listConnections(podmanPath: podmanPath, spawn: spawn)?
+            .first(where: { $0.isDefault })?.name
         guard
             spawn(podmanPath, ["system", "connection", "add", connectionName, uri]).exitStatus == 0
         else { return nil }
+        let postDefault = listConnections(podmanPath: podmanPath, spawn: spawn)?
+            .first(where: { $0.isDefault })?.name
+        if let priorDefault, priorDefault != connectionName, postDefault != priorDefault {
+            // podman's add flipped an existing default (the read-only-layer
+            // case) — restore the user's selection.
+            _ = spawn(podmanPath, ["system", "connection", "default", priorDefault])
+        }
         return RegistrationResult(
-            connectionName: connectionName, becameDefaultOnCleanProfile: cleanProfile)
+            connectionName: connectionName,
+            becameDefaultOnCleanProfile: priorDefault == nil && postDefault == connectionName)
     }
 
     /// The outcome of a `register` call.
     struct RegistrationResult: Equatable {
         let connectionName: String
-        /// True when this was the first-ever connection on a clean podman
-        /// profile — podman's own rule then makes it the default; the caller
-        /// should say so loudly.
+        /// True when there was no default before and podm's registration
+        /// became it (podman's own first-connection rule on a clean profile;
+        /// there is no command to unset a default) — the caller should tell
+        /// the user loudly.
         let becameDefaultOnCleanProfile: Bool
     }
 

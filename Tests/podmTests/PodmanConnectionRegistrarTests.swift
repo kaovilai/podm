@@ -38,10 +38,12 @@ struct PodmanConnectionRegistrarTests {
 
     @Test("register adds with the positional destination and NO remove — podman updates in place")
     func registerSequence() {
-        // A NON-clean profile (one existing connection): podman's add does
-        // not touch the default.
-        let recorder = SpawnRecorder(
-            verbs: ["list": (0, SpawnRecorder.listing([["Name": "other", "URI": "ssh://x"]]))])
+        // A NON-clean profile (one existing connection, itself the
+        // default): podman's add does not touch the default.
+        let listing = SpawnRecorder.listing([
+            ["Name": "other", "URI": "ssh://x", "Default": true]
+        ])
+        let recorder = SpawnRecorder(verbs: ["list": (0, listing)])
 
         let result = PodmanConnectionRegistrar.register(
             podmanPath: "/opt/podman/bin/podman",
@@ -52,15 +54,16 @@ struct PodmanConnectionRegistrarTests {
             result
                 == PodmanConnectionRegistrar.RegistrationResult(
                     connectionName: "podm", becameDefaultOnCleanProfile: false))
-        // The whole contract: ONE add, destination positional, after ONE
-        // clean-profile check. No remove — podman 6's add updates an
-        // existing name in place, and a remove would clear the user's
-        // default selection.
-        #expect(recorder.calls.count == 2)
+        // The whole contract: list (default snapshot), add (destination
+        // positional), list (verify the default survived). No remove —
+        // podman 6's add updates an existing name in place, and a remove
+        // would clear the user's default selection.
+        #expect(recorder.calls.count == 3)
         #expect(recorder.calls[0].arguments == ["system", "connection", "list", "--format", "json"])
         #expect(
             recorder.calls[1].arguments
                 == ["system", "connection", "add", "podm", "unix:///home/user/.podm/container.sock"])
+        #expect(recorder.calls[2].arguments == ["system", "connection", "list", "--format", "json"])
         #expect(recorder.calls[1].executable == "/opt/podman/bin/podman")
     }
 
@@ -72,12 +75,57 @@ struct PodmanConnectionRegistrarTests {
     /// silently.
     @Test("register reports when a clean profile makes podm the default")
     func registerOnCleanProfileReportsDefault() {
-        let recorder = SpawnRecorder(verbs: ["list": (0, "[]")])
+        // Before: nothing at all. After: podm, made the default by podman's
+        // own first-connection rule.
+        let before = "[]"
+        let after = SpawnRecorder.listing([["Name": "podm", "URI": "unix://x", "Default": true]])
+        var listingIndex = 0
+        let spawn: PodmanConnectionRegistrar.Spawn = { _, arguments in
+            if arguments.contains("list") {
+                listingIndex += 1
+                return (0, listingIndex == 1 ? before : after)
+            }
+            return (0, "")
+        }
 
         let result = PodmanConnectionRegistrar.register(
-            podmanPath: "/podman", uri: "unix://x", spawn: recorder.spawn)
+            podmanPath: "/podman", uri: "unix://x", spawn: spawn)
 
         #expect(result?.becameDefaultOnCleanProfile == true)
+    }
+
+    /// Review round 4: connections supplied entirely by a READ-ONLY layer
+    /// (containers.conf) — the LISTING shows an existing default, but
+    /// podman's add still sees an empty WRITABLE profile and flips the
+    /// default to the new connection. The before/after comparison must
+    /// catch it and RESTORE the previous selection.
+    @Test("register restores a default flipped by podman's add")
+    func registerRestoresFlippedDefault() {
+        let before = SpawnRecorder.listing([
+            ["Name": "other-machine", "URI": "ssh://x", "Default": true]
+        ])
+        let after = SpawnRecorder.listing([
+            ["Name": "other-machine", "URI": "ssh://x", "Default": false],
+            ["Name": "podm", "URI": "unix://x", "Default": true],
+        ])
+        var listingIndex = 0
+        var calls: [(executable: String, arguments: [String])] = []
+        let spawn: PodmanConnectionRegistrar.Spawn = { executable, arguments in
+            calls.append((executable, arguments))
+            if arguments.contains("list") {
+                listingIndex += 1
+                return (0, listingIndex == 1 ? before : after)
+            }
+            return (0, "")
+        }
+
+        let result = PodmanConnectionRegistrar.register(
+            podmanPath: "/podman", uri: "unix://x", spawn: spawn)
+
+        #expect(result?.becameDefaultOnCleanProfile == false, "a default existed before")
+        #expect(
+            calls.contains { $0.arguments == ["system", "connection", "default", "other-machine"] },
+            "the flipped default must be restored")
     }
 
     @Test("register reports failure when podman rejects the add")
@@ -101,7 +149,8 @@ struct PodmanConnectionRegistrarTests {
         _ = PodmanConnectionRegistrar.register(
             podmanPath: "/podman", uri: "unix://x", connectionName: "podm-alt", spawn: recorder.spawn)
 
-        #expect(recorder.calls.last?.arguments[3] == "podm-alt")
+        #expect(
+            recorder.calls.first(where: { $0.arguments[2] == "add" })?.arguments[3] == "podm-alt")
     }
 
     @Test("isRegistered parses the list --format json output podman actually produces")
@@ -174,18 +223,19 @@ struct PodmanConnectionRegistrarTests {
     }
 
     /// Review round 3: a CLI emitting warnings to STDERR while printing
-    /// valid JSON to stdout must not corrupt the parse — echo writes the
-    /// marker to stdout, and the command itself writes nothing to stderr,
-    /// so the captured output must be exactly the marker (a merged-stream
-    /// implementation would also pass this; the separation is enforced by
-    /// runCaptureStdout's null stderr, asserted structurally by the seam
-    /// living in ProcessSpawn).
+    /// Review round 4: a command writing ONLY stdout passes even under a
+    /// merged-stream implementation — the probe must write BOTH streams so
+    /// the regression (podman's config warnings on stderr corrupting the
+    /// JSON parse) is actually detectable.
     @Test("the production spawn seam reads stdout, not stderr")
     func realSpawnStdoutOnly() {
-        // /usr/bin/printf writes to stdout; warnings would go to stderr.
-        let result = PodmanConnectionRegistrar.realSpawn("/usr/bin/printf", ["json-marker"])
+        let result = PodmanConnectionRegistrar.realSpawn(
+            "/bin/sh",
+            ["-c", "printf stdout-marker; printf stderr-warning >&2"])
         #expect(result.exitStatus == 0)
-        #expect(result.output == "json-marker", "stdout only, exactly: \(result.output ?? "nil")")
+        #expect(
+            result.output == "stdout-marker",
+            "stdout only, exactly: \(result.output ?? "nil")")
     }
 
     @Test("listConnections decodes entries and distinguishes CLI failure")
