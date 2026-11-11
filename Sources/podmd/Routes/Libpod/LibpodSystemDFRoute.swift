@@ -58,7 +58,13 @@ struct LibpodSystemDfImageReport: Content {
         var repository = "<none>"
         var tag = "<none>"
         if let first = s.RepoTags.first {
-            if let separator = first.lastIndex(of: ":") {
+            // Split at the last colon only when what follows it is a TAG (no
+            // slash): a registry port without a tag ("localhost:5000/foo")
+            // must not split into repository "localhost" + tag "5000/foo" —
+            // the whole entry is the repository and the tag stays "<none>".
+            if let separator = first.lastIndex(of: ":"),
+                !first[first.index(after: separator)...].contains("/")
+            {
                 repository = String(first[first.startIndex..<separator])
                 tag = String(first[first.index(after: separator)...])
             } else {
@@ -101,7 +107,13 @@ struct LibpodSystemDfContainerReport: Content {
             // podman's own df report carries the image ID here, not the
             // reference (its CLI truncates the value for display).
             Image: s.ImageID,
-            Command: s.Command.split(separator: " ").map(String.init),
+            // podman's Command is []string: carry the original argv from the
+            // container snapshot so argument boundaries survive (the docker
+            // dialect's display string is space-joined and unrecoverable —
+            // `["/bin/sh", "-c", "sleep 600"]` would split into four args and
+            // empty arguments would vanish). Fall back to the display-string
+            // split only for summaries built without argv.
+            Command: s.CommandArgv ?? s.Command.split(separator: " ").map(String.init),
             LocalVolumes: s.Mounts.filter { $0.type == "volume" }.count,
             Size: s.SizeRootFs ?? 0,
             RWSize: s.SizeRw ?? 0,

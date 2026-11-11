@@ -136,7 +136,10 @@ struct LibpodSystemDFRouteTests {
                 let container = try #require(report.Containers.first)
                 #expect(container.ContainerID == DockerContainerID.hexId(for: snapshot))
                 #expect(container.Image == "sha256:abc")
-                #expect(container.Command == ["/bin/sh", "-c", "sleep", "600"])
+                // The original argv survives: splitting the docker dialect's
+                // space-joined display string would turn "sleep 600" into two
+                // arguments and lose the -c boundary.
+                #expect(container.Command == ["/bin/sh", "-c", "sleep 600"])
                 #expect(container.LocalVolumes == 1)
                 #expect(container.Size == 4096)
                 #expect(container.RWSize == 4096)
@@ -202,6 +205,8 @@ struct LibpodSystemDFRouteTests {
 
     @Test("Container row: docker names lose their leading slash; LocalVolumes counts volume mounts only")
     func containerReportNamesAndVolumes() throws {
+        // CommandArgv nil (a summary built without argv): the display string
+        // is split as a fallback.
         let summary = RESTContainerSummary(
             Id: "0571d714e6ce", Names: ["/df-test"], Image: "docker.io/library/busybox:latest",
             ImageID: "sha256:a46257e06c82", ImageManifestDescriptor: nil, Command: "sleep 600",
@@ -222,5 +227,44 @@ struct LibpodSystemDFRouteTests {
         #expect(row.Names == "df-test")
         #expect(row.LocalVolumes == 1)
         #expect(row.Command == ["sleep", "600"])
+    }
+
+    @Test("Container row: the original argv is carried through, preserving argument boundaries")
+    func containerReportCommandArgv() throws {
+        // ["/bin/sh", "-c", "sleep 600"] joined for display as one string —
+        // the libpod Command must keep the real argv, including the argument
+        // containing a space, and empty arguments.
+        var summary = RESTContainerSummary(
+            Id: "0571d714e6ce", Names: ["/df-test"], Image: "busybox", ImageID: "sha256:abc",
+            ImageManifestDescriptor: nil, Command: "/bin/sh -c sleep 600",
+            Created: 1_777_000_000, StartedAtUnix: nil, ExitCode: nil, ExitedAtUnix: nil, Ports: [],
+            SizeRw: 0, SizeRootFs: 0, Labels: [:], State: "exited", Status: "exited",
+            HostConfig: ContainerHostConfig(NetworkMode: "default", Annotations: nil),
+            NetworkSettings: ContainerNetworkSummary(Networks: nil),
+            Mounts: [], Platform: "linux")
+        summary.CommandArgv = ["/bin/sh", "-c", "sleep 600", ""]
+        #expect(LibpodSystemDfContainerReport.from(summary).Command == ["/bin/sh", "-c", "sleep 600", ""])
+    }
+
+    @Test("Image row: a registry port without a tag is the whole repository, not a bogus split")
+    func imageReportRegistryPortWithoutTag() throws {
+        let untagged = LibpodSystemDfImageReport.from(
+            RESTImageSummary(
+                Id: "sha256:portonly", ParentId: "", RepoTags: ["localhost:5000/foo"],
+                RepoDigests: [], Created: 0, Size: 100, SharedSize: 0, Labels: [:], Containers: 0,
+                Manifests: nil, Descriptor: nil))
+        // The last colon belongs to the registry port, not a tag separator:
+        // the entry is the repository and the tag reports <none>.
+        #expect(untagged.Repository == "localhost:5000/foo")
+        #expect(untagged.Tag == "<none>")
+
+        // A real tag after a registry port still splits correctly.
+        let tagged = LibpodSystemDfImageReport.from(
+            RESTImageSummary(
+                Id: "sha256:porttag", ParentId: "", RepoTags: ["localhost:5000/foo:v1.2"],
+                RepoDigests: [], Created: 0, Size: 100, SharedSize: 0, Labels: [:], Containers: 0,
+                Manifests: nil, Descriptor: nil))
+        #expect(tagged.Repository == "localhost:5000/foo")
+        #expect(tagged.Tag == "v1.2")
     }
 }

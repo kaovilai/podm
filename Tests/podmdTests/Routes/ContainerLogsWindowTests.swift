@@ -15,21 +15,26 @@ import VaporTesting
 @Suite("ContainerLogsRoute — since/until window")
 struct ContainerLogsWindowTests {
 
-    private func journal(_ lines: [(nano: UInt64, line: String)]) -> [ContainerLogJournal.Entry] {
-        lines.map { ContainerLogJournal.Entry(unixNano: $0.nano, streamType: 1, bytes: Data($0.line.utf8)) }
+    private func journal(
+        _ lines: [(nano: UInt64, line: String)], dropped: Int = 0
+    ) -> ContainerLogJournal.Contents {
+        ContainerLogJournal.Contents(
+            entries: lines.map { ContainerLogJournal.Entry(unixNano: $0.nano, streamType: 1, bytes: Data($0.line.utf8)) },
+            droppedLines: dropped)
     }
 
     /// Drives the scanner over `stream` in fixed-size chunks and collects the
     /// framed payloads (non-TTY: an 8-byte stdcopy header precedes each).
     private func scan(
         _ stream: String,
-        journal: [ContainerLogJournal.Entry] = [],
+        journal: ContainerLogJournal.Contents = ContainerLogJournal.Contents(),
         since: UInt64? = nil,
         until: UInt64? = nil,
         tail: Int? = nil,
         timestamps: Bool = false,
         ttyMode: Bool = false,
-        nowNanos: UInt64 = 999_999_999_999
+        nowNanos: UInt64 = 999_999_999_999,
+        streamEnded: Bool = false
     ) async throws -> (payloads: [String], remainder: Data) {
         let bytes = Array(stream.utf8)
         var offset = 0
@@ -41,13 +46,14 @@ struct ContainerLogsWindowTests {
                 defer { offset = next }
                 return Data(bytes[offset..<next])
             },
-            journalEntries: journal,
+            journal: journal,
             since: since,
             until: until,
             tail: tail,
             ttyMode: ttyMode,
             timestamps: timestamps,
-            nowNanos: { nowNanos }
+            nowNanos: { nowNanos },
+            streamEnded: streamEnded
         ) { frame in
             var frame = frame
             if !ttyMode { frame.moveReaderIndex(forwardBy: 8) }  // skip the stdcopy header
@@ -122,6 +128,79 @@ struct ContainerLogsWindowTests {
         #expect(result.remainder == Data("partial".utf8))
     }
 
+    @Test("a trailing partial line counts toward tail when the stream genuinely ends")
+    func tailCountsTrailingPartial() async throws {
+        // `a\nb` (no trailing newline): one complete line (`a\n`, journal time
+        // 100) plus the final partial line (`b`). With tail=1 the final line
+        // is `b`, so only `b` may be emitted — emitting the retained tail
+        // ring first and the partial separately would return both lines.
+        let fixture = journal([(100, "a\n")])
+        let tailOne = try await scan("a\nb", journal: fixture, tail: 1, timestamps: true, streamEnded: true)
+        #expect(tailOne.payloads.count == 1)
+        #expect(tailOne.payloads[0].hasSuffix("b"))
+        #expect(!tailOne.payloads[0].hasSuffix("\n"), "the emitted final line is the unterminated partial, read-time stamped")
+        #expect(tailOne.remainder.isEmpty)
+
+        // tail=2 keeps both the complete line and the partial.
+        let tailTwo = try await scan("a\nb", journal: fixture, tail: 2, timestamps: true, streamEnded: true)
+        #expect(tailTwo.payloads.count == 2)
+        #expect(tailTwo.payloads[0].hasSuffix("a\n"))
+        #expect(tailTwo.payloads[1].hasSuffix("b"))
+        #expect(!tailTwo.payloads[1].hasSuffix("\n"))
+
+        // Without a tail limit the partial is emitted directly, like
+        // flushFinalLogLine did.
+        let noTail = try await scan("a\nb", journal: fixture, timestamps: true, streamEnded: true)
+        #expect(noTail.payloads.count == 2)
+        #expect(noTail.payloads[1].hasSuffix("b"))
+        #expect(!noTail.payloads[1].hasSuffix("\n"))
+
+        // A partial that fails the window is dropped and does not consume tail.
+        let filtered = try await scan("a\nb", journal: fixture, until: 500, tail: 1, streamEnded: true)
+        #expect(filtered.payloads == ["a\n"], "the read-time-stamped partial fails until and must not displace the tail entry")
+    }
+
+    @Test("the evicted journal prefix is skipped so the retained suffix still aligns")
+    func evictedPrefixAlignment() async throws {
+        // The journal covers the whole boot but the cap evicted the first two
+        // lines: alignment must skip them (they fall back to read time, which
+        // this until drops) and still recover the retained line's recorded
+        // time — without the evicted-prefix count the first retained entry
+        // would be matched against "a\n", fail, and disable recovery.
+        let fixture = journal([(300, "c\n")], dropped: 2)
+        let result = try await scan("a\nb\nc\n", journal: fixture, until: 350)
+        #expect(result.payloads == ["c\n"])
+    }
+
+    @Test("a follow batch that crosses until still emits the lines accepted before it")
+    func untilCrossingBatchFlushesAcceptedFrames() throws {
+        // One read holds both lines: "keep" passes the window, "past" crosses
+        // until. The accepted frame must be returned (and emitted by the
+        // caller) rather than dropped when the read stops.
+        let bytes = Array("keep\npast\n".utf8)
+        var offset = 0
+        var buffer = Data()
+        var nowValues: [UInt64] = [300, 600]
+        let (frames, reachedUntil, gotData) = ContainerLogsRoute.readWindowedFollowBatch(
+            from: &buffer,
+            read: {
+                guard offset < bytes.count else { return nil }
+                defer { offset = min(offset + 4096, bytes.count) }
+                return Data(bytes[offset..<min(offset + 4096, bytes.count)])
+            },
+            since: nil,
+            until: 500,
+            ttyMode: true,
+            timestamps: false,
+            nowNanos: { nowValues.removeFirst() }
+        )
+        #expect(gotData)
+        #expect(reachedUntil, "the line past until must end the follow")
+        #expect(frames.count == 1, "the in-window line accepted before until must survive")
+        var frame = frames[0]
+        #expect(String(decoding: frame.readData(length: frame.readableBytes)!, as: UTF8.self) == "keep\n")
+    }
+
     @Test("timestamps stamps each line with its journal-recorded write time")
     func journalTimestamps() async throws {
         let fixture = journal([(1_357_133_017_000_000_000, "hello\n")])
@@ -145,7 +224,7 @@ struct ContainerLogsWindowTests {
                 defer { offset = min(offset + 2, bytes.count) }
                 return Data(bytes[offset..<min(offset + 2, bytes.count)])
             },
-            journalEntries: fixture,
+            journal: fixture,
             since: nil,
             until: nil,
             tail: nil,

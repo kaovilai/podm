@@ -74,10 +74,10 @@ extension ContainerLogsRoute {
             // backlog lines (read time is the fallback for lines it does not
             // cover). Plain reads skip the journal entirely.
             let windowed = timestamps || since != nil || until != nil
-            let journalEntries =
+            let bootJournal =
                 windowed
-                ? await ContainerLogJournal.shared.entries(nativeId: container.id)
-                : []
+                ? await ContainerLogJournal.shared.contents(nativeId: container.id)
+                : ContainerLogJournal.Contents()
             // `until` in the past bounds the response: backlog only, no stream.
             let followActive = follow && (until == nil || until! > ContainerLogJournal.currentUnixNano())
 
@@ -113,13 +113,14 @@ extension ContainerLogsRoute {
                             }
                             buffer = try await ContainerLogsRoute.scanWindowedBacklog(
                                 read: { try fileHandle.read(upToCount: 4096) },
-                                journalEntries: journalEntries,
+                                journal: bootJournal,
                                 since: since,
                                 until: until,
                                 tail: tail,
                                 ttyMode: isTTY,
                                 timestamps: timestamps,
-                                nowNanos: { ContainerLogJournal.currentUnixNano() }
+                                nowNanos: { ContainerLogJournal.currentUnixNano() },
+                                streamEnded: !followActive
                             ) { frame in
                                 // Await each write so a client disconnect aborts the
                                 // response instead of queueing the whole window.
@@ -188,39 +189,35 @@ extension ContainerLogsRoute {
                         // Windowed follow: same polling contract, but each live
                         // line is stamped with its arrival time and the window
                         // keeps applying — a line (or the wall clock) passing
-                        // `until` ends the read, matching moby.
+                        // `until` ends the read, matching moby. Lines accepted
+                        // before `until` was crossed are still emitted first:
+                        // they passed the window and belong in the response.
                         follow: while true {
-                            var gotData = false
-                            var frames: [ByteBuffer] = []
+                            let batch: (frames: [ByteBuffer], reachedUntil: Bool, gotData: Bool)
                             do {
-                                while let data = try fileHandle.read(upToCount: 4096), !data.isEmpty {
-                                    gotData = true
-                                    buffer.append(data)
-                                    while let newline = buffer.firstIndex(of: 0x0A) {
-                                        let line = buffer.subdata(in: buffer.startIndex..<buffer.index(after: newline))
-                                        buffer = buffer.subdata(in: buffer.index(after: newline)..<buffer.endIndex)
-                                        let unixNano = ContainerLogJournal.currentUnixNano()
-                                        if let since, unixNano < since { continue }
-                                        if let until, unixNano > until { break follow }
-                                        frames.append(
-                                            ContainerLogsRoute.stampedFrame(
-                                                line, unixNano: unixNano, ttyMode: isTTY, timestamps: timestamps))
-                                    }
-                                }
+                                batch = try ContainerLogsRoute.readWindowedFollowBatch(
+                                    from: &buffer,
+                                    read: { try fileHandle.read(upToCount: 4096) },
+                                    since: since,
+                                    until: until,
+                                    ttyMode: isTTY,
+                                    timestamps: timestamps,
+                                    nowNanos: { ContainerLogJournal.currentUnixNano() })
                             } catch {
                                 break
                             }
-                            for frame in frames {
+                            for frame in batch.frames {
                                 do {
                                     try await writer.write(.buffer(frame)).get()
                                 } catch {
                                     break follow
                                 }
                             }
+                            if batch.reachedUntil { break }
                             // A future `until` also bounds the follow on wall
                             // clock alone, so the response cannot outlive it.
                             if let until, ContainerLogJournal.currentUnixNano() > until { break }
-                            if !gotData {
+                            if !batch.gotData {
                                 let current = try? await logFollowClient.get(id: container.id)
                                 if current == nil || current?.status != .running { break }
                                 try? await Task.sleep(for: .milliseconds(150))
@@ -357,21 +354,32 @@ extension ContainerLogsRoute {
     /// lines are kept in a ring and emitted at the end — moby applies `tail` to
     /// the window-filtered set — bounded by the tail count; without it they are
     /// emitted as they are scanned, so memory stays bounded by the window
-    /// rather than the whole log. Returns the trailing partial line, like
-    /// `processDockerLogFrames`, so a follow can carry it onward.
+    /// rather than the whole log. The ring is a head-indexed array (the dead
+    /// prefix is compacted in bulk), so a large `tail` over a huge window does
+    /// not shift the window on every accepted line.
+    ///
+    /// Returns the trailing partial line, like `processDockerLogFrames`, so a
+    /// follow can carry it onward — unless `streamEnded` is set (no follow will
+    /// run), in which case the partial line is a genuine final line: it passes
+    /// through the same window check, counts toward the `tail` limit (moby's
+    /// tail counts an unterminated final line, like `lastLines` does) and is
+    /// emitted with the ring, stamped with read time. It can never be
+    /// journal-covered (the journal records only complete lines).
     static func scanWindowedBacklog(
         read: () throws -> Data?,
-        journalEntries: [ContainerLogJournal.Entry],
+        journal: ContainerLogJournal.Contents,
         since: UInt64?,
         until: UInt64?,
         tail: Int?,
         ttyMode: Bool,
         timestamps: Bool,
         nowNanos: () -> UInt64,
+        streamEnded: Bool = false,
         emit: (ByteBuffer) async throws -> Void
     ) async throws -> Data {
-        var alignment = ContainerLogJournal.Alignment(entries: journalEntries)
-        var ring: [(line: Data, unixNano: UInt64)]? = tail != nil ? [] : nil
+        var alignment = ContainerLogJournal.Alignment(entries: journal.entries, droppedLines: journal.droppedLines)
+        var ring: [(line: Data, unixNano: UInt64)] = []
+        var ringHead = 0
         var pending = Data()
         while let chunk = try read(), !chunk.isEmpty {
             pending.append(chunk)
@@ -382,20 +390,80 @@ extension ContainerLogsRoute {
                 // moby: lines written before `since` or after `until` are dropped.
                 if let since, unixNano < since { continue }
                 if let until, unixNano > until { continue }
-                if ring != nil {
-                    ring!.append((line, unixNano))
-                    if let tail, ring!.count > tail { ring!.removeFirst() }
+                if let tail {
+                    ring.append((line, unixNano))
+                    if ring.count - ringHead > tail { ringHead += 1 }
+                    // Compact the dead prefix in bulk once it outgrows the
+                    // live window, so the array stays ~2x tail at most.
+                    if ringHead > max(tail, 1024) {
+                        ring.removeFirst(ringHead)
+                        ringHead = 0
+                    }
                 } else {
                     try await emit(stampedFrame(line, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
                 }
             }
         }
-        if let ring {
-            for (line, unixNano) in ring {
+        if streamEnded, !pending.isEmpty {
+            // The stream genuinely ends here: the unterminated trailing line is
+            // the log's final line, not a mid-write gap — window it and count
+            // it toward the tail limit before the retained tail is emitted.
+            let unixNano = nowNanos()
+            let passesWindow = (since.map { unixNano >= $0 } ?? true) && (until.map { unixNano <= $0 } ?? true)
+            if passesWindow {
+                if let tail {
+                    ring.append((pending, unixNano))
+                    if ring.count - ringHead > tail { ringHead += 1 }
+                } else {
+                    try await emit(stampedFrame(pending, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
+                }
+            }
+            pending.removeAll()
+        }
+        if ringHead < ring.count {
+            for (line, unixNano) in ring[ringHead...] {
                 try await emit(stampedFrame(line, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
             }
         }
         return pending
+    }
+
+    /// One pass of the windowed follow loop: reads whatever is currently
+    /// available from the log stream, stamps each complete line with its
+    /// arrival time and applies the `since`/`until` window. Returns the framed
+    /// output, whether a line passed `until` (the caller ends the follow but
+    /// must still emit the accepted frames — dropping them would lose
+    /// in-window output that already passed the window check), and whether any
+    /// bytes were read. `buffer` carries the trailing partial line across
+    /// passes.
+    static func readWindowedFollowBatch(
+        from buffer: inout Data,
+        read: () throws -> Data?,
+        since: UInt64?,
+        until: UInt64?,
+        ttyMode: Bool,
+        timestamps: Bool,
+        nowNanos: () -> UInt64
+    ) rethrows -> (frames: [ByteBuffer], reachedUntil: Bool, gotData: Bool) {
+        var frames: [ByteBuffer] = []
+        var gotData = false
+        var reachedUntil = false
+        readLoop: while let data = try read(), !data.isEmpty {
+            gotData = true
+            buffer.append(data)
+            while let newline = buffer.firstIndex(of: 0x0A) {
+                let line = buffer.subdata(in: buffer.startIndex..<buffer.index(after: newline))
+                buffer = buffer.subdata(in: buffer.index(after: newline)..<buffer.endIndex)
+                let unixNano = nowNanos()
+                if let since, unixNano < since { continue }
+                if let until, unixNano > until {
+                    reachedUntil = true
+                    break readLoop
+                }
+                frames.append(stampedFrame(line, unixNano: unixNano, ttyMode: ttyMode, timestamps: timestamps))
+            }
+        }
+        return (frames, reachedUntil, gotData)
     }
 
     /// Frames one windowed line for output, prefixing the resolved write time

@@ -78,18 +78,23 @@ final class EXT4XattrReader {
     /// behavior. An inline region without the magic header is *not* an
     /// error: real filesystems only write the header once the first
     /// attribute lands, so leftover non-zero bytes there simply mean no
-    /// inline xattrs.
+    /// inline xattrs (any block-backed set is still decoded).
     func xattrs(inline: Data?, block: UInt64) -> [String: Data]? {
         onDecode?()
         var result: [String: Data] = [:]
 
         if let inline {
             let bytes = [UInt8](inline)
-            guard Self.le32(bytes, 0) == Self.headerMagic else { return result }
-            do {
-                try Self.parseEntries(from: bytes, entriesStart: 4, valueBase: 4, into: &result)
-            } catch {
-                return nil
+            // A region without the magic header only means "no inline xattrs"
+            // (the header lands with the first attribute; leftover non-zero
+            // bytes are stale) — skip inline parsing, but keep decoding any
+            // block-backed set below rather than discarding it too.
+            if bytes.count >= 4, Self.le32(bytes, 0) == Self.headerMagic {
+                do {
+                    try Self.parseEntries(from: bytes, entriesStart: 4, valueBase: 4, into: &result)
+                } catch {
+                    return nil
+                }
             }
         }
 
@@ -169,8 +174,14 @@ final class EXT4XattrReader {
             guard nameEnd <= buffer.count else {
                 throw Error.malformed("xattr name overruns region")
             }
-            guard let name = String(bytes: buffer[nameStart..<nameEnd], encoding: .ascii) else {
-                throw Error.malformed("xattr name is not ASCII")
+            // Linux xattr names are arbitrary non-NUL bytes and need not be
+            // ASCII (`user.étiquette` is a legal name). UTF-8 keeps the name
+            // byte-preserving for every valid sequence — two files with the
+            // same name decode equal, so an unchanged non-ASCII attribute is
+            // not reported as Modified. Bytes that are not valid UTF-8 cannot
+            // round-trip through String; surface those as unreadable.
+            guard let name = String(bytes: buffer[nameStart..<nameEnd], encoding: .utf8) else {
+                throw Error.malformed("xattr name is not valid UTF-8")
             }
             if valueInum != 0 {
                 // Large values in dedicated inodes (ext4 ea_inode feature).
@@ -207,7 +218,13 @@ final class EXT4XattrReader {
         guard let handle else { return nil }
         do {
             try handle.seek(toOffset: block * blockSize)
-            guard let data = try handle.read(upToCount: Int(blockSize)) else { return nil }
+            // Require a COMPLETE block: a truncated device makes read return
+            // fewer bytes than the block size, and decoding a short buffer
+            // would trap on array bounds inside le32 instead of reporting an
+            // unreadable set.
+            guard let data = try handle.read(upToCount: Int(blockSize)), data.count >= Int(blockSize) else {
+                return nil
+            }
             return [UInt8](data)
         } catch {
             return nil

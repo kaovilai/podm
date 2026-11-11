@@ -22,6 +22,12 @@ struct RESTContainerSummary: Content {
     let ImageID: String
     let ImageManifestDescriptor: ImageOCIDescriptor?
     let Command: String
+    /// Original init-process argv (`[executable] + arguments`). Extra field
+    /// beyond Docker's shape (clients ignore unknown fields); consumed by the
+    /// libpod system df route, whose `Command` is []string and cannot be
+    /// reconstructed from the space-joined display string above (argument
+    /// boundaries and empty arguments would be lost).
+    var CommandArgv: [String]? = nil
     let Created: Int64
     /// Unix seconds the init process last started, nil when never started.
     /// Extra field beyond Docker's shape (clients ignore unknown fields);

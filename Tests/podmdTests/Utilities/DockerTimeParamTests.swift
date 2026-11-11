@@ -153,13 +153,36 @@ struct DockerTimeParamTests {
         let fortyTwoMinutes: UInt64 = 42 * 60 * 1_000_000_000
         #expect(since != nil)
         if let since {
-            #expect(since <= before - fortyTwoMinutes + 50_000_000)
-            #expect(since >= after - fortyTwoMinutes - 50_000_000)
+            // The exact bounds are [before - 42m, after - 42m]; the slack
+            // covers only Double→UInt64 rounding, NOT wall-clock jitter
+            // between the three now() reads (a loaded CI runner can exceed
+            // the old 50 ms window and flake — one CI flake was reported).
+            #expect(since + 10_000 >= before - fortyTwoMinutes)
+            #expect(since <= after - fortyTwoMinutes + 10_000)
         }
         #expect(try DockerTimeParam.unixNanoseconds("1h30m") != nil)
         #expect(try DockerTimeParam.unixNanoseconds("500ms") != nil)
         // "0" is never a duration (moby excludes it explicitly).
         #expect(try DockerTimeParam.unixNanoseconds("0") == 0)
+
+        // A duration longer than the time since the epoch clamps at ~0
+        // (moby's since semantics) instead of trapping on UInt64 underflow —
+        // the two separate ns conversions could round apart.
+        let saturated = try DockerTimeParam.unixNanoseconds("999999h")
+        #expect(saturated != nil)
+        if let saturated {
+            #expect(saturated < 1_000_000, "a past-the-epoch duration clamps at ~0, not a trap")
+        }
+    }
+
+    @Test("unparseable and negative durations throw, like moby's GetTimestamp")
+    func invalidDurations() {
+        #expect(throws: DockerTimeParam.ParseError.self) {
+            _ = try DockerTimeParam.unixNanoseconds("not-a-time")
+        }
+        #expect(throws: DockerTimeParam.ParseError.self) {
+            _ = try DockerTimeParam.unixNanoseconds("-42m")
+        }
     }
 
 }

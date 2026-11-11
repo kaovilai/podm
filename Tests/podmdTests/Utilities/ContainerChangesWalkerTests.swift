@@ -30,7 +30,8 @@ struct Ext4TreeFixture {
     ///     formatter's own `create(xattrs:)` (inline when they fit the
     ///     inode's 96-byte region, block-backed otherwise — so both ext4
     ///     xattr storage forms are exercised against the same writer that
-    ///     production code uses).
+    ///     production code uses). Applies to files, directories and symlinks
+    ///     alike — the walker's xattr comparison covers all three types.
     ///   - mtime: every entry gets this fixed timestamp, keeping fixtures
     ///     deterministic (the walker compares mtimes).
     @discardableResult
@@ -51,7 +52,8 @@ struct Ext4TreeFixture {
             try formatter.create(
                 path: FilePath(dir),
                 mode: EXT4.Inode.Mode(.S_IFDIR, 0o755),
-                ts: ts
+                ts: ts,
+                xattrs: xattrs[dir]
             )
         }
         for (path, contents) in files.sorted(by: { $0.key < $1.key }) {
@@ -71,7 +73,8 @@ struct Ext4TreeFixture {
                 path: FilePath(path),
                 link: FilePath(target),
                 mode: EXT4.Inode.Mode(.S_IFLNK, 0o777),
-                ts: ts
+                ts: ts,
+                xattrs: xattrs[path]
             )
         }
         try formatter.close()
@@ -446,6 +449,86 @@ struct ContainerChangesWalkerTests {
             currentBlockDevice: current.url.appendingPathComponent("rootfs.ext4"))
 
         #expect(changes.isEmpty)
+    }
+
+    @Test("an xattr-only change on a directory reports Modified")
+    func directoryXattrChange() async throws {
+        let baseline = Ext4TreeFixture(name: "baseline")
+        let current = Ext4TreeFixture(name: "current")
+        defer {
+            baseline.cleanUp()
+            current.cleanUp()
+        }
+        // Same child set and mtimes — only the directory's xattr differs,
+        // exercising the directory branch of xattrsDiverge.
+        try baseline.write(
+            files: ["/dir/inner.txt": "x"],
+            directories: ["/dir"])
+        try current.write(
+            files: ["/dir/inner.txt": "x"],
+            directories: ["/dir"],
+            xattrs: ["/dir": ["user.label": Data("mark".utf8)]])
+
+        let changes = try await ContainerChangesWalker.changes(
+            baselineBlockDevice: baseline.url.appendingPathComponent("rootfs.ext4"),
+            currentBlockDevice: current.url.appendingPathComponent("rootfs.ext4"))
+
+        #expect(changes == [ContainerFileChange(path: "/dir", kind: .modified)])
+    }
+
+    @Test("an xattr-only change on a symlink reports Modified")
+    func symlinkXattrChange() async throws {
+        let baseline = Ext4TreeFixture(name: "baseline")
+        let current = Ext4TreeFixture(name: "current")
+        defer {
+            baseline.cleanUp()
+            current.cleanUp()
+        }
+        // Same target and mtime — only the symlink's xattr differs,
+        // exercising the symlink branch of xattrsDiverge.
+        try baseline.write(files: ["/keep.txt": "keep"], symlinks: ["/link": "/keep.txt"])
+        try current.write(
+            files: ["/keep.txt": "keep"], symlinks: ["/link": "/keep.txt"],
+            xattrs: ["/link": ["user.label": Data("mark".utf8)]])
+
+        let changes = try await ContainerChangesWalker.changes(
+            baselineBlockDevice: baseline.url.appendingPathComponent("rootfs.ext4"),
+            currentBlockDevice: current.url.appendingPathComponent("rootfs.ext4"))
+
+        #expect(changes == [ContainerFileChange(path: "/link", kind: .modified)])
+    }
+
+    @Test("an unreadable xattr set (corrupted block) reports Modified")
+    func unreadableXattrSetDiverges() async throws {
+        let baseline = Ext4TreeFixture(name: "baseline")
+        let current = Ext4TreeFixture(name: "current")
+        defer {
+            baseline.cleanUp()
+            current.cleanUp()
+        }
+        // Identical block-backed xattrs on both sides, but the current
+        // side's xattr block is corrupted (no magic): the set cannot be
+        // read, equality cannot be established, and the walker must report
+        // Modified rather than guessing.
+        let sharedXattrs: [String: [String: Data]] = [
+            "/f": ["user.big": Data(repeating: 0x5a, count: 256)]
+        ]
+        try baseline.write(files: ["/f": "bytes"], xattrs: sharedXattrs)
+        let currentDevice = try current.write(files: ["/f": "bytes"], xattrs: sharedXattrs)
+
+        let ext4Reader = try EXT4.EXT4Reader(blockDevice: FilePath(currentDevice.path))
+        let (_, inode) = try ext4Reader.stat(FilePath("/f"))
+        let blockSize = ext4Reader.superBlock.blockSize
+        let handle = try FileHandle(forWritingTo: currentDevice)
+        try handle.seek(toOffset: UInt64(inode.xattrBlockLow) * UInt64(blockSize))
+        try handle.write(contentsOf: Data([0xDE, 0xAD, 0xBE, 0xEF]))
+        try handle.close()
+
+        let changes = try await ContainerChangesWalker.changes(
+            baselineBlockDevice: baseline.url.appendingPathComponent("rootfs.ext4"),
+            currentBlockDevice: current.url.appendingPathComponent("rootfs.ext4"))
+
+        #expect(changes == [ContainerFileChange(path: "/f", kind: .modified)])
     }
 
     @Test("a changed block-backed xattr reports Modified")

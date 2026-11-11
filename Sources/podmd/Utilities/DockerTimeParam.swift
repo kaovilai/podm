@@ -107,9 +107,14 @@ enum DockerTimeParam {
             return stamp.unixNanoseconds
         }
         if value != "0", let interval = goDuration(value) {
-            let now = UInt64(max(0, Date().timeIntervalSince1970 * 1_000_000_000))
-            let delta = UInt64(min(interval, TimeInterval(now) / 1e9) * 1_000_000_000)
-            return now - delta
+            // Stay in Double seconds until the single final conversion: the
+            // old form (UInt64(now) - UInt64(min(interval, now))) could round
+            // its two operands apart and trap on UInt64 underflow for a
+            // duration longer than the time since the epoch. moby clamps the
+            // result at 0 (a pre-epoch since filters nothing); do the same.
+            let nowSeconds = max(0, Date().timeIntervalSince1970)
+            let sinceSeconds = nowSeconds - min(interval, nowSeconds)
+            return UInt64(max(0, sinceSeconds) * 1_000_000_000)
         }
         throw ParseError.invalid(value)
     }

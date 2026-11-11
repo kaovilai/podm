@@ -37,6 +37,11 @@ extension ContainerStartRoute {
                 throw Abort(.badRequest, reason: "ambiguous container reference \(reference): matches \(matchList)")
             }
 
+            // Whether this request actually transitioned the container to
+            // running (a stopped container being started) — drives the log
+            // journal's fresh-boot reset below.
+            var startedByThisCall = false
+
             do {
                 guard let container = preStartSnapshot else {
                     throw Abort(.notFound, reason: "No such container: \(id)")
@@ -52,6 +57,7 @@ extension ContainerStartRoute {
                 } else {
                     // Try to start the container
                     try await client.start(id: id, detachKeys: detachKeys)
+                    startedByThisCall = true
                     req.logger.debug("Started container \(id)")
                 }
 
@@ -140,7 +146,12 @@ extension ContainerStartRoute {
                     dnsServer: req.application.storage[PodmDNSServerKey.self],
                     healthManager: req.application.storage[HealthCheckManagerKey.self],
                     client: client,
-                    logger: req.logger
+                    logger: req.logger,
+                    // This call actually transitioned the container to running:
+                    // a fresh log boot whose journal must reset. A redundant
+                    // /start on an already-running container stays
+                    // non-disruptive (freshBoot false preserves the journal).
+                    freshLogBoot: startedByThisCall
                 )
             }
 
@@ -318,10 +329,14 @@ extension ContainerStartRoute {
     /// Refreshes `ContainerInfoCache` (when `refreshCache` is true) and arms `observeExit`
     /// to watch the container's next exit. Shared by `/start`, `/restart`, and the internal
     /// restart-policy restart so all three leave the same cache/observer state behind.
-    /// - Parameter freshLogBoot: true from the restart paths — Apple truncates
-    ///   the container's log file at every boot, so the timestamped log journal
-    ///   must reset and a fresh follower must take over; a plain `/start` on an
-    ///   already-followed running container leaves the existing follower alone.
+    /// - Parameter freshLogBoot: true whenever this lifecycle actually
+    ///   transitioned the container to running (`/restart`, the restart-policy
+    ///   restart, or a `/start` of a stopped container) — Apple truncates the
+    ///   container's log file at every boot, so the timestamped log journal
+    ///   must reset and a fresh follower must take over. False for a plain
+    ///   `/start` on an already-running container, which leaves the existing
+    ///   follower and its journal alone (or resumes them after a daemon
+    ///   restart).
     static func armRestartObserver(
         nativeId: String,
         eventId: String,

@@ -358,6 +358,7 @@ extension SystemDFRoute {
             ImageID: container.configuration.image.digest,
             ImageManifestDescriptor: nil,
             Command: ([container.configuration.initProcess.executable] + container.configuration.initProcess.arguments).joined(separator: " "),
+            CommandArgv: [container.configuration.initProcess.executable] + container.configuration.initProcess.arguments,
             Created: createdTimestamp,
             StartedAtUnix: nil,
             ExitCode: nil,

@@ -13,8 +13,9 @@ import Logging
 /// restart-policy restart — because every container lifecycle that produces
 /// output goes through it (a foreground `docker run` still receives a `/start`
 /// after the attach route bootstraps the container). Followers are
-/// epoch-guarded: each arm bumps a per-container epoch, and both
-/// `beginBoot`/`append` journal writes and the follower loop itself check it,
+/// epoch-guarded: each arm bumps a per-container epoch, the follower loop
+/// checks it to exit when superseded, and the journal actor tracks the
+/// accepted writer epoch itself (checked synchronously with each mutation),
 /// so a superseded follower (redundant `/start`, restart racing a slow poll)
 /// can never interleave entries into a newer boot's journal.
 actor ContainerLogFollowerRegistry {
@@ -65,7 +66,7 @@ actor ContainerLogFollowerRegistry {
         let task = Task.detached {
             await ContainerLogFollower.follow(
                 nativeId: nativeId, epoch: epoch, client: client, logger: logger,
-                journal: journal, openLogStream: openLogStream)
+                freshBoot: freshBoot, journal: journal, openLogStream: openLogStream)
         }
         tasks[nativeId] = (task, epoch)
         Task.detached {
@@ -93,11 +94,34 @@ enum ContainerLogFollower {
     /// the same cadence the logs route's follow loop uses.
     static let pollIntervalNs: UInt64 = 150_000_000
 
+    /// Completed lines are journaled in batches of at most this many while
+    /// reading, so a huge backlog (or a continuously written log) reaches the
+    /// journal before the stream hits EOF instead of accumulating in memory.
+    static let journalBatchLines = 256
+
+    /// A single line without a newline may hold at most this many bytes in
+    /// the pending buffer; beyond that the line is discarded (unjournaled —
+    /// its timestamps fall back to read time) so a newline-free stream
+    /// cannot exhaust daemon memory.
+    static let maxPendingLineBytes = 1 << 20
+
+    /// Test seam: invoked with the container's native id after every journal
+    /// batch flush (including the end-of-read one). Production never sets it;
+    /// tests use it to assert that a large backlog reaches the journal in
+    /// bounded batches WHILE the stream is read, not in one unbounded
+    /// accumulation at EOF.
+    nonisolated(unsafe) static var onBatchFlush: (@Sendable (String) -> Void)?
+
     /// Tears a container's log-following state down along with it — called
-    /// from the delete and --rm auto-remove cleanup paths.
-    static func teardown(nativeId: String) async {
-        await ContainerLogFollowerRegistry.shared.disarm(nativeId: nativeId)
-        await ContainerLogJournal.shared.remove(nativeId: nativeId)
+    /// from the delete, prune and --rm auto-remove cleanup paths. `registry`
+    /// and `journal` default to the shared instances; tests inject their own.
+    static func teardown(
+        nativeId: String,
+        registry: ContainerLogFollowerRegistry = .shared,
+        journal: ContainerLogJournal = .shared
+    ) async {
+        await registry.disarm(nativeId: nativeId)
+        await journal.remove(nativeId: nativeId)
     }
 
     /// Mirrors the container's Apple log stream into the journal until the
@@ -105,6 +129,13 @@ enum ContainerLogFollower {
     /// handle with the route) keeps ownership simple: each follower reads from
     /// byte 0 and skips lines the journal already covers by content
     /// alignment, which also self-heals after cap evictions.
+    ///
+    /// `freshBoot` distinguishes a container that just (re)started (the
+    /// journal resets — Apple truncates the log at every boot) from a resume
+    /// of an already-running container (daemon restart, redundant `/start`):
+    /// the persisted journal is preserved and alignment continues. A stale
+    /// journal from a different boot is detected by alignment failure and
+    /// reset then, so an unknowing resume cannot restamp history.
     ///
     /// `journal`, `openLogStream` and `isCurrentEpoch` are seams for tests:
     /// production runs use the shared journal, Apple's log stream, and the
@@ -114,6 +145,7 @@ enum ContainerLogFollower {
         epoch: UInt64,
         client: ClientContainerProtocol,
         logger: Logger,
+        freshBoot: Bool,
         journal: ContainerLogJournal = .shared,
         openLogStream: (@Sendable (String) async throws -> FileHandle)? = nil,
         isCurrentEpoch: (@Sendable () async -> Bool)? = nil
@@ -121,9 +153,15 @@ enum ContainerLogFollower {
         let isCurrent: @Sendable () async -> Bool =
             isCurrentEpoch ?? { await ContainerLogFollowerRegistry.shared.isCurrent(nativeId: nativeId, epoch: epoch) }
 
-        // Reset the journal for this boot. Gated on the epoch so a follower
-        // superseded before it starts (concurrent re-arm) wipes nothing.
-        await journal.beginBoot(nativeId: nativeId, epoch: epoch, isCurrentEpoch: isCurrent)
+        // Activate this follower as the journal's writer. A fresh boot resets
+        // the journal (gated on the epoch inside the actor, so a follower
+        // superseded before it starts wipes nothing); a resume adopts the
+        // persisted journal of the current boot instead.
+        if freshBoot {
+            await journal.beginBoot(nativeId: nativeId, epoch: epoch)
+        } else {
+            await journal.resumeBoot(nativeId: nativeId, epoch: epoch)
+        }
         guard await isCurrent() else { return }
 
         let handle: FileHandle
@@ -140,38 +178,75 @@ enum ContainerLogFollower {
         }
         defer { try? handle.close() }
 
-        var alignment = ContainerLogJournal.Alignment(entries: await journal.entries(nativeId: nativeId))
+        let bootJournal = await journal.contents(nativeId: nativeId)
+        var alignment = ContainerLogJournal.Alignment(entries: bootJournal.entries, droppedLines: bootJournal.droppedLines)
         var pending = Data()
+        // Set once a misaligned (different-boot) journal has been reset; the
+        // empty replacement alignment can never fail again.
+        var healedStaleJournal = false
 
         /// Reads everything currently available, journaling each complete line
         /// (skipping lines already covered by the journal) with the arrival
-        /// time of this pass. Appends are awaited so journal order always
-        /// matches stream order. Returns whether any bytes were read.
+        /// time of this pass. Lines reach the journal in bounded batches while
+        /// reading, so a huge backlog cannot accumulate in memory; a
+        /// newline-free partial line beyond `maxPendingLineBytes` is
+        /// discarded rather than buffered. Returns whether any bytes were
+        /// read.
         func readAvailable() async -> Bool {
             var gotData = false
-            var newLines: [Data] = []
+            var fresh: [ContainerLogJournal.Entry] = []
+            var discardingPartialLine = false
+
+            func flushBatch() async {
+                guard !fresh.isEmpty else { return }
+                await journal.append(nativeId: nativeId, epoch: epoch, fresh)
+                fresh.removeAll(keepingCapacity: true)
+                ContainerLogFollower.onBatchFlush?(nativeId)
+            }
+
             while let chunk = try? handle.read(upToCount: 4096), !chunk.isEmpty {
                 gotData = true
                 pending.append(chunk)
                 while let newline = pending.firstIndex(of: 0x0A) {
-                    newLines.append(pending.subdata(in: pending.startIndex..<pending.index(after: newline)))
+                    let line = pending.subdata(in: pending.startIndex..<pending.index(after: newline))
                     pending = pending.subdata(in: pending.index(after: newline)..<pending.endIndex)
+                    if discardingPartialLine {
+                        // Tail of an oversized line: not journalable.
+                        discardingPartialLine = false
+                        continue
+                    }
+                    switch alignment.classify(line) {
+                    case .covered, .evicted:
+                        continue  // already journaled this boot (or since evicted)
+                    case .fresh:
+                        fresh.append(
+                            ContainerLogJournal.Entry(
+                                unixNano: ContainerLogJournal.currentUnixNano(),
+                                streamType: DockerStreamFrame.StreamType.stdout.rawValue,
+                                bytes: line
+                            ))
+                        if fresh.count >= ContainerLogFollower.journalBatchLines {
+                            await flushBatch()
+                        }
+                    }
+                }
+                if pending.count > ContainerLogFollower.maxPendingLineBytes {
+                    pending.removeAll(keepingCapacity: false)
+                    discardingPartialLine = true
                 }
             }
-            guard !newLines.isEmpty else { return gotData }
-            let arrivalNano = ContainerLogJournal.currentUnixNano()
-            var fresh: [ContainerLogJournal.Entry] = []
-            for line in newLines where alignment.timestamp(for: line) == nil {
-                fresh.append(
-                    ContainerLogJournal.Entry(
-                        unixNano: arrivalNano,
-                        streamType: DockerStreamFrame.StreamType.stdout.rawValue,
-                        bytes: line
-                    ))
+            if !healedStaleJournal, alignment.failed {
+                // The journal provably does not belong to this boot (content
+                // mismatch against the current stream) — an unknowing resume
+                // of a bootstrapped-but-never-armed container. Reset it BEFORE
+                // this batch's flush so the stale entries cannot leak wrong
+                // timestamps into --since/--until, and this batch's lines land
+                // in the fresh journal.
+                healedStaleJournal = true
+                await journal.beginBoot(nativeId: nativeId, epoch: epoch)
+                alignment = ContainerLogJournal.Alignment(entries: [])
             }
-            if !fresh.isEmpty {
-                await journal.append(nativeId: nativeId, epoch: epoch, fresh, isCurrentEpoch: isCurrent)
-            }
+            await flushBatch()
             return gotData
         }
 
