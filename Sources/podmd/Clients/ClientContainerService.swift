@@ -122,6 +122,10 @@ enum ClientContainerError: Error {
     case notRunning(id: String)
     case ambiguousId(reference: String, matches: [String])
     case unsupportedCondition(ContainerWaitCondition)
+    /// The operation never completed even after the container's wedged
+    /// runtime job was booted out of launchd — the Apple Container
+    /// apiserver itself is stuck (issue #45, apple/container#1884).
+    case runtimeJobWedged(nativeId: String, label: String)
 }
 
 struct ClientContainerService: ClientContainerProtocol {
@@ -449,7 +453,15 @@ struct ClientContainerService: ClientContainerProtocol {
         guard let container = try await getContainer(id: id) else {
             throw ClientContainerError.notFound(id: id)
         }
-        try await containerClient.withClient { try await $0.delete(id: container.id) }
+        // The apiserver's delete can hang forever when the container's
+        // runtime job is wedged in launchd (issue #45) — bound it, boot the
+        // job out on timeout, then give it a second window.
+        try await ContainerRuntimeJobRecovery.withHangRecovery(
+            nativeId: container.id,
+            runtimeHandler: container.configuration.runtimeHandler
+        ) {
+            try await self.containerClient.withClient { try await $0.delete(id: container.id) }
+        }
     }
 
     // Poll until the container is no longer running, then return the real exit
@@ -585,7 +597,14 @@ struct ClientContainerService: ClientContainerProtocol {
                 // container is deleted — computing it after would produce a
                 // different key and miss the persisted override.
                 let hexId = DockerContainerID.hexId(for: container)
-                try await containerClient.withClient { try await $0.delete(id: container.id) }
+                // Same wedge guard as delete(id:) — one wedged container
+                // must not hang the whole prune loop forever (issue #45).
+                try await ContainerRuntimeJobRecovery.withHangRecovery(
+                    nativeId: container.id,
+                    runtimeHandler: container.configuration.runtimeHandler
+                ) {
+                    try await self.containerClient.withClient { try await $0.delete(id: container.id) }
+                }
                 deletedIds.append(container.id)
                 // A renamed container's override dies with it — otherwise the
                 // name stays reserved (create/rename 409) forever, even across

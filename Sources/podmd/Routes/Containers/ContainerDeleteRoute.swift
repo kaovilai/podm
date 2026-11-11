@@ -95,7 +95,17 @@ extension ContainerDeleteRoute {
                 }
 
                 if let container, container.status == .running {
-                    try await client.stop(id: id, signal: nil, timeout: nil)
+                    // The force-stop shares the no-timeout XPC path that
+                    // wedges the apiserver behind a stuck runtime job
+                    // (issue #45) — bound it with the same recovery the
+                    // delete uses. Force semantics make booting the job out
+                    // (killing the runtime) legitimate here.
+                    try await ContainerRuntimeJobRecovery.withHangRecovery(
+                        nativeId: container.id,
+                        runtimeHandler: container.configuration.runtimeHandler
+                    ) {
+                        try await client.stop(id: id, signal: nil, timeout: nil)
+                    }
                 }
                 try await client.delete(id: id)
             } catch ClientContainerError.notFound {
@@ -106,6 +116,16 @@ extension ContainerDeleteRoute {
             } catch ClientContainerError.ambiguousId(let reference, let matches) {
                 let matchList = matches.joined(separator: ", ")
                 throw Abort(.badRequest, reason: "ambiguous container reference \(reference): matches \(matchList)")
+            } catch ClientContainerError.runtimeJobWedged(let nativeId, let label) {
+                // The delete never answered even after the recovery booted
+                // out the container's runtime job — the apiserver itself is
+                // stuck. Tell the operator what to restart, since a podmd
+                // restart will not help (issue #45).
+                throw Abort(
+                    .internalServerError,
+                    reason:
+                        "container \(nativeId) could not be removed: the Apple Container apiserver did not answer within the recovery window even after clearing its runtime job (\(label)). The apiserver is likely wedged (apple/container#1884), often because its install root was deleted while the services kept running — restart Apple Container services (container system stop && container system start, or brew services restart container) and retry."
+                )
             } catch let abort as Abort {
                 // A deliberately-thrown Abort (e.g. the running-container-without-force 409)
                 // must propagate as-is, not get rewrapped into a 500 by the catch-all below.
