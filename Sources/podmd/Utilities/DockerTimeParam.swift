@@ -31,13 +31,24 @@ enum DockerTimeParam {
         }
 
         init(date: Date) {
-            let nano = Int64((date.timeIntervalSince1970 * 1_000_000_000).rounded())
-            self.seconds = nano / 1_000_000_000
-            self.nanoseconds = nano % 1_000_000_000
-            if nanoseconds < 0 {
-                self.seconds -= 1
-                self.nanoseconds += 1_000_000_000
+            // Split whole seconds from the fraction BEFORE any integer
+            // conversion: a single `interval × 1e9` TRAPS for dates beyond
+            // ~year 2262 (Int64 nanosecond overflow — `until=9999-12-31`
+            // parses fine and would crash the daemon) and loses precision
+            // (a Double has ~256 ns resolution at current epoch values).
+            // Whole seconds fit Int64 for any representable Date; the
+            // fraction is 0..<1 s.
+            let interval = date.timeIntervalSince1970
+            let wholeSeconds = floor(interval)
+            var fractionNanos = ((interval - wholeSeconds) * 1_000_000_000).rounded()
+            if fractionNanos >= 1_000_000_000 {
+                // A fraction rounding up to a full second carries.
+                fractionNanos -= 1_000_000_000
+                self.seconds = Int64(clamping: Int(exactly: wholeSeconds + 1) ?? .max)
+            } else {
+                self.seconds = Int64(clamping: Int(exactly: wholeSeconds) ?? (wholeSeconds > 0 ? .max : .min))
             }
+            self.nanoseconds = Int64(clamping: Int(exactly: fractionNanos) ?? 0)
         }
 
         /// Total nanoseconds since the epoch, saturating instead of trapping
@@ -114,38 +125,70 @@ enum DockerTimeParam {
 
         // Moby: a nanosecond portion longer than 9 digits is truncated,
         // shorter is left-padded (i.e. interpreted at its own scale).
-        let digits = fraction.prefix(9)
-        var nanoseconds = Int64(digits) ?? 0
-        if digits.count < 9 {
-            for _ in digits.count..<9 { nanoseconds *= 10 }
-        }
-        return Timestamp(seconds: seconds, nanoseconds: nanoseconds)
+        return Timestamp(seconds: seconds, nanoseconds: scaledNanoseconds(fraction))
     }
 
     // MARK: - Date-time formats
 
     /// RFC3339 (with or without fractional seconds) and bare dates.
+    ///
+    /// A fractional-seconds suffix is split off BEFORE any formatter runs
+    /// and parsed directly as integer nanoseconds: Foundation's `Date` is a
+    /// Double and cannot represent sub-microsecond fractions, so routing
+    /// the fraction through it would round `...05.000000001` to the whole
+    /// second while the unix-string form preserves it — equivalent inputs
+    /// must select the same boundary events.
     private static func parseDateTime(_ value: String) -> Timestamp? {
         // The "-" of a date is the discriminator: unix formats never contain one.
         guard value.contains("-") else { return nil }
 
+        var body = Substring(value)
+        var fractionDigits: Substring?
+        if let dot = value.firstIndex(of: ".") {
+            // The fraction runs to the zone marker (Z / ±hh:mm) or the end.
+            let afterDot = value.index(after: dot)
+            let zoneStart = value[afterDot...].firstIndex(where: { $0 == "Z" || $0 == "+" || $0 == "-" })
+            let digits = value[afterDot..<(zoneStart ?? value.endIndex)]
+            guard !digits.isEmpty, digits.allSatisfy(\.isNumber) else { return nil }
+            fractionDigits = digits
+            body = value[..<dot] + (zoneStart.map { value[$0...] } ?? "")
+        }
+
+        func withFraction(_ date: Date) -> Timestamp {
+            var timestamp = Timestamp(date: date)
+            if let fractionDigits {
+                timestamp.nanoseconds = scaledNanoseconds(fractionDigits)
+            }
+            return timestamp
+        }
+
         let iso = ISO8601DateFormatter()
-        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = iso.date(from: value) { return Timestamp(date: date) }
         iso.formatOptions = [.withInternetDateTime]
-        if let date = iso.date(from: value) { return Timestamp(date: date) }
+        if let date = iso.date(from: String(body)) { return withFraction(date) }
 
         // Zone-less timestamps are interpreted in the host's local zone,
         // matching moby's `ParseInLocation(..., reference.Zone())`.
         let local = DateFormatter()
         local.locale = Locale(identifier: "en_US_POSIX")
         local.timeZone = .current
-        local.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSSSS"
-        if let date = local.date(from: value) { return Timestamp(date: date) }
         local.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
-        if let date = local.date(from: value) { return Timestamp(date: date) }
+        if let date = local.date(from: String(body)) { return withFraction(date) }
+        // Date-only cannot carry a fraction ("2006-01-02.5" is not a form
+        // moby accepts either).
+        guard fractionDigits == nil else { return nil }
         local.dateFormat = "yyyy-MM-dd"
-        if let date = local.date(from: value) { return Timestamp(date: date) }
+        if let date = local.date(from: String(body)) { return Timestamp(date: date) }
         return nil
+    }
+
+    /// Moby's `parseTimestamp` fraction rule: a portion longer than 9 digits
+    /// is truncated, shorter is scaled (left-padded to its own precision).
+    private static func scaledNanoseconds(_ digits: Substring) -> Int64 {
+        let prefix = digits.prefix(9)
+        var nanoseconds = Int64(prefix) ?? 0
+        if prefix.count < 9 {
+            for _ in prefix.count..<9 { nanoseconds *= 10 }
+        }
+        return nanoseconds
     }
 }

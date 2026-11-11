@@ -33,9 +33,12 @@ struct EventsRouteTests {
     }
 
     /// Formats nanoseconds since the epoch as moby's `sec.nsec` param.
+    /// The fraction is LEFT-padded to nine digits — `padding(toLength:)`
+    /// appends, turning a remainder of 60,000,000 ns into `.600000000`
+    /// (540 ms off) instead of `.060000000`.
     private func param(_ nano: UInt64) -> String {
         let ns = String(nano % 1_000_000_000)
-        return "\(nano / 1_000_000_000).\(ns.padding(toLength: 9, withPad: "0", startingAt: 0))"
+        return "\(nano / 1_000_000_000)." + String(repeating: "0", count: 9 - ns.count) + ns
     }
 
     private func decodeEvents(_ body: ByteBuffer) -> [DockerEvent] {
@@ -67,6 +70,84 @@ struct EventsRouteTests {
                 let events = self.decodeEvents(res.body)
                 #expect(events.map(\.id) == ["ctr-a", "ctr-a"], "replay is oldest-first")
                 #expect(events.map(\.Action) == ["create", "start"])
+            }
+        }
+    }
+
+    @Test("a future until terminates the response when the deadline passes")
+    func futureUntilTerminates() async throws {
+        let broadcaster = EventBroadcaster()
+        let now = nanoNow()
+        await broadcaster.broadcast(makeEvent(action: "create", id: "replayed", timeNano: now - 1_000_000_000))
+
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+            app.storage[EventBroadcasterKey.self] = broadcaster
+            try app.register(collection: EventsRoute(client: MockHealthCheckClient()))
+
+            // until is 400ms in the future: the replayed in-window event is
+            // delivered, then the response ends when the deadline timer
+            // fires — instead of streaming forever.
+            try await app.testing().test(
+                .GET, "/v1.51/events?since=0&until=\(param(now + 400_000_000))"
+            ) { res async in
+                #expect(res.status == .ok)
+                let events = self.decodeEvents(res.body)
+                #expect(events.map(\.id) == ["replayed"])
+            }
+        }
+    }
+
+    @Test("a live event broadcast after subscribe is delivered within a future until")
+    func liveEventWithinFutureUntil() async throws {
+        let broadcaster = EventBroadcaster()
+
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+            app.storage[EventBroadcasterKey.self] = broadcaster
+            try app.register(collection: EventsRoute(client: MockHealthCheckClient()))
+
+            // The request runs; shortly after the subscription is live, an
+            // event is broadcast and must appear in the response body
+            // before the until deadline ends it. Generous margins (2s
+            // deadline, 150ms broadcast) keep this stable under parallel
+            // suite load: whether the broadcast lands before subscribe
+            // (delivered via the replay snapshot) or after (delivered via
+            // the live stream), the event is in the body either way.
+            let deadline = nanoNow() + 2_000_000_000
+            Task {
+                try await Task.sleep(nanoseconds: 150_000_000)
+                await broadcaster.broadcast(
+                    self.makeEvent(action: "start", id: "live-ctr", timeNano: self.nanoNow()))
+            }
+            try await app.testing().test(
+                .GET, "/v1.51/events?since=0&until=\(param(deadline))"
+            ) { res async in
+                #expect(res.status == .ok)
+                let events = self.decodeEvents(res.body)
+                #expect(events.map(\.id).contains("live-ctr"), "the live broadcast must be delivered")
+            }
+        }
+    }
+
+    @Test("an unparseable since or until is a 400")
+    func unparseableBoundsRejected() async throws {
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+            app.storage[EventBroadcasterKey.self] = EventBroadcaster()
+            try app.register(collection: EventsRoute(client: MockHealthCheckClient()))
+
+            try await app.testing().test(.GET, "/v1.51/events?since=not-a-time") { res async in
+                #expect(res.status == .badRequest)
+            }
+            try await app.testing().test(.GET, "/v1.51/events?until=yesterday") { res async in
+                #expect(res.status == .badRequest)
             }
         }
     }

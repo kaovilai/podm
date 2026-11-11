@@ -5,11 +5,12 @@ import Vapor
 /// Parses and applies `GET /events` filters, mirroring moby's
 /// `daemon/events/filter.go` (`events.Filter.Include`).
 ///
-/// podm emits events of Type `container`, `image`, `network`, `volume` and
-/// `builder` (see the `DockerEvent.make/simpleEvent` call sites). The swarm
-/// and plugin families (`node`, `service`, `secret`, `config`, `plugin`,
-/// `daemon`) never occur on this single-node daemon, so their filter keys are
-/// accepted — the docker CLI's valid set — but match nothing.
+/// podm emits events of Type `container`, `image`, `network`, `volume`,
+/// `builder` and `secret` (see the `DockerEvent.make/simpleEvent` call
+/// sites). The remaining families (`node`, `service`, `config`, `plugin`,
+/// `daemon`) use the same name matcher as moby applies to them — since podm
+/// never emits those types, their filters match nothing, exactly as on a
+/// daemon that has not produced such events.
 struct DockerEventFilterUtility {
 
     /// The filter keys the docker CLI accepts for `docker events --filter`.
@@ -19,13 +20,6 @@ struct DockerEventFilterUtility {
         "config", "container", "daemon", "event", "image", "label",
         "network", "node", "plugin", "scope", "secret", "service",
         "type", "volume",
-    ]
-
-    /// Filter families podm never emits — accepted for CLI compatibility,
-    /// never matched (single-node Apple container daemon: no swarm, no
-    /// plugins, no daemon-lifecycle events).
-    private static let neverMatchKeys: Set<String> = [
-        "config", "daemon", "node", "plugin", "secret", "service",
     ]
 
     /// Parses the `filters` query parameter (JSON object, values as
@@ -87,23 +81,47 @@ struct DockerEventFilterUtility {
 
         return { event in
             matchExact(filters["type"], event.Type)
-                && matchExact(filters["event"], event.Action)
+                && matchEvent(filters["event"], event.Action)
                 && matchExact(filters["scope"], event.scope)
                 && matchName(filters["container"], event, extraIds: idsRenamedToFilteredNames)
                 && matchImage(filters["image"], event: event)
                 && matchName(filters["network"], event, extraIds: [])
                 && matchName(filters["volume"], event, extraIds: [])
+                // moby applies the same fuzzyMatchName to every remaining
+                // family (secret, config, daemon, node, plugin, service);
+                // podm only ever emits `secret` among them, but the matcher
+                // is uniform — an unemitted family matches nothing because
+                // there are no events, not because the filter is refused.
+                && matchName(filters["secret"], event, extraIds: [])
+                && matchName(filters["config"], event, extraIds: [])
+                && matchName(filters["daemon"], event, extraIds: [])
+                && matchName(filters["node"], event, extraIds: [])
+                && matchName(filters["plugin"], event, extraIds: [])
+                && matchName(filters["service"], event, extraIds: [])
                 && matchLabels(filters["label"], event.Actor.Attributes)
-                && neverMatchKeys.allSatisfy { filters[$0] == nil }
         }
     }
 
     // MARK: - Per-key matchers
 
-    /// `type`, `event`, `scope`: exact match against one of the values.
+    /// `type`, `scope`: exact match against one of the values.
     private static func matchExact(_ values: [String]?, _ field: String) -> Bool {
         guard let values, !values.isEmpty else { return true }
         return values.contains(field)
+    }
+
+    /// `event` — moby's `matchEvent` (#25798): exact, EXCEPT when the filter
+    /// contains any of `health_status`, `exec_create`, `exec_start` without
+    /// a colon — those actions carry a `: detail` suffix in the event
+    // (`health_status: healthy`, `exec_create: bash`), so the whole key
+    /// switches to fuzzy (prefix) matching.
+    private static func matchEvent(_ values: [String]?, _ action: String) -> Bool {
+        guard let values, !values.isEmpty else { return true }
+        let fuzzyActions: Set<String> = ["health_status", "exec_create", "exec_start"]
+        let fuzzy = values.contains { fuzzyActions.contains($0) }
+        return values.contains { value in
+            fuzzy ? action.hasPrefix(value) : action == value
+        }
     }
 
     /// `container`/`network`/`volume` — moby's `fuzzyMatchName`: the filter
@@ -133,20 +151,23 @@ struct DockerEventFilterUtility {
         }
     }
 
-    /// `label` — moby's `MatchKVList`: `key=value` requires an equal
-    /// attribute, a bare `key` requires the key to be present.
+    /// `label` — moby's `MatchKVList`: EVERY requested label must match —
+    /// `key=value` requires an equal attribute, a bare `key` requires the
+    /// key to be present. (An any-match here would let
+    /// `--filter label=env=prod --filter label=team=api` select events
+    /// carrying only `env=prod`.)
     private static func matchLabels(_ values: [String]?, _ attributes: [String: String]) -> Bool {
         guard let values, !values.isEmpty else { return true }
         for value in values {
             if let eq = value.firstIndex(of: "=") {
                 let key = String(value[..<eq])
                 let expected = String(value[value.index(after: eq)...])
-                if attributes[key] == expected { return true }
-            } else if attributes[value] != nil {
-                return true
+                if attributes[key] != expected { return false }
+            } else if attributes[value] == nil {
+                return false
             }
         }
-        return false
+        return true
     }
 
     /// moby's `filters.Args.FuzzyMatch`: exact, or the field starts with the
@@ -155,13 +176,17 @@ struct DockerEventFilterUtility {
         field == value || field.hasPrefix(value)
     }
 
-    /// moby's `stripTag` (reference.FamiliarName): drops the `:tag`/`:digest`
-    /// suffix when it follows the last path separator, then shortens the
-    /// default registry so `docker.io/library/busybox:latest` filters as
-    /// `busybox`. The event side is normalized, like moby — the filter value
-    /// is compared raw.
+    /// moby's `stripTag` (reference.FamiliarName): drops the `@digest`
+    /// suffix FIRST (moby parses the reference, and a digest reference's
+    /// familiar name is digest-less), then the `:tag` suffix when it follows
+    /// the last path separator, then shortens the default registry so
+    /// `docker.io/library/busybox@sha256:…` filters as `busybox`. The event
+    /// side is normalized, like moby — the filter value is compared raw.
     private static func stripTag(_ image: String) -> String {
         var stripped = image
+        if let at = stripped.firstIndex(of: "@") {
+            stripped = String(stripped[..<at])
+        }
         if let colon = stripped.lastIndex(of: ":") {
             let lastSlash = stripped.lastIndex(of: "/") ?? stripped.startIndex
             if colon > lastSlash {

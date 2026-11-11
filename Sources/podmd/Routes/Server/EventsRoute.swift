@@ -94,13 +94,27 @@ extension EventsRoute {
                         if clientGone { return }
                     }
                 }
+                // The heartbeat must not touch `req` after cancellation: a
+                // cancelled `Task.sleep` returns immediately, so the loop
+                // would spin and an `req.application` access racing the app
+                // teardown traps in Vapor's Core storage ("Core not
+                // configured"). The allocator and logger are captured up
+                // front; the buffer is a value type.
+                let heartbeatChunk = req.application.allocator.buffer(capacity: 0)
+                let heartbeatLogger = req.logger
                 let heartbeat = Task {
-                    while true {
-                        try? await Task.sleep(nanoseconds: 30_000_000_000)
+                    while !Task.isCancelled {
                         do {
-                            try await writer.write(.buffer(req.application.allocator.buffer(capacity: 0)))
+                            try await Task.sleep(nanoseconds: 30_000_000_000)
                         } catch {
-                            req.logger.debug("Events client disconnected (heartbeat write failed)")
+                            return  // cancelled — stream is over
+                        }
+                        do {
+                            // Zero-length chunks carry no JSON line so
+                            // clients ignore them.
+                            try await writer.write(.buffer(heartbeatChunk))
+                        } catch {
+                            heartbeatLogger.debug("Events client disconnected (heartbeat write failed)")
                             eventLoop.cancel()
                             return
                         }

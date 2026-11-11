@@ -159,8 +159,13 @@ actor EventBroadcaster {
 
     /// moby's `loadBufferedEvents`: with neither bound set nothing is
     /// replayed (the no-parameter request stays a pure live stream); with
-    /// any bound set, history is scanned newest→oldest, stopping at the first
-    /// event older than `since`.
+    /// any bound set, history is scanned newest→oldest. Out-of-window events
+    /// are SKIPPED, never used to stop the scan: history order is the order
+    /// of `broadcast` calls, not `timeNano` — producers timestamp before
+    /// broadcasting and some defer the broadcast in a `Task`, so a delayed
+    /// older event can sit at the end of history; terminating at it would
+    /// hide newer in-window entries behind it. The cap (1024) makes a full
+    /// scan free.
     private func loadHistory(
         since: UInt64?,
         until: UInt64?,
@@ -169,7 +174,7 @@ actor EventBroadcaster {
         guard since != nil || until != nil else { return [] }
         var replay: [DockerEvent] = []
         for event in history.reversed() {
-            if let since, event.timeNano < since { break }
+            if let since, event.timeNano < since { continue }
             if let until, event.timeNano > until { continue }
             if matching?(event) ?? true { replay.append(event) }
         }
