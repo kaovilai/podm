@@ -64,13 +64,19 @@ extension ContainerPruneRoute {
             /// replacement lookup must not read as "no replacement
             /// exists": the replacement's journal and restart state are
             /// preserved unless a successful lookup confirms absence.
-            // One shared lookup-health flag covers the WHOLE request: once
-            // one finalize's replacement lookup times out (the apiserver
-            // stopped answering), later finalizes skip the lookup and treat
-            // the native id as unanswered — without this, a prune of N
-            // containers could stall N × the lookup timeout in lookups
-            // alone; with it, the worst case is ≈ one timeout per request.
-            let lookupHealth = ContainerDestroyCleanup.ReplacementLookupHealth()
+            // One shared lookup-health flag covers the request's INLINE
+            // (in-window) deletes: once one finalize's replacement lookup
+            // times out (the apiserver stopped answering), later inline
+            // finalizes skip the lookup and treat the native id as
+            // unanswered — without this, a prune of N containers could
+            // stall N × the lookup timeout in lookups alone; with it, the
+            // worst case is ≈ one timeout per request. LATE completions
+            // deliberately get a FRESH flag: they run after the response,
+            // possibly after the apiserver recovered, and skipping an
+            // available lookup there would leave the container's journal
+            // and restart state pending for a later DELETE fallback that
+            // may never come.
+            let inlineLookupHealth = ContainerDestroyCleanup.ReplacementLookupHealth()
             let finalizeLateDelete: @Sendable (_ nativeId: String, _ hexId: String) async -> Void = { nativeId, hexId in
                 let snapshot = snapshotByID[hexId] ?? snapshotByID[nativeId]
                 await ContainerDestroyCleanup.finalize(
@@ -83,7 +89,26 @@ extension ContainerPruneRoute {
                     labels: LabelNormalization.restore(snapshot?.configuration.labels ?? [:]),
                     checkForReplacement: true,
                     replacementLookupTimeoutNs: replacementLookupTimeoutNs,
-                    lookupHealth: lookupHealth
+                    lookupHealth: inlineLookupHealth
+                )
+            }
+
+            /// The LATE path: same cleanup body, but a fresh lookup-health
+            /// flag — see finalizeLateDelete's comment.
+            let finalizeLateCompletion: @Sendable (_ nativeId: String, _ hexId: String) async -> Void = {
+                nativeId, hexId in
+                let snapshot = snapshotByID[hexId] ?? snapshotByID[nativeId]
+                await ContainerDestroyCleanup.finalize(
+                    client: client,
+                    broadcaster: broadcaster,
+                    hexId: hexId,
+                    nativeId: nativeId,
+                    image: snapshot?.configuration.image.reference ?? "",
+                    name: snapshot?.id ?? nativeId,
+                    labels: LabelNormalization.restore(snapshot?.configuration.labels ?? [:]),
+                    checkForReplacement: true,
+                    replacementLookupTimeoutNs: replacementLookupTimeoutNs,
+                    lookupHealth: ContainerDestroyCleanup.ReplacementLookupHealth()
                 )
             }
 
@@ -97,7 +122,7 @@ extension ContainerPruneRoute {
             // container deletes by the rest of the prune).
             let result = try await client.prune(
                 filters: parsedFilters,
-                onLateDelete: finalizeLateDelete,
+                onLateDelete: finalizeLateCompletion,
                 onDelete: finalizeLateDelete)
             if let broadcaster = broadcaster {
                 // The aggregate prune event carries an empty Actor.ID and the bytes reclaimed.

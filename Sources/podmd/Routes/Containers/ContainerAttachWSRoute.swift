@@ -108,6 +108,15 @@ extension ContainerAttachWSRoute {
                 nativeId: container.id,
                 runtimeHandler: container.configuration.runtimeHandler
             )
+            // The wait is unbounded in the wedged case's worst window: the
+            // client may have closed the socket meanwhile. Bootstraping a
+            // container nobody is attached to would start it pointlessly
+            // (and strand its process) — check the socket when the wait
+            // returns, release the pipes, and bail.
+            if ws.isClosed {
+                pipes.closeAll()
+                return
+            }
             process = try await ContainerClient().bootstrap(id: container.id, stdio: pipes.stdioArray)
         } catch {
             pipes.closeAll()

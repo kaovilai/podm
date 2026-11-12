@@ -106,10 +106,14 @@ struct ContainerDeleteIdentityTests {
             }
         }
 
+        // Count EVERY destroy event (an id == hexId filter would hide a
+        // second event keyed by the native id), then pin the sole event's
+        // identity.
         let destroys = await broadcaster.snapshot(since: 1, until: nil) {
-            $0.status == "destroy" && $0.id == hexId
+            $0.status == "destroy"
         }
         #expect(destroys.count == 1, "finalization stays exactly-once across the 404 fallback")
+        #expect(destroys.first?.id == hexId, "the sole destroy event carries the canonical hex id")
     }
 
     // MARK: - Helpers
