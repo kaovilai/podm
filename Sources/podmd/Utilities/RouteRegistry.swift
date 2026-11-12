@@ -69,8 +69,8 @@ enum RouteRegistry {
         // escalate on top. See BuilderResourceKnobs.
         let builderEnv = ProcessInfo.processInfo.environment
         let builderClient = ClientBuilderService(
-            rosettaResources: BuilderResourceKnobs.provision(qemu: false, env: builderEnv),
-            qemuResources: BuilderResourceKnobs.provision(qemu: true, env: builderEnv),
+            rosettaResources: BuilderResourceKnobs.provision(qemu: false, env: builderEnv, logger: app.logger),
+            qemuResources: BuilderResourceKnobs.provision(qemu: true, env: builderEnv, logger: app.logger),
             appSupportURL: appleContainerAppSupportUrl, containerSystemConfig: systemConfig)
 
         // Create and install regex routing middleware with logging

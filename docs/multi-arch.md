@@ -110,10 +110,14 @@ docker build --memory 6g --cpu-quota 600000 --cpu-period 100000 .
 ```
 
 (`--cpu-quota/--cpu-period` is CFS-speak for vCPUs: `quota/period` of
-`600000/100000` = 6.) The flags are absent from the wire when you don't
-pass them, so an un-flagged build never disturbs a running builder. A
-flagged build sizes a builder it has to *create* at the larger of the
-env floor and the ask; if a smaller builder is already running, it is
-recreated at the larger size (the BuildKit cache inside it resets — a
-one-time cost logged at the time, and a build concurrently in flight on
-that builder may fail; re-run it).
+`600000/100000` = 6; a quota sent without a period uses the CFS default
+period of `100000`.) The flags are absent from the wire when you don't
+pass them, so an un-flagged build never triggers *per-build* escalation —
+though a builder smaller than a **raised env floor** is still recreated
+once, on the next build of any kind. A flagged build sizes a builder it
+has to *create* at the larger of the env floor and the ask; a smaller
+builder that is already running is recreated at the larger size, keeping
+any field where it was already larger (replacement never shrinks). The
+BuildKit cache inside a replaced builder resets — a one-time cost logged
+at the time, and a build concurrently in flight on that builder may
+fail; re-run it.
