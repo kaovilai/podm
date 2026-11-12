@@ -1,0 +1,1399 @@
+{
+  "cli": "docker",
+  "cli_version": "29.9.2",
+  "commands": [
+    {
+      "command": "docker --version",
+      "requests": []
+    },
+    {
+      "command": "docker version",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/version",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker info",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/info",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker ps",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/json",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker ps -a",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/json",
+          "query": {
+            "all": [
+              "1"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker images",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/images/json",
+          "query": {
+            "manifests": [
+              "1"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker images -a",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/images/json",
+          "query": {
+            "all": [
+              "1"
+            ],
+            "manifests": [
+              "1"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker image ls",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/images/json",
+          "query": {
+            "manifests": [
+              "1"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker image inspect alpine:latest",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/images/alpine:latest/json",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker pull docker.io/library/alpine:latest",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/images/create",
+          "query": {
+            "fromImage": [
+              "docker.io/library/alpine"
+            ],
+            "tag": [
+              "latest"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker create --name wct alpine:latest echo hi",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/containers/create",
+          "query": {
+            "name": [
+              "wct"
+            ]
+          },
+          "content_type": "application/json"
+        }
+      ]
+    },
+    {
+      "command": "docker start wct",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/containers/wct/start",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker stop wct",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/containers/wct/stop",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker restart wct",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/containers/wct/restart",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker kill wct",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/containers/wct/kill",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker pause wct",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/containers/wct/pause",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker unpause wct",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/containers/wct/unpause",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker inspect wct",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/wct/json",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker container inspect wct",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/wct/json",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker top wct",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/wct/top",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker stats --no-stream",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/events",
+          "query": {
+            "filters": [
+              "{\"type\":{\"container\":true}}"
+            ]
+          },
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/json",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker logs wct",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/wct/json",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/logs",
+          "query": {
+            "stderr": [
+              "1"
+            ],
+            "stdout": [
+              "1"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker logs --since 2020-01-01T00:00:00Z wct",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/wct/json",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/logs",
+          "query": {
+            "since": [
+              "1577836800.000000000"
+            ],
+            "stderr": [
+              "1"
+            ],
+            "stdout": [
+              "1"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker exec wct ls /",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/wct/json",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/containers/wct/exec",
+          "query": {},
+          "content_type": "application/json"
+        },
+        {
+          "method": "POST",
+          "path": "/exec/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/start",
+          "query": {},
+          "content_type": "application/json"
+        }
+      ]
+    },
+    {
+      "command": "docker exec -e FOO=bar wct env",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/wct/json",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/containers/wct/exec",
+          "query": {},
+          "content_type": "application/json"
+        },
+        {
+          "method": "POST",
+          "path": "/exec/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/start",
+          "query": {},
+          "content_type": "application/json"
+        }
+      ]
+    },
+    {
+      "command": "docker rename wct wct2",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/containers/wct/rename",
+          "query": {
+            "name": [
+              "wct2"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker wait wct",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/containers/wct/wait",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker port wct",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/wct/json",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker diff wct",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/wct/changes",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker rm wct",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "DELETE",
+          "path": "/containers/wct",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker rm -f wct2",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "DELETE",
+          "path": "/containers/wct2",
+          "query": {
+            "force": [
+              "1"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker container prune -f",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/containers/prune",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker run --rm alpine:latest echo hi",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/containers/create",
+          "query": {},
+          "content_type": "application/json"
+        },
+        {
+          "method": "POST",
+          "path": "/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/attach",
+          "query": {
+            "stderr": [
+              "1"
+            ],
+            "stdout": [
+              "1"
+            ],
+            "stream": [
+              "1"
+            ]
+          },
+          "content_type": "text/plain"
+        }
+      ]
+    },
+    {
+      "command": "docker run --name wcr alpine:latest echo hi",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/containers/create",
+          "query": {
+            "name": [
+              "wcr"
+            ]
+          },
+          "content_type": "application/json"
+        },
+        {
+          "method": "POST",
+          "path": "/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/attach",
+          "query": {
+            "stderr": [
+              "1"
+            ],
+            "stdout": [
+              "1"
+            ],
+            "stream": [
+              "1"
+            ]
+          },
+          "content_type": "text/plain"
+        }
+      ]
+    },
+    {
+      "command": "docker run -d alpine:latest",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/containers/create",
+          "query": {},
+          "content_type": "application/json"
+        },
+        {
+          "method": "POST",
+          "path": "/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/wait",
+          "query": {
+            "condition": [
+              "next-exit"
+            ]
+          },
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/start",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker tag alpine:latest wctag:1",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/images/alpine:latest/tag",
+          "query": {
+            "repo": [
+              "docker.io/library/wctag"
+            ],
+            "tag": [
+              "1"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker rmi wctag:1",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "DELETE",
+          "path": "/images/wctag:1",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker image prune -f",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/images/prune",
+          "query": {
+            "filters": [
+              "{\"dangling\":{\"true\":true}}"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker history alpine:latest",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/images/alpine:latest/history",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker push alpine:latest",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/images/docker.io/library/alpine/push",
+          "query": {
+            "tag": [
+              "latest"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker search alpine",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/images/search",
+          "query": {
+            "term": [
+              "alpine"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker commit wcr wcimg:1",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/commit",
+          "query": {
+            "container": [
+              "wcr"
+            ],
+            "repo": [
+              "docker.io/library/wcimg"
+            ],
+            "tag": [
+              "1"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker export wcr",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/wcr/export",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker save -o wc.tar alpine:latest",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/images/get",
+          "query": {
+            "names": [
+              "alpine:latest"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker load -i wc.tar",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/images/load",
+          "query": {
+            "quiet": [
+              "1"
+            ]
+          },
+          "content_type": "application/x-tar"
+        }
+      ]
+    },
+    {
+      "command": "docker build -f Dockerfile .",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/build",
+          "query": {
+            "dockerfile": [
+              "Dockerfile"
+            ],
+            "version": [
+              "1"
+            ]
+          },
+          "content_type": "application/x-tar"
+        }
+      ]
+    },
+    {
+      "command": "docker build -t wc-a -t wc-b .",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/build",
+          "query": {
+            "dockerfile": [
+              "Dockerfile"
+            ],
+            "t": [
+              "wc-a",
+              "wc-b"
+            ],
+            "version": [
+              "1"
+            ]
+          },
+          "content_type": "application/x-tar"
+        }
+      ]
+    },
+    {
+      "command": "docker build -q -f Dockerfile .",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/build",
+          "query": {
+            "dockerfile": [
+              "Dockerfile"
+            ],
+            "q": [
+              "1"
+            ],
+            "version": [
+              "1"
+            ]
+          },
+          "content_type": "application/x-tar"
+        }
+      ]
+    },
+    {
+      "command": "docker manifest create wcm alpine:latest",
+      "requests": []
+    },
+    {
+      "command": "docker manifest inspect wcm",
+      "requests": []
+    },
+    {
+      "command": "docker volume create wcv",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/volumes/create",
+          "query": {},
+          "content_type": "application/json"
+        }
+      ]
+    },
+    {
+      "command": "docker volume ls",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/volumes",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker volume inspect wcv",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/volumes/wcv",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker volume rm wcv",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "DELETE",
+          "path": "/volumes/wcv",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker volume prune -f",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/volumes/prune",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker network create wcn",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/networks/create",
+          "query": {},
+          "content_type": "application/json"
+        }
+      ]
+    },
+    {
+      "command": "docker network ls",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/networks",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker network inspect wcn",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/networks/wcn",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker network rm wcn",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/networks/wcn",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "DELETE",
+          "path": "/networks/wcn",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker network prune -f",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/networks/prune",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker events --since 2020-01-01T00:00:00Z --until 2020-01-01T01:00:00Z",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/events",
+          "query": {
+            "since": [
+              "1577836800.000000000"
+            ],
+            "until": [
+              "1577840400.000000000"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker system df",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/system/df",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker system info",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/info",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker secret ls",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/secrets",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker secret create wcs secret.txt",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/secrets/create",
+          "query": {},
+          "content_type": "application/json"
+        }
+      ]
+    },
+    {
+      "command": "docker secret inspect wcs",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/secrets/wcs",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker secret rm wcs",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "DELETE",
+          "path": "/secrets/wcs",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker container ls --all",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/json",
+          "query": {
+            "all": [
+              "1"
+            ]
+          },
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "docker inspect --type image alpine:latest",
+      "requests": [
+        {
+          "method": "HEAD",
+          "path": "/_ping",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/images/alpine:latest/json",
+          "query": {},
+          "content_type": ""
+        }
+      ]
+    }
+  ]
+}
