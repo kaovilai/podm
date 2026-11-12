@@ -62,6 +62,17 @@ struct ImagePushPlatformRouteTests {
         }
     }
 
+    @Test("the single platform param is primary; leftover tuple fields never override or reject it")
+    func singleParamIsPrimary() async throws {
+        // A conflicting mixed form selects the single param's platform.
+        let conflicting = try await Self.push(query: "platform=linux/arm64&os=linux&arch=amd64")
+        #expect(conflicting == Platform(arch: "arm64", os: "linux"))
+
+        // A valid platform is not rejected by an incomplete leftover tuple.
+        let partial = try await Self.push(query: "platform=linux/arm64&os=linux&arch=")
+        #expect(partial == Platform(arch: "arm64", os: "linux"))
+    }
+
     @Test("an invalid platform string still answers 400, not a silent full push")
     func invalidPlatformAnswers400() async throws {
         try await withApp(configure: { _ in }) { app in

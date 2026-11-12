@@ -49,18 +49,22 @@ extension ImagePushRoute {
 
             let reference = try resolvedReference(imageName: imageName, tag: query.tag)
 
-            // Parse platform if provided: either the single `platform` string
-            // (docker dialect) or podman 6.2's separate os/arch/variant fields.
-            // The fields are POSITIONAL — dropping an empty `arch` and joining
-            // the rest would reinterpret a variant as an architecture
-            // (os=linux&arch=&variant=amd64 must NOT become linux/amd64), so
-            // an incomplete tuple (any field set but os/arch missing) answers
-            // 400 instead. All fields empty/absent means no selection.
+            // Parse platform if provided. The single `platform` string (docker
+            // dialect) is the PRIMARY form — when present it wins. Podman 6.2's
+            // separate os/arch/variant fields are the fallback form, used only
+            // when `platform` is absent. The tuple fields are POSITIONAL —
+            // dropping an empty `arch` and joining the rest would reinterpret
+            // a variant as an architecture (os=linux&arch=&variant=amd64 must
+            // NOT become linux/amd64) — so an incomplete tuple answers 400,
+            // but only when the tuple is actually the form being used: a valid
+            // `platform` is never rejected by leftover tuple fields.
             let os = query.os.flatMap { $0.isEmpty ? nil : $0 }
             let arch = query.arch.flatMap { $0.isEmpty ? nil : $0 }
             let variant = query.variant.flatMap { $0.isEmpty ? nil : $0 }
             let platformString: String?
-            if os != nil || arch != nil || variant != nil {
+            if let single = query.platform, !single.isEmpty {
+                platformString = single
+            } else if os != nil || arch != nil || variant != nil {
                 guard let os, let arch else {
                     throw Abort(
                         .badRequest,
@@ -68,8 +72,6 @@ extension ImagePushRoute {
                     )
                 }
                 platformString = variant.map { "\(os)/\(arch)/\($0)" } ?? "\(os)/\(arch)"
-            } else if let single = query.platform, !single.isEmpty {
-                platformString = single
             } else {
                 platformString = nil
             }
