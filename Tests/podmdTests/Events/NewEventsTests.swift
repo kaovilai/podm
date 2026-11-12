@@ -478,6 +478,20 @@ private struct StubContainerClient: ClientContainerProtocol {
     func prune(filters: [String: [String]]) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
         ([prunedContainer], 1024)
     }
+
+    /// Models the production service's in-window identity capture: the
+    /// pruned container's cleanup runs through the onDelete hook with the
+    /// service's captured hex id. This stub has no real snapshot, so the
+    /// native id doubles as the hex key (the route's finalizer treats an
+    /// unparseable id as itself).
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?,
+        onDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+        await onDelete?(prunedContainer, prunedContainer)
+        return ([prunedContainer], 1024)
+    }
 }
 
 private struct StubImageClient: ClientImageProtocol {

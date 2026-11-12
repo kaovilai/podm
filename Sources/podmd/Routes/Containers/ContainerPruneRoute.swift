@@ -37,24 +37,23 @@ extension ContainerPruneRoute {
                 $0[DockerContainerID.hexId(for: $1)] = $1
                 $0[$1.id] = $1
             }
-            // The pruned instance's Docker id, captured BEFORE prune: it
-            // derives from the bundle's on-disk creation date, which is
-            // gone (or belongs to a same-name replacement) once the
-            // container is deleted — recomputing it after prune can
-            // produce a fallback id or the REPLACEMENT's id, defeating the
-            // destroy dedup and marking the wrong instance finalized.
-            let hexIdByNativeId: [String: String] = preSnapshots.reduce(into: [:]) {
-                $0[$1.id] = DockerContainerID.hexId(for: $1)
-            }
+            // NOTE: per-instance identity for the cleanup below comes from
+            // the SERVICE's captured pre-delete hex IDs (onDelete /
+            // onLateDelete hooks) — NOT from a route-local map: the route's
+            // list predates the prune, so a container created in between
+            // would be missing from any map built here, and a fallback to
+            // the native id would key the finalizer wrong.
             // Captured EAGERLY: the late-delete cleanup below runs after
             // this request's response has been sent.
             let broadcaster = req.application.storage[EventBroadcasterKey.self]
 
-            /// Instance-scoped, exactly-once cleanup for a container whose
-            /// prune delete succeeded LATE — after prune had already given
-            /// up on it (wedged apiserver, issue #45). The prune response
-            /// went out without this container, so its cleanup and
-            /// `destroy` event would otherwise be lost entirely. The shared
+            /// Instance-scoped, exactly-once cleanup for a pruned container —
+            /// used BOTH for in-window deletes (the service's onDelete hook,
+            /// carrying its captured pre-delete hex ID) and for deletes that
+            /// succeeded LATE, after prune had already given up on the
+            /// container (wedged apiserver, issue #45 — the prune response
+            /// went out without it, so its cleanup and `destroy` event would
+            /// otherwise be lost entirely). The shared
             /// `ContainerDestroyCleanup` body (also used by DELETE) runs
             /// the full store teardown — a same-name replacement may exist
             /// by then (native ids are reusable names), and a FAILED
@@ -75,32 +74,18 @@ extension ContainerPruneRoute {
                 )
             }
 
-            let result = try await client.prune(filters: parsedFilters, onLateDelete: finalizeLateDelete)
-            // The prune path deletes containers directly through the native
-            // client, bypassing the delete/auto-remove cleanup callers — run
-            // the SAME full instance-scoped cleanup DELETE runs (cache
-            // entries, journal, restart state, rename/policy overrides,
-            // destroy event), or a later DELETE 404 fallback for a lingering
-            // cached id would find the hex key already marked complete and
-            // skip its half of the teardown. The per-container deletes
-            // answered inside this request, but this loop trails them by the
-            // rest of the prune — a same-name replacement may have been
-            // created since the earliest delete — so the replacement check
-            // runs here too.
-            for containerID in result.deletedContainers {
-                let hexId = hexIdByNativeId[containerID] ?? containerID
-                let snapshot = snapshotByID[hexId]
-                await ContainerDestroyCleanup.finalize(
-                    client: client,
-                    broadcaster: broadcaster,
-                    hexId: hexId,
-                    nativeId: containerID,
-                    image: snapshot?.configuration.image.reference ?? "",
-                    name: snapshot?.id ?? containerID,
-                    labels: LabelNormalization.restore(snapshot?.configuration.labels ?? [:]),
-                    checkForReplacement: true
-                )
-            }
+            // The per-container in-window cleanup runs through the service's
+            // onDelete hook (identity captured pre-delete on the service
+            // side); the late path through onLateDelete. Both run the SAME
+            // full instance-scoped cleanup DELETE runs — cache entries,
+            // journal, restart state, rename/policy overrides, destroy event
+            // — behind the same hex-keyed finalizer gate, with the
+            // replacement check (this cleanup trails the earliest per-
+            // container deletes by the rest of the prune).
+            let result = try await client.prune(
+                filters: parsedFilters,
+                onLateDelete: finalizeLateDelete,
+                onDelete: finalizeLateDelete)
             if let broadcaster = broadcaster {
                 // The aggregate prune event carries an empty Actor.ID and the bytes reclaimed.
                 await broadcaster.broadcast(

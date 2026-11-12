@@ -143,6 +143,17 @@ protocol ClientContainerProtocol: Sendable {
         filters: [String: [String]],
         onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
     ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64)
+    /// `prune(filters:onLateDelete:)` plus a per-container hook for deletes
+    /// that succeeded WITHIN the prune call — carrying the service's own
+    /// captured pre-delete hex ID, the identity the route cannot know for a
+    /// container created between its list and the service's (its own map
+    /// would miss, and the fallback native id would key the finalizer
+    /// wrong). Same optional-parameter rule as above.
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?,
+        onDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64)
 }
 
 extension ClientContainerProtocol {
@@ -167,6 +178,17 @@ extension ClientContainerProtocol {
         onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
     ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
         try await prune(filters: filters)
+    }
+
+    /// Default: mocks model neither wedge recovery nor per-instance hex
+    /// capture — the in-window delete hook is dropped, matching the
+    /// late-completion default above.
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?,
+        onDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+        try await prune(filters: filters, onLateDelete: onLateDelete)
     }
 }
 
@@ -688,7 +710,8 @@ struct ClientContainerService: ClientContainerProtocol {
 
     func prune(
         filters: [String: [String]],
-        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)? = nil
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)? = nil,
+        onDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)? = nil
     ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
         let allContainers = Self.withoutDNSSidecars(try await containerClient.withClient { try await $0.list() })
 
@@ -796,6 +819,10 @@ struct ClientContainerService: ClientContainerProtocol {
                 // name stays reserved (create/rename 409) forever, even across
                 // daemon restarts, since the map is persisted.
                 await ContainerNameOverrideStore.shared.remove(hexId: hexId)
+                // In-window delete: hand the route the SERVICE's captured
+                // pre-delete identity — its own list predates this prune and
+                // cannot know a container created in between.
+                await onDelete?(container.id, hexId)
             } catch {
                 continue
             }

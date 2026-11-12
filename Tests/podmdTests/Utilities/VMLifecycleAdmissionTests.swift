@@ -148,11 +148,14 @@ struct VMLifecycleAdmissionTests {
             _ = try await holder.value
             _ = (try? await caller.value) ?? nil
 
-            #expect(
-                await cancelledBodies.count == 0,
-                "the body must never start in a cancelled task")
-            // No slot leaked: the very next call must be admitted (a leak
-            // here hangs to the test's time limit).
+            // Deliberately NOT asserting "the body never ran cancelled":
+            // `caller.cancel()` can land after withSlot's cancellation
+            // check but before the body reads Task.isCancelled — a body
+            // observing cancellation then is a schedulable interleaving,
+            // not a slot leak or a broken check. What this test CAN
+            // observe reliably is the invariant that matters: the slot
+            // was released (the next caller is admitted immediately —
+            // a leak here hangs to the test's time limit).
             let probe = try await admission.withSlot { true }
             #expect(probe)
         }

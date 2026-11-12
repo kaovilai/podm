@@ -190,6 +190,63 @@ struct ContainerDeleteLateCleanupTests {
         #expect(destroysAfterRefire.count == 1, "finalization is exactly-once")
     }
 
+    /// Review round 2 (Copilot): a container created between the route's
+    /// pre-list and the service's own prune list is INVISIBLE to any
+    /// route-local hex map — the old post-loop fell back to the native id
+    /// and keyed the finalizer wrong. The service's onDelete hook now
+    /// carries its captured pre-delete hex id, so the unlisted container's
+    /// cleanup is keyed correctly.
+    @Test(
+        "a prune delete of a container the route's list never saw uses the SERVICE's captured hex id",
+        .timeLimit(.minutes(1))
+    )
+    func pruneInWindowDeleteUsesServiceIdentity() async throws {
+        // The route's pre-list sees only the ORIGINAL container.
+        let listedNative = "prune-listed-ctr-3af"
+        let listed = Self.snapshot(id: listedNative, createdAt: 7100)
+        // The service's prune also deletes a container created between the
+        // two lists — absent from the route's list, known only to the
+        // service's own capture.
+        let unlistedNative = "prune-unlisted-ctr-9c1"
+        let unlisted = Self.snapshot(id: unlistedNative, createdAt: 7200)
+        let unlistedHex = DockerContainerID.hexId(for: unlisted)
+
+        await ContainerLogJournal.shared.beginBoot(nativeId: unlistedNative, epoch: 1)
+        await ContainerLogJournal.shared.append(
+            nativeId: unlistedNative, epoch: 1,
+            [ContainerLogJournal.Entry(unixNano: 1, streamType: 1, bytes: Data("z\n".utf8))])
+
+        let state = LateHookState()
+        let mock = ServiceIdentityPruneMock(
+            listedSnapshot: listed, unlistedSnapshot: unlisted, state: state)
+        let broadcaster = EventBroadcaster()
+
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+            app.storage[EventBroadcasterKey.self] = broadcaster
+            try app.register(collection: ContainerPruneRoute(client: mock))
+
+            try await app.testing().test(.POST, "/v1.51/containers/prune") { res async in
+                #expect(res.status == .ok)
+                #expect(res.body.string.contains(unlistedNative), "the response lists the deleted container")
+            }
+        }
+
+        // The unlisted container's journal died, keyed by the SERVICE's
+        // captured identity — not a route-derived fallback.
+        #expect(
+            await ContainerLogJournal.shared.entries(nativeId: unlistedNative).isEmpty,
+            "the unlisted container's journal dies with it")
+        let destroys = await broadcaster.snapshot(since: 1, until: nil) {
+            $0.status == "destroy" && $0.id == unlistedHex
+        }
+        #expect(
+            destroys.count == 1,
+            "exactly one destroy event, keyed by the service's captured hex id")
+    }
+
     @Test(
         "a late prune delete skips the journal teardown when a same-name replacement owns it",
         .timeLimit(.minutes(1))
@@ -397,5 +454,63 @@ private struct LatePruneMock: ClientContainerProtocol {
             await state.storePruneLateDelete(onLateDelete)
         }
         return ([], 0)
+    }
+}
+
+/// The route's list sees ONLY the listed snapshot; the service's prune
+/// deletes both the listed and an unlisted container (created between the
+/// two lists), handing the route its own captured pre-delete hex id via
+/// the in-window onDelete hook.
+private struct ServiceIdentityPruneMock: ClientContainerProtocol {
+    let listedSnapshot: ContainerSnapshot
+    let unlistedSnapshot: ContainerSnapshot
+    let state: LateHookState
+
+    func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] {
+        [listedSnapshot]
+    }
+
+    func getContainer(id: String) async throws -> ContainerSnapshot? { nil }
+
+    func enforceContainerRunning(container: ContainerSnapshot) throws {}
+
+    @discardableResult
+    func start(id: String, detachKeys: String?) async throws -> Bool { true }
+
+    func stop(id: String, signal: String?, timeout: Int?) async throws {}
+
+    @discardableResult
+    func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool { true }
+
+    func kill(id: String, signal: String?) async throws {}
+
+    func delete(id: String) async throws {}
+
+    func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait {
+        RESTContainerWait(statusCode: 0)
+    }
+
+    func prune(filters: [String: [String]]) async throws -> (
+        deletedContainers: [String], spaceReclaimed: Int64
+    ) {
+        ([], 0)
+    }
+
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+        ([], 0)
+    }
+
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?,
+        onDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+        // The service's own capture — the identity the route CANNOT
+        // derive for the unlisted container.
+        await onDelete?(unlistedSnapshot.id, DockerContainerID.hexId(for: unlistedSnapshot))
+        return ([unlistedSnapshot.id], 0)
     }
 }

@@ -3,6 +3,24 @@ import Testing
 
 @testable import podmd
 
+/// A synchronous flag readable/writable from any task — the duplicate
+/// task records its observation before anyone awaits it.
+final class LockedBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value
+    init(_ value: Value) { self.stored = value }
+    var value: Value {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+    func set(_ value: Value) {
+        lock.lock()
+        defer { lock.unlock() }
+        stored = value
+    }
+}
+
 /// Review round 2 (PR #51): three paths can reach destroy-time cleanup for
 /// the same container — the DELETE route's synchronous success, its
 /// 404-after-vanish fallback, and the wedge recovery's late-success
@@ -50,14 +68,22 @@ struct ContainerDestroyFinalizerTests {
         // running must not run the body again — and must WAIT for the
         // in-flight one, so its caller cannot answer (e.g. a DELETE 404
         // fallback) before the cleanup has actually finished.
+        let duplicateReturnedBeforeCompletion = LockedBox(false)
         let second = Task<Void, Never> {
             await finalizer.finalizeOnce(key: "hex-inflight") { Issue.record("must not run") }
+            // Checked INSIDE the duplicate task, immediately after
+            // finalizeOnce returns: this is the caller-visible guarantee.
+            // (Asserting after `second.value` only proves the body finished
+            // EVENTUALLY — it passes even if the duplicate returned early.)
+            duplicateReturnedBeforeCompletion.set(!bodyFinished.isOpen)
         }
         try? await Task.sleep(nanoseconds: 150_000_000)
         releaseFirst.open()
         await first.value
         await second.value
-        #expect(bodyFinished.isOpen, "the duplicate returns only after the body finished")
+        #expect(
+            !duplicateReturnedBeforeCompletion.value,
+            "the duplicate returns only after the body finished")
     }
 
     @Test("a duplicate's return implies the cleanup completed — no 409 window on the rename override")
@@ -79,14 +105,20 @@ struct ContainerDestroyFinalizerTests {
         // The DELETE 404 fallback's duplicate finalization: when it returns,
         // the rename override removal (the body's last step here) must have
         // happened — a create of the same name in between would 409.
+        let duplicateReturnedBeforeRemoval = LockedBox(false)
         let second = Task<Void, Never> {
             await finalizer.finalizeOnce(key: "hex-dup") {}
+            // Checked INSIDE the duplicate task, immediately after return —
+            // the caller-visible guarantee (see the sibling test's note).
+            duplicateReturnedBeforeRemoval.set(!overrideRemoved.isOpen)
         }
         try? await Task.sleep(nanoseconds: 100_000_000)
         releaseFirst.open()
         await second.value
-        #expect(overrideRemoved.isOpen, "the duplicate observes the completed cleanup")
         await first.value
+        #expect(
+            !duplicateReturnedBeforeRemoval.value,
+            "the duplicate observes the completed cleanup")
     }
 }
 

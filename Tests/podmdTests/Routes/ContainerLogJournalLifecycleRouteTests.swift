@@ -426,6 +426,18 @@ struct ContainerLogJournalLifecycleRouteTests {
             pruned = true
             return ([snapshot.id], 0)
         }
+
+        /// Models the production service's in-window identity capture (the
+        /// route's cleanup runs through this hook with the captured hex id).
+        func prune(
+            filters: [String: [String]],
+            onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?,
+            onDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+        ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+            pruned = true
+            await onDelete?(snapshot.id, DockerContainerID.hexId(for: snapshot))
+            return ([snapshot.id], 0)
+        }
     }
 
     @Test("docker container prune tears down the pruned container's log journal")
