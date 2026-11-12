@@ -2,10 +2,13 @@ name: wire-contract
 
 # Records what the REAL podman and docker CLIs send to a podm-shaped
 # socket and diffs the request signatures against the checked-in baselines
-# (scripts/wire-contract/baseline-<cli>.json). Upstream call-signature
-# drift — the class that shipped as #49 (absolute-path -f), #52 (repeated
-# t key) — fails the job with a per-command diff the day a new CLI behaves
-# differently, instead of waiting for a user to hit it.
+# (scripts/wire-contract/baseline-<cli>.json), and diffs each CLI's
+# subcommand tree (--help walk, commands-<cli>.json) so a NEW upstream
+# command fails the job instead of sailing past the fixed recording
+# battery. Upstream call-signature drift — the class that shipped as
+# #49 (absolute-path -f), #52 (repeated t key) — fails the job with a
+# per-command diff the day a new CLI behaves differently, instead of
+# waiting for a user to hit it.
 #
 # Runs manually (dev/curiosity: pin any CLI version, or refresh the
 # baselines after an intentional podm-side change) and monthly as a canary
@@ -101,13 +104,22 @@ jobs:
       - name: Normalize the recording
         run: python3 scripts/wire-contract/normalize.py recording.jsonl "${{ matrix.cli }}" "$CLI_VERSION" > normalized.json
 
+      - name: Extract the ${{ matrix.cli }} command tree
+        run: python3 scripts/wire-contract/commands.py extract "${{ matrix.cli }}" "$CLI_BIN" > tree.json
+
       - name: Compare against the baseline (drift detection)
         if: (inputs.mode || 'check') == 'check'
         run: python3 scripts/wire-contract/compare.py "scripts/wire-contract/baseline-${{ matrix.cli }}.json" normalized.json
 
+      - name: Compare the command tree (new-command detection)
+        if: (inputs.mode || 'check') == 'check'
+        run: python3 scripts/wire-contract/commands.py compare "scripts/wire-contract/commands-${{ matrix.cli }}.json" tree.json
+
       - name: Prepare refreshed baseline
         if: (inputs.mode || 'check') == 'refresh'
-        run: cp normalized.json "baseline-refreshed-${{ matrix.cli }}.json"
+        run: |
+          cp normalized.json "baseline-refreshed-${{ matrix.cli }}.json"
+          cp tree.json "commands-refreshed-${{ matrix.cli }}.json"
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -116,5 +128,7 @@ jobs:
           path: |
             recording.jsonl
             normalized.json
+            tree.json
             baseline-refreshed-${{ matrix.cli }}.json
+            commands-refreshed-${{ matrix.cli }}.json
           if-no-files-found: ignore
