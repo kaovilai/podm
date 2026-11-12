@@ -17,10 +17,23 @@ import re
 import subprocess
 import sys
 
-SECTION_HEADERS = ("Available Commands:", "Commands:", "Management Commands:")
+# Any "* Commands:" section header: CLIs name them differently and the
+# naming varies BY BINARY — homebrew docker prints "Commands:", the static
+# bundle from download.docker.com prints "Common Commands:" and
+# "Swarm Commands:" as separate sections. An exact allowlist silently
+# dropped whole sections (docker run/info/secret/swarm were missing from
+# the first CI-generated baseline).
+SECTION_HEADER = re.compile(r"^(?:[A-Z][A-Za-z]* )*Commands:$")
 ENTRY = re.compile(r"^  (\S+?)(\*)?\s{2,}")
 MAX_DEPTH = 3
 HELP_TIMEOUT = 30
+
+# Unstarred top-level names that alias a PATH-installed plugin rather than
+# the binary under test: docker's `builder` forwards to buildx (its help is
+# the plugin's, and it only exists when a plugin is discoverable), so its
+# subcommands vary with the runner, not the CLI version. Starred entries
+# (buildx*, compose*) are already skipped by the star check.
+PLUGIN_ALIASES = {"docker": {"builder"}}
 
 
 def help_lines(binary, args):
@@ -38,7 +51,7 @@ def help_lines(binary, args):
     return (out.stdout or "").splitlines()
 
 
-def parse_subcommands(lines):
+def parse_subcommands(lines, cli=None):
     """Names in any Commands: section. Docker marks plugin-provided
     commands with a trailing * (buildx*, compose*) — those live outside
     the binary under test and vary with the runner's PATH, so they are
@@ -47,7 +60,7 @@ def parse_subcommands(lines):
     in_section = False
     for line in lines:
         stripped = line.strip()
-        if stripped in SECTION_HEADERS:
+        if SECTION_HEADER.match(stripped):
             in_section = True
             continue
         if not in_section:
@@ -58,22 +71,24 @@ def parse_subcommands(lines):
             continue
         match = ENTRY.match(line)
         if match and not match.group(2):
-            names.append(match.group(1))
+            name = match.group(1)
+            if cli is None or name not in PLUGIN_ALIASES.get(cli, set()):
+                names.append(name)
         elif not line.startswith("  "):
             in_section = False
     return names
 
 
-def extract_tree(binary, prefix):
+def extract_tree(binary, prefix, cli=None):
     """Depth-first walk of the command tree; returns sorted full paths."""
     tree = set()
-    frontier = [((), name, 1) for name in parse_subcommands(help_lines(binary, []))]
+    frontier = [((), name, 1) for name in parse_subcommands(help_lines(binary, []), cli=cli)]
     while frontier:
         parent_args, name, depth = frontier.pop()
         args = (*parent_args, name)
         tree.add(" ".join((*prefix, *args)))
         if depth < MAX_DEPTH:
-            for sub in parse_subcommands(help_lines(binary, list(args))):
+            for sub in parse_subcommands(help_lines(binary, list(args)), cli=cli):
                 frontier.append((args, sub, depth + 1))
     return sorted(tree)
 
@@ -98,7 +113,7 @@ def main():
                 {
                     "cli": cli,
                     "cli_version": cli_version(binary),
-                    "commands": extract_tree(binary, [cli]),
+                    "commands": extract_tree(binary, [cli], cli=cli),
                 },
                 indent=2,
             )
