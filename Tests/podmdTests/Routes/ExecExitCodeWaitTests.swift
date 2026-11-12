@@ -40,12 +40,25 @@ struct ExecExitCodeWaitTests {
     func waitsForLateExitCode() async throws {
         let execId = await makeStartedExec()
 
-        Task {
-            try await Task.sleep(nanoseconds: 100_000_000)
+        // async let, NOT a fire-and-forget Task: waitForExitCode polls in
+        // a tight 25 ms loop, and on a saturated runner the parent keeps
+        // waking while an UNSTRUCTURED setter task can be starved past
+        // the 12 s deadline entirely (the same class the events-route
+        // test documents). A structured child is scheduled as part of
+        // this scope — the parent suspends into its first poll sleep and
+        // the child gets the thread.
+        async let setter: Void = {
+            try? await Task.sleep(nanoseconds: 100_000_000)
             await ExecManager.shared.setExitCode(id: execId, code: 42)
-        }
+        }()
 
-        let code = await ExecManager.shared.waitForExitCode(id: execId)
+        // A generous deadline: CI runners occasionally stall 10-20 s (the
+        // documented runner-stall class — even structured children cannot
+        // run while the machine is frozen), and this test's contract is
+        // "waits until the code lands, never returns nil early" — not
+        // "lands within 12 s". The production default stays 12 s.
+        let code = await ExecManager.shared.waitForExitCode(id: execId, timeoutNanoseconds: 120_000_000_000)
+        _ = await setter
 
         #expect(code == 42)
         await ExecManager.shared.remove(id: execId)
