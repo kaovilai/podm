@@ -1,6 +1,6 @@
 {
   "cli": "podman",
-  "cli_version": "6.1.4",
+  "cli_version": "6.2.0",
   "commands": [
     {
       "command": "podman --version",
@@ -230,9 +230,6 @@
             "arch": [
               ""
             ],
-            "authfile": [
-              ""
-            ],
             "os": [
               ""
             ],
@@ -270,9 +267,6 @@
               "false"
             ],
             "arch": [
-              ""
-            ],
-            "authfile": [
               ""
             ],
             "os": [
@@ -1130,9 +1124,6 @@
             "arch": [
               ""
             ],
-            "authfile": [
-              ""
-            ],
             "os": [
               ""
             ],
@@ -1223,9 +1214,6 @@
             "arch": [
               ""
             ],
-            "authfile": [
-              ""
-            ],
             "os": [
               ""
             ],
@@ -1301,9 +1289,6 @@
               "false"
             ],
             "arch": [
-              ""
-            ],
-            "authfile": [
               ""
             ],
             "os": [
@@ -1465,7 +1450,7 @@
             "all": [
               "true"
             ],
-            "authfile": [
+            "arch": [
               ""
             ],
             "compress": [
@@ -1483,11 +1468,17 @@
             "format": [
               ""
             ],
+            "os": [
+              ""
+            ],
             "quiet": [
               "false"
             ],
             "removesignatures": [
               "false"
+            ],
+            "variant": [
+              ""
             ]
           },
           "content_type": ""
@@ -1507,9 +1498,6 @@
           "method": "GET",
           "path": "/libpod/images/search",
           "query": {
-            "authfile": [
-              ""
-            ],
             "filters": [
               "{}"
             ],
@@ -1654,7 +1642,7 @@
             ],
             "dockerfile": [
               [
-                "{abspath}"
+                "Dockerfile"
               ]
             ],
             "forceCompressionFormat": [
@@ -1824,7 +1812,7 @@
             ],
             "dockerfile": [
               [
-                "{abspath}"
+                "Dockerfile"
               ]
             ],
             "forceCompressionFormat": [
@@ -1931,11 +1919,7 @@
         {
           "method": "GET",
           "path": "/libpod/manifests/wcm/json",
-          "query": {
-            "authfile": [
-              ""
-            ]
-          },
+          "query": {},
           "content_type": ""
         }
       ]
@@ -2244,6 +2228,9 @@
           "query": {
             "driver": [
               "file"
+            ],
+            "driveropts": [
+              "{}"
             ],
             "ignore": [
               "false"
