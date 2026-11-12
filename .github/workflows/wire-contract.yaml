@@ -32,6 +32,9 @@ concurrency:
   group: wire-contract
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   record:
     runs-on: ubuntu-latest

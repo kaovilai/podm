@@ -3,3 +3,4 @@
 .swiftpm
 
 .claude/
+__pycache__/

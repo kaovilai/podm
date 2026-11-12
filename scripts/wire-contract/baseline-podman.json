@@ -12,13 +12,13 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/version",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -29,13 +29,13 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/info",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -46,21 +46,35 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/json",
-          "query_keys": [
-            "all",
-            "external",
-            "filters",
-            "last",
-            "namespace",
-            "size",
-            "sync"
-          ],
+          "query": {
+            "all": [
+              "false"
+            ],
+            "external": [
+              "false"
+            ],
+            "filters": [
+              "{}"
+            ],
+            "last": [
+              "-1"
+            ],
+            "namespace": [
+              "false"
+            ],
+            "size": [
+              "false"
+            ],
+            "sync": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -71,21 +85,35 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/json",
-          "query_keys": [
-            "all",
-            "external",
-            "filters",
-            "last",
-            "namespace",
-            "size",
-            "sync"
-          ],
+          "query": {
+            "all": [
+              "true"
+            ],
+            "external": [
+              "false"
+            ],
+            "filters": [
+              "{}"
+            ],
+            "last": [
+              "-1"
+            ],
+            "namespace": [
+              "false"
+            ],
+            "size": [
+              "false"
+            ],
+            "sync": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -96,16 +124,20 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/images/json",
-          "query_keys": [
-            "all",
-            "filters"
-          ],
+          "query": {
+            "all": [
+              "false"
+            ],
+            "filters": [
+              "{}"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -116,16 +148,20 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/images/json",
-          "query_keys": [
-            "all",
-            "filters"
-          ],
+          "query": {
+            "all": [
+              "true"
+            ],
+            "filters": [
+              "{}"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -136,16 +172,20 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/images/json",
-          "query_keys": [
-            "all",
-            "filters"
-          ],
+          "query": {
+            "all": [
+              "false"
+            ],
+            "filters": [
+              "{}"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -156,15 +196,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/images/alpine:latest/json",
-          "query_keys": [
-            "size"
-          ],
+          "query": {
+            "size": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -175,22 +217,38 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/images/pull",
-          "query_keys": [
-            "alltags",
-            "arch",
-            "authfile",
-            "os",
-            "policy",
-            "quiet",
-            "reference",
-            "variant"
-          ],
+          "query": {
+            "alltags": [
+              "false"
+            ],
+            "arch": [
+              ""
+            ],
+            "authfile": [
+              ""
+            ],
+            "os": [
+              ""
+            ],
+            "policy": [
+              "always"
+            ],
+            "quiet": [
+              "false"
+            ],
+            "reference": [
+              "docker.io/library/alpine:latest"
+            ],
+            "variant": [
+              ""
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -201,22 +259,44 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/images/pull",
-          "query_keys": [
-            "alltags",
-            "arch",
-            "authfile",
-            "os",
-            "policy",
-            "quiet",
-            "reference",
-            "variant"
-          ],
+          "query": {
+            "alltags": [
+              "false"
+            ],
+            "arch": [
+              ""
+            ],
+            "authfile": [
+              ""
+            ],
+            "os": [
+              ""
+            ],
+            "policy": [
+              "missing"
+            ],
+            "quiet": [
+              "false"
+            ],
+            "reference": [
+              "alpine:latest"
+            ],
+            "variant": [
+              ""
+            ]
+          },
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/create",
+          "query": {},
           "content_type": ""
         }
       ]
@@ -227,25 +307,43 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/json",
-          "query_keys": [
-            "all",
-            "filters",
-            "sync"
-          ],
+          "query": {
+            "all": [
+              "true"
+            ],
+            "filters": [
+              "{}"
+            ],
+            "sync": [
+              "true"
+            ]
+          },
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/json",
-          "query_keys": [
-            "size"
-          ],
+          "query": {
+            "size": [
+              "false"
+            ]
+          },
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/start",
+          "query": {
+            "detachkeys": [
+              "ctrl-p,ctrl-q"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -256,25 +354,43 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/json",
-          "query_keys": [
-            "all",
-            "filters",
-            "sync"
-          ],
+          "query": {
+            "all": [
+              "true"
+            ],
+            "filters": [
+              "{}"
+            ],
+            "sync": [
+              "true"
+            ]
+          },
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/json",
-          "query_keys": [
-            "size"
-          ],
+          "query": {
+            "size": [
+              "false"
+            ]
+          },
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/stop",
+          "query": {
+            "ignore": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -285,25 +401,39 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/json",
-          "query_keys": [
-            "all",
-            "filters",
-            "sync"
-          ],
+          "query": {
+            "all": [
+              "true"
+            ],
+            "filters": [
+              "{}"
+            ],
+            "sync": [
+              "true"
+            ]
+          },
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/json",
-          "query_keys": [
-            "size"
-          ],
+          "query": {
+            "size": [
+              "false"
+            ]
+          },
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/restart",
+          "query": {},
           "content_type": ""
         }
       ]
@@ -314,24 +444,40 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/json",
-          "query_keys": [
-            "all",
-            "sync"
-          ],
+          "query": {
+            "all": [
+              "true"
+            ],
+            "sync": [
+              "true"
+            ]
+          },
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/json",
-          "query_keys": [
-            "size"
-          ],
+          "query": {
+            "size": [
+              "false"
+            ]
+          },
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/kill",
+          "query": {
+            "signal": [
+              "KILL"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -342,25 +488,39 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/json",
-          "query_keys": [
-            "all",
-            "filters",
-            "sync"
-          ],
+          "query": {
+            "all": [
+              "true"
+            ],
+            "filters": [
+              "{}"
+            ],
+            "sync": [
+              "true"
+            ]
+          },
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/json",
-          "query_keys": [
-            "size"
-          ],
+          "query": {
+            "size": [
+              "false"
+            ]
+          },
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/pause",
+          "query": {},
           "content_type": ""
         }
       ]
@@ -371,25 +531,39 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/json",
-          "query_keys": [
-            "all",
-            "filters",
-            "sync"
-          ],
+          "query": {
+            "all": [
+              "true"
+            ],
+            "filters": [
+              "{}"
+            ],
+            "sync": [
+              "true"
+            ]
+          },
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/json",
-          "query_keys": [
-            "size"
-          ],
+          "query": {
+            "size": [
+              "false"
+            ]
+          },
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/unpause",
+          "query": {},
           "content_type": ""
         }
       ]
@@ -400,24 +574,36 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/json",
-          "query_keys": [
-            "all",
-            "sync"
-          ],
+          "query": {
+            "all": [
+              "true"
+            ],
+            "sync": [
+              "true"
+            ]
+          },
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/json",
-          "query_keys": [
-            "size"
-          ],
+          "query": {
+            "size": [
+              "false"
+            ]
+          },
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/init",
+          "query": {},
           "content_type": ""
         }
       ]
@@ -428,15 +614,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/json",
-          "query_keys": [
-            "size"
-          ],
+          "query": {
+            "size": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -447,15 +635,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/json",
-          "query_keys": [
-            "size"
-          ],
+          "query": {
+            "size": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -466,13 +656,13 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/top",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -483,17 +673,23 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/stats",
-          "query_keys": [
-            "all",
-            "interval",
-            "stream"
-          ],
+          "query": {
+            "all": [
+              "false"
+            ],
+            "interval": [
+              "5"
+            ],
+            "stream": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -504,21 +700,35 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/logs",
-          "query_keys": [
-            "follow",
-            "since",
-            "stderr",
-            "stdout",
-            "tail",
-            "timestamps",
-            "until"
-          ],
+          "query": {
+            "follow": [
+              "false"
+            ],
+            "since": [
+              "0001-01-01T00:00:00Z"
+            ],
+            "stderr": [
+              "true"
+            ],
+            "stdout": [
+              "true"
+            ],
+            "tail": [
+              "-1"
+            ],
+            "timestamps": [
+              "false"
+            ],
+            "until": [
+              "0001-01-01T00:00:00Z"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -529,21 +739,35 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/logs",
-          "query_keys": [
-            "follow",
-            "since",
-            "stderr",
-            "stdout",
-            "tail",
-            "timestamps",
-            "until"
-          ],
+          "query": {
+            "follow": [
+              "false"
+            ],
+            "since": [
+              "2020-01-01T00:00:00Z"
+            ],
+            "stderr": [
+              "true"
+            ],
+            "stdout": [
+              "true"
+            ],
+            "tail": [
+              "-1"
+            ],
+            "timestamps": [
+              "false"
+            ],
+            "until": [
+              "0001-01-01T00:00:00Z"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -554,21 +778,35 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/logs",
-          "query_keys": [
-            "follow",
-            "since",
-            "stderr",
-            "stdout",
-            "tail",
-            "timestamps",
-            "until"
-          ],
+          "query": {
+            "follow": [
+              "true"
+            ],
+            "since": [
+              "2020-01-01T00:00:00Z"
+            ],
+            "stderr": [
+              "true"
+            ],
+            "stdout": [
+              "true"
+            ],
+            "tail": [
+              "-1"
+            ],
+            "timestamps": [
+              "false"
+            ],
+            "until": [
+              "2020-01-01T00:05:00Z"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -579,25 +817,31 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/containers/wct/exec",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
-          "path": "/libpod/exec//json",
-          "query_keys": [],
+          "path": "/libpod/exec/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/json",
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
-          "path": "/libpod/exec//start",
-          "query_keys": [],
+          "path": "/libpod/exec/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/start",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/exec/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/remove",
+          "query": {},
           "content_type": ""
         }
       ]
@@ -608,25 +852,31 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/containers/wct/exec",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
-          "path": "/libpod/exec//json",
-          "query_keys": [],
+          "path": "/libpod/exec/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/json",
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
-          "path": "/libpod/exec//start",
-          "query_keys": [],
+          "path": "/libpod/exec/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/start",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/exec/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/remove",
+          "query": {},
           "content_type": ""
         }
       ]
@@ -637,15 +887,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/containers/wct/rename",
-          "query_keys": [
-            "name"
-          ],
+          "query": {
+            "name": [
+              "wct2"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -656,15 +908,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/containers/wct/wait",
-          "query_keys": [
-            "interval"
-          ],
+          "query": {
+            "interval": [
+              "250ms"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -675,24 +929,30 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/json",
-          "query_keys": [
-            "all",
-            "sync"
-          ],
+          "query": {
+            "all": [
+              "true"
+            ],
+            "sync": [
+              "true"
+            ]
+          },
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/json",
-          "query_keys": [
-            "size"
-          ],
+          "query": {
+            "size": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -703,15 +963,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/changes",
-          "query_keys": [
-            "difftype"
-          ],
+          "query": {
+            "difftype": [
+              "all"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -722,36 +984,52 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/json",
-          "query_keys": [
-            "all",
-            "filters",
-            "sync"
-          ],
+          "query": {
+            "all": [
+              "true"
+            ],
+            "filters": [
+              "{}"
+            ],
+            "sync": [
+              "true"
+            ]
+          },
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/json",
-          "query_keys": [
-            "size"
-          ],
+          "query": {
+            "size": [
+              "false"
+            ]
+          },
           "content_type": ""
         },
         {
           "method": "DELETE",
           "path": "/libpod/containers/wct",
-          "query_keys": [
-            "depend",
-            "force",
-            "ignore",
-            "volumes"
-          ],
+          "query": {
+            "depend": [
+              "false"
+            ],
+            "force": [
+              "false"
+            ],
+            "ignore": [
+              "false"
+            ],
+            "volumes": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -762,36 +1040,52 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/json",
-          "query_keys": [
-            "all",
-            "filters",
-            "sync"
-          ],
+          "query": {
+            "all": [
+              "true"
+            ],
+            "filters": [
+              "{}"
+            ],
+            "sync": [
+              "true"
+            ]
+          },
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct2/json",
-          "query_keys": [
-            "size"
-          ],
+          "query": {
+            "size": [
+              "false"
+            ]
+          },
           "content_type": ""
         },
         {
           "method": "DELETE",
           "path": "/libpod/containers/wct2",
-          "query_keys": [
-            "depend",
-            "force",
-            "ignore",
-            "volumes"
-          ],
+          "query": {
+            "depend": [
+              "false"
+            ],
+            "force": [
+              "true"
+            ],
+            "ignore": [
+              "true"
+            ],
+            "volumes": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -802,15 +1096,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/containers/prune",
-          "query_keys": [
-            "filters"
-          ],
+          "query": {
+            "filters": [
+              "{}"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -821,22 +1117,89 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/images/pull",
-          "query_keys": [
-            "alltags",
-            "arch",
-            "authfile",
-            "os",
-            "policy",
-            "quiet",
-            "reference",
-            "variant"
-          ],
+          "query": {
+            "alltags": [
+              "false"
+            ],
+            "arch": [
+              ""
+            ],
+            "authfile": [
+              ""
+            ],
+            "os": [
+              ""
+            ],
+            "policy": [
+              "missing"
+            ],
+            "quiet": [
+              "false"
+            ],
+            "reference": [
+              "alpine:latest"
+            ],
+            "variant": [
+              ""
+            ]
+          },
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/create",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/json",
+          "query": {
+            "size": [
+              "false"
+            ]
+          },
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/attach",
+          "query": {
+            "detachKeys": [
+              "ctrl-p,ctrl-q"
+            ],
+            "detachkeys": [
+              "ctrl-p,ctrl-q"
+            ],
+            "stderr": [
+              "true"
+            ],
+            "stdout": [
+              "true"
+            ],
+            "stream": [
+              "true"
+            ]
+          },
+          "content_type": ""
+        },
+        {
+          "method": "DELETE",
+          "path": "/libpod/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef",
+          "query": {
+            "force": [
+              "false"
+            ],
+            "volumes": [
+              "true"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -847,22 +1210,76 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/images/pull",
-          "query_keys": [
-            "alltags",
-            "arch",
-            "authfile",
-            "os",
-            "policy",
-            "quiet",
-            "reference",
-            "variant"
-          ],
+          "query": {
+            "alltags": [
+              "false"
+            ],
+            "arch": [
+              ""
+            ],
+            "authfile": [
+              ""
+            ],
+            "os": [
+              ""
+            ],
+            "policy": [
+              "missing"
+            ],
+            "quiet": [
+              "false"
+            ],
+            "reference": [
+              "alpine:latest"
+            ],
+            "variant": [
+              ""
+            ]
+          },
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/create",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/json",
+          "query": {
+            "size": [
+              "false"
+            ]
+          },
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/attach",
+          "query": {
+            "detachKeys": [
+              "ctrl-p,ctrl-q"
+            ],
+            "detachkeys": [
+              "ctrl-p,ctrl-q"
+            ],
+            "stderr": [
+              "true"
+            ],
+            "stdout": [
+              "true"
+            ],
+            "stream": [
+              "true"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -873,22 +1290,54 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/images/pull",
-          "query_keys": [
-            "alltags",
-            "arch",
-            "authfile",
-            "os",
-            "policy",
-            "quiet",
-            "reference",
-            "variant"
-          ],
+          "query": {
+            "alltags": [
+              "false"
+            ],
+            "arch": [
+              ""
+            ],
+            "authfile": [
+              ""
+            ],
+            "os": [
+              ""
+            ],
+            "policy": [
+              "missing"
+            ],
+            "quiet": [
+              "false"
+            ],
+            "reference": [
+              "alpine:latest"
+            ],
+            "variant": [
+              ""
+            ]
+          },
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/create",
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/start",
+          "query": {
+            "recursive": [
+              "true"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -899,16 +1348,20 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/images/alpine:latest/tag",
-          "query_keys": [
-            "repo",
-            "tag"
-          ],
+          "query": {
+            "repo": [
+              "wctag"
+            ],
+            "tag": [
+              "1"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -919,20 +1372,32 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "DELETE",
           "path": "/libpod/images/remove",
-          "query_keys": [
-            "all",
-            "force",
-            "ignore",
-            "images",
-            "lookupmanifest",
-            "noprune"
-          ],
+          "query": {
+            "all": [
+              "false"
+            ],
+            "force": [
+              "false"
+            ],
+            "ignore": [
+              "false"
+            ],
+            "images": [
+              "wctag:1"
+            ],
+            "lookupmanifest": [
+              "false"
+            ],
+            "noprune": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -943,18 +1408,26 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/images/prune",
-          "query_keys": [
-            "all",
-            "buildcache",
-            "external",
-            "filters"
-          ],
+          "query": {
+            "all": [
+              "false"
+            ],
+            "buildcache": [
+              "false"
+            ],
+            "external": [
+              "false"
+            ],
+            "filters": [
+              "{}"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -965,13 +1438,13 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/images/alpine:latest/history",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -982,23 +1455,41 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/images/alpine:latest/push",
-          "query_keys": [
-            "all",
-            "authfile",
-            "compress",
-            "compressionformat",
-            "destination",
-            "forcecompressionformat",
-            "format",
-            "quiet",
-            "removesignatures"
-          ],
+          "query": {
+            "all": [
+              "true"
+            ],
+            "authfile": [
+              ""
+            ],
+            "compress": [
+              "false"
+            ],
+            "compressionformat": [
+              ""
+            ],
+            "destination": [
+              "docker.io/example/wc:1"
+            ],
+            "forcecompressionformat": [
+              "false"
+            ],
+            "format": [
+              ""
+            ],
+            "quiet": [
+              "false"
+            ],
+            "removesignatures": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1009,19 +1500,29 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/images/search",
-          "query_keys": [
-            "authfile",
-            "filters",
-            "limit",
-            "listtags",
-            "term"
-          ],
+          "query": {
+            "authfile": [
+              ""
+            ],
+            "filters": [
+              "{}"
+            ],
+            "limit": [
+              "0"
+            ],
+            "listtags": [
+              "false"
+            ],
+            "term": [
+              "alpine"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1032,23 +1533,41 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/commit",
-          "query_keys": [
-            "author",
-            "comment",
-            "container",
-            "format",
-            "pause",
-            "repo",
-            "squash",
-            "stream",
-            "tag"
-          ],
+          "query": {
+            "author": [
+              ""
+            ],
+            "comment": [
+              ""
+            ],
+            "container": [
+              "wcr"
+            ],
+            "format": [
+              "oci"
+            ],
+            "pause": [
+              "true"
+            ],
+            "repo": [
+              "wcimg"
+            ],
+            "squash": [
+              "false"
+            ],
+            "stream": [
+              "true"
+            ],
+            "tag": [
+              "1"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1059,52 +1578,60 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wcr/export",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
     },
     {
-      "command": "podman save -o /tmp/wc.tar alpine:latest",
+      "command": "podman save -o wc.tar alpine:latest",
       "requests": [
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/images/export",
-          "query_keys": [
-            "compress",
-            "format",
-            "ociacceptuncompressedlayers",
-            "references"
-          ],
+          "query": {
+            "compress": [
+              "false"
+            ],
+            "format": [
+              "docker-archive"
+            ],
+            "ociacceptuncompressedlayers": [
+              "false"
+            ],
+            "references": [
+              "alpine:latest"
+            ]
+          },
           "content_type": ""
         }
       ]
     },
     {
-      "command": "podman load -i /tmp/wc.tar",
+      "command": "podman load -i wc.tar",
       "requests": [
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/images/load",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1115,35 +1642,79 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/build",
-          "query_keys": [
-            "compressionFormat",
-            "dockerfile",
-            "forceCompressionFormat",
-            "forcerm",
-            "httpproxy",
-            "idmappingoptions",
-            "inheritannotations",
-            "isolation",
-            "jobs",
-            "layers",
-            "networkmode",
-            "nsoptions",
-            "omithistory",
-            "outputformat",
-            "pullpolicy",
-            "retry",
-            "retry-delay",
-            "rewritetimestamp",
-            "rm",
-            "shmsize",
-            "t"
-          ],
+          "query": {
+            "compressionFormat": [
+              "gzip"
+            ],
+            "dockerfile": [
+              [
+                "{abspath}"
+              ]
+            ],
+            "forceCompressionFormat": [
+              "1"
+            ],
+            "forcerm": [
+              "1"
+            ],
+            "httpproxy": [
+              "1"
+            ],
+            "idmappingoptions": [
+              "{\"HostUIDMapping\":true,\"HostGIDMapping\":true,\"UIDMap\":[],\"GIDMap\":[],\"AutoUserNs\":false,\"AutoUserNsOpts\":{\"Size\":0,\"InitialSize\":0,\"PasswdFile\":\"\",\"GroupFile\":\"\",\"AdditionalUIDMappings\":null,\"AdditionalGIDMappings\":null}}"
+            ],
+            "inheritannotations": [
+              "1"
+            ],
+            "isolation": [
+              "0"
+            ],
+            "jobs": [
+              "1"
+            ],
+            "layers": [
+              "1"
+            ],
+            "networkmode": [
+              "0"
+            ],
+            "nsoptions": [
+              []
+            ],
+            "omithistory": [
+              "0"
+            ],
+            "outputformat": [
+              "application/vnd.oci.image.manifest.v1+json"
+            ],
+            "pullpolicy": [
+              "missing"
+            ],
+            "retry": [
+              "3"
+            ],
+            "retry-delay": [
+              "2s"
+            ],
+            "rewritetimestamp": [
+              "0"
+            ],
+            "rm": [
+              "1"
+            ],
+            "shmsize": [
+              "67108864"
+            ],
+            "t": [
+              ""
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1154,37 +1725,83 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/build",
-          "query_keys": [
-            "compressionFormat",
-            "dockerfile",
-            "forceCompressionFormat",
-            "forcerm",
-            "httpproxy",
-            "idmappingoptions",
-            "inheritannotations",
-            "isolation",
-            "jobs",
-            "layers",
-            "networkmode",
-            "nsoptions",
-            "omithistory",
-            "output",
-            "outputformat",
-            "pullpolicy",
-            "retry",
-            "retry-delay",
-            "rewritetimestamp",
-            "rm",
-            "shmsize",
-            "t",
-            "t"
-          ],
+          "query": {
+            "compressionFormat": [
+              "gzip"
+            ],
+            "dockerfile": [
+              [
+                "Dockerfile"
+              ]
+            ],
+            "forceCompressionFormat": [
+              "1"
+            ],
+            "forcerm": [
+              "1"
+            ],
+            "httpproxy": [
+              "1"
+            ],
+            "idmappingoptions": [
+              "{\"HostUIDMapping\":true,\"HostGIDMapping\":true,\"UIDMap\":[],\"GIDMap\":[],\"AutoUserNs\":false,\"AutoUserNsOpts\":{\"Size\":0,\"InitialSize\":0,\"PasswdFile\":\"\",\"GroupFile\":\"\",\"AdditionalUIDMappings\":null,\"AdditionalGIDMappings\":null}}"
+            ],
+            "inheritannotations": [
+              "1"
+            ],
+            "isolation": [
+              "0"
+            ],
+            "jobs": [
+              "1"
+            ],
+            "layers": [
+              "1"
+            ],
+            "networkmode": [
+              "0"
+            ],
+            "nsoptions": [
+              []
+            ],
+            "omithistory": [
+              "0"
+            ],
+            "output": [
+              "wc-a"
+            ],
+            "outputformat": [
+              "application/vnd.oci.image.manifest.v1+json"
+            ],
+            "pullpolicy": [
+              "missing"
+            ],
+            "retry": [
+              "3"
+            ],
+            "retry-delay": [
+              "2s"
+            ],
+            "rewritetimestamp": [
+              "0"
+            ],
+            "rm": [
+              "1"
+            ],
+            "shmsize": [
+              "67108864"
+            ],
+            "t": [
+              "wc-a",
+              "wc-b"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1195,36 +1812,82 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/build",
-          "query_keys": [
-            "compressionFormat",
-            "dockerfile",
-            "forceCompressionFormat",
-            "forcerm",
-            "httpproxy",
-            "idmappingoptions",
-            "inheritannotations",
-            "isolation",
-            "jobs",
-            "layers",
-            "networkmode",
-            "nsoptions",
-            "omithistory",
-            "outputformat",
-            "pullpolicy",
-            "q",
-            "retry",
-            "retry-delay",
-            "rewritetimestamp",
-            "rm",
-            "shmsize",
-            "t"
-          ],
+          "query": {
+            "compressionFormat": [
+              "gzip"
+            ],
+            "dockerfile": [
+              [
+                "{abspath}"
+              ]
+            ],
+            "forceCompressionFormat": [
+              "1"
+            ],
+            "forcerm": [
+              "1"
+            ],
+            "httpproxy": [
+              "1"
+            ],
+            "idmappingoptions": [
+              "{\"HostUIDMapping\":true,\"HostGIDMapping\":true,\"UIDMap\":[],\"GIDMap\":[],\"AutoUserNs\":false,\"AutoUserNsOpts\":{\"Size\":0,\"InitialSize\":0,\"PasswdFile\":\"\",\"GroupFile\":\"\",\"AdditionalUIDMappings\":null,\"AdditionalGIDMappings\":null}}"
+            ],
+            "inheritannotations": [
+              "1"
+            ],
+            "isolation": [
+              "0"
+            ],
+            "jobs": [
+              "1"
+            ],
+            "layers": [
+              "1"
+            ],
+            "networkmode": [
+              "0"
+            ],
+            "nsoptions": [
+              []
+            ],
+            "omithistory": [
+              "0"
+            ],
+            "outputformat": [
+              "application/vnd.oci.image.manifest.v1+json"
+            ],
+            "pullpolicy": [
+              "missing"
+            ],
+            "q": [
+              "1"
+            ],
+            "retry": [
+              "3"
+            ],
+            "retry-delay": [
+              "2s"
+            ],
+            "rewritetimestamp": [
+              "0"
+            ],
+            "rm": [
+              "1"
+            ],
+            "shmsize": [
+              "67108864"
+            ],
+            "t": [
+              ""
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1235,17 +1898,23 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/manifests/wcm",
-          "query_keys": [
-            "all",
-            "amend",
-            "images"
-          ],
+          "query": {
+            "all": [
+              "false"
+            ],
+            "amend": [
+              "false"
+            ],
+            "images": [
+              "alpine:latest"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1256,15 +1925,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/manifests/wcm/json",
-          "query_keys": [
-            "authfile"
-          ],
+          "query": {
+            "authfile": [
+              ""
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1275,13 +1946,13 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/volumes/create",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1292,15 +1963,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/volumes/json",
-          "query_keys": [
-            "filters"
-          ],
+          "query": {
+            "filters": [
+              "{}"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1311,13 +1984,13 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/volumes/wcv/json",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1328,15 +2001,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "DELETE",
           "path": "/libpod/volumes/wcv",
-          "query_keys": [
-            "force"
-          ],
+          "query": {
+            "force": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1347,16 +2022,20 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/volumes/prune",
-          "query_keys": [
-            "dryrun",
-            "filters"
-          ],
+          "query": {
+            "dryrun": [
+              "false"
+            ],
+            "filters": [
+              "{}"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1367,15 +2046,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/networks/create",
-          "query_keys": [
-            "ignoreIfExists"
-          ],
+          "query": {
+            "ignoreIfExists": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1386,15 +2067,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/networks/json",
-          "query_keys": [
-            "filters"
-          ],
+          "query": {
+            "filters": [
+              "{}"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1405,13 +2088,13 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/networks/wcn/json",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1422,16 +2105,20 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "DELETE",
           "path": "/libpod/networks/wcn",
-          "query_keys": [
-            "force",
-            "ignore"
-          ],
+          "query": {
+            "force": [
+              "false"
+            ],
+            "ignore": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1442,15 +2129,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/networks/prune",
-          "query_keys": [
-            "filters"
-          ],
+          "query": {
+            "filters": [
+              "{}"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1461,18 +2150,26 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/events",
-          "query_keys": [
-            "filters",
-            "since",
-            "stream",
-            "until"
-          ],
+          "query": {
+            "filters": [
+              "{}"
+            ],
+            "since": [
+              "2020-01-01T00:00:00Z"
+            ],
+            "stream": [
+              "true"
+            ],
+            "until": [
+              "2020-01-01T01:00:00Z"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1483,13 +2180,13 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/system/df",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1500,13 +2197,13 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/info",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1517,15 +2214,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/secrets/json",
-          "query_keys": [
-            "filters"
-          ],
+          "query": {
+            "filters": [
+              "{}"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1536,19 +2235,29 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/libpod/secrets/create",
-          "query_keys": [
-            "driver",
-            "ignore",
-            "labels",
-            "name",
-            "replace"
-          ],
+          "query": {
+            "driver": [
+              "file"
+            ],
+            "ignore": [
+              "false"
+            ],
+            "labels": [
+              "{}"
+            ],
+            "name": [
+              "wcs"
+            ],
+            "replace": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1559,15 +2268,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/secrets/wcs/json",
-          "query_keys": [
-            "showsecret"
-          ],
+          "query": {
+            "showsecret": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1578,19 +2289,19 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/secrets/wcs/json",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "DELETE",
           "path": "/libpod/secrets/wcs",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1601,15 +2312,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/wct/exists",
-          "query_keys": [
-            "external"
-          ],
+          "query": {
+            "external": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1620,21 +2333,35 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/containers/json",
-          "query_keys": [
-            "all",
-            "external",
-            "filters",
-            "last",
-            "namespace",
-            "size",
-            "sync"
-          ],
+          "query": {
+            "all": [
+              "true"
+            ],
+            "external": [
+              "false"
+            ],
+            "filters": [
+              "{}"
+            ],
+            "last": [
+              "-1"
+            ],
+            "namespace": [
+              "false"
+            ],
+            "size": [
+              "false"
+            ],
+            "sync": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1645,15 +2372,17 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/images/alpine:latest/json",
-          "query_keys": [
-            "size"
-          ],
+          "query": {
+            "size": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1668,21 +2397,35 @@
         {
           "method": "GET",
           "path": "/libpod/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/libpod/generate/wct/systemd",
-          "query_keys": [
-            "containerprefix",
-            "new",
-            "noheader",
-            "podprefix",
-            "separator",
-            "templateunitfile",
-            "usename"
-          ],
+          "query": {
+            "containerprefix": [
+              "container"
+            ],
+            "new": [
+              "false"
+            ],
+            "noheader": [
+              "false"
+            ],
+            "podprefix": [
+              "pod"
+            ],
+            "separator": [
+              "-"
+            ],
+            "templateunitfile": [
+              "false"
+            ],
+            "usename": [
+              "false"
+            ]
+          },
           "content_type": ""
         }
       ]

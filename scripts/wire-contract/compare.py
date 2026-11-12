@@ -10,11 +10,21 @@ import json
 import sys
 
 
+def _freeze(v):
+    """JSON value shapes hold lists; make them hashable for set diffs."""
+    if isinstance(v, list):
+        return tuple(_freeze(x) for x in v)
+    return v
+
+
 def sig(request):
+    # Query as sorted (key, value-shapes) pairs: keys can't repeat in the
+    # dict, but each key's value list preserves repeated-key order.
+    query = tuple(sorted((k, _freeze(v)) for k, v in request["query"].items()))
     return (
         request["method"],
         request["path"],
-        tuple(request["query_keys"]),
+        query,
         request["content_type"],
     )
 

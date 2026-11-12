@@ -12,13 +12,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/version",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -29,13 +29,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/info",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -46,13 +46,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/containers/json",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -63,15 +63,17 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/containers/json",
-          "query_keys": [
-            "all"
-          ],
+          "query": {
+            "all": [
+              "1"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -82,15 +84,17 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/images/json",
-          "query_keys": [
-            "manifests"
-          ],
+          "query": {
+            "manifests": [
+              "1"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -101,16 +105,20 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/images/json",
-          "query_keys": [
-            "all",
-            "manifests"
-          ],
+          "query": {
+            "all": [
+              "1"
+            ],
+            "manifests": [
+              "1"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -121,15 +129,17 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/images/json",
-          "query_keys": [
-            "manifests"
-          ],
+          "query": {
+            "manifests": [
+              "1"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -140,13 +150,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/images/alpine:latest/json",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -157,16 +167,20 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/images/create",
-          "query_keys": [
-            "fromImage",
-            "tag"
-          ],
+          "query": {
+            "fromImage": [
+              "docker.io/library/alpine"
+            ],
+            "tag": [
+              "latest"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -177,21 +191,23 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/containers/create",
-          "query_keys": [
-            "name"
-          ],
+          "query": {
+            "name": [
+              "wct"
+            ]
+          },
           "content_type": "application/json"
         }
       ]
@@ -202,13 +218,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/containers/wct/start",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -219,13 +235,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/containers/wct/stop",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -236,13 +252,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/containers/wct/restart",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -253,13 +269,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/containers/wct/kill",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -270,13 +286,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/containers/wct/pause",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -287,13 +303,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/containers/wct/unpause",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -304,13 +320,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/containers/wct/json",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -321,13 +337,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/containers/wct/json",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -338,13 +354,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/containers/wct/top",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -355,21 +371,23 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/events",
-          "query_keys": [
-            "filters"
-          ],
+          "query": {
+            "filters": [
+              "{\"type\":{\"container\":true}}"
+            ]
+          },
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/containers/json",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -380,13 +398,26 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/containers/wct/json",
-          "query_keys": [],
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/logs",
+          "query": {
+            "stderr": [
+              "1"
+            ],
+            "stdout": [
+              "1"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -397,13 +428,29 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/containers/wct/json",
-          "query_keys": [],
+          "query": {},
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/logs",
+          "query": {
+            "since": [
+              "1577836800.000000000"
+            ],
+            "stderr": [
+              "1"
+            ],
+            "stdout": [
+              "1"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -414,19 +461,25 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/containers/wct/json",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/containers/wct/exec",
-          "query_keys": [],
+          "query": {},
+          "content_type": "application/json"
+        },
+        {
+          "method": "POST",
+          "path": "/exec/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/start",
+          "query": {},
           "content_type": "application/json"
         }
       ]
@@ -437,19 +490,25 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/containers/wct/json",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/containers/wct/exec",
-          "query_keys": [],
+          "query": {},
+          "content_type": "application/json"
+        },
+        {
+          "method": "POST",
+          "path": "/exec/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/start",
+          "query": {},
           "content_type": "application/json"
         }
       ]
@@ -460,15 +519,17 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/containers/wct/rename",
-          "query_keys": [
-            "name"
-          ],
+          "query": {
+            "name": [
+              "wct2"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -479,13 +540,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/containers/wct/wait",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -496,13 +557,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/containers/wct/json",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -513,13 +574,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/containers/wct/changes",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -530,13 +591,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "DELETE",
           "path": "/containers/wct",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -547,15 +608,17 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "DELETE",
           "path": "/containers/wct2",
-          "query_keys": [
-            "force"
-          ],
+          "query": {
+            "force": [
+              "1"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -566,13 +629,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/containers/prune",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -583,29 +646,35 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/containers/create",
-          "query_keys": [],
+          "query": {},
           "content_type": "application/json"
         },
         {
           "method": "POST",
           "path": "/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/attach",
-          "query_keys": [
-            "stderr",
-            "stdout",
-            "stream"
-          ],
+          "query": {
+            "stderr": [
+              "1"
+            ],
+            "stdout": [
+              "1"
+            ],
+            "stream": [
+              "1"
+            ]
+          },
           "content_type": "text/plain"
         }
       ]
@@ -616,31 +685,39 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/containers/create",
-          "query_keys": [
-            "name"
-          ],
+          "query": {
+            "name": [
+              "wcr"
+            ]
+          },
           "content_type": "application/json"
         },
         {
           "method": "POST",
           "path": "/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/attach",
-          "query_keys": [
-            "stderr",
-            "stdout",
-            "stream"
-          ],
+          "query": {
+            "stderr": [
+              "1"
+            ],
+            "stdout": [
+              "1"
+            ],
+            "stream": [
+              "1"
+            ]
+          },
           "content_type": "text/plain"
         }
       ]
@@ -651,33 +728,35 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/containers/create",
-          "query_keys": [],
+          "query": {},
           "content_type": "application/json"
         },
         {
           "method": "POST",
           "path": "/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/wait",
-          "query_keys": [
-            "condition"
-          ],
+          "query": {
+            "condition": [
+              "next-exit"
+            ]
+          },
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/containers/wirefixedid0123456789abcdef0123456789abcdef0123456789abcdef/start",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -688,16 +767,20 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/images/alpine:latest/tag",
-          "query_keys": [
-            "repo",
-            "tag"
-          ],
+          "query": {
+            "repo": [
+              "docker.io/library/wctag"
+            ],
+            "tag": [
+              "1"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -708,13 +791,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "DELETE",
           "path": "/images/wctag:1",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -725,15 +808,17 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/images/prune",
-          "query_keys": [
-            "filters"
-          ],
+          "query": {
+            "filters": [
+              "{\"dangling\":{\"true\":true}}"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -744,13 +829,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/images/alpine:latest/history",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -761,15 +846,17 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/images/docker.io/library/alpine/push",
-          "query_keys": [
-            "tag"
-          ],
+          "query": {
+            "tag": [
+              "latest"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -780,15 +867,17 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/images/search",
-          "query_keys": [
-            "term"
-          ],
+          "query": {
+            "term": [
+              "alpine"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -799,17 +888,23 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/commit",
-          "query_keys": [
-            "container",
-            "repo",
-            "tag"
-          ],
+          "query": {
+            "container": [
+              "wcr"
+            ],
+            "repo": [
+              "docker.io/library/wcimg"
+            ],
+            "tag": [
+              "1"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -820,51 +915,55 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/containers/wcr/export",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
     },
     {
-      "command": "docker save -o /tmp/wc.tar alpine:latest",
+      "command": "docker save -o wc.tar alpine:latest",
       "requests": [
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/images/get",
-          "query_keys": [
-            "names"
-          ],
+          "query": {
+            "names": [
+              "alpine:latest"
+            ]
+          },
           "content_type": ""
         }
       ]
     },
     {
-      "command": "docker load -i /tmp/wc.tar",
+      "command": "docker load -i wc.tar",
       "requests": [
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/images/load",
-          "query_keys": [
-            "quiet"
-          ],
+          "query": {
+            "quiet": [
+              "1"
+            ]
+          },
           "content_type": "application/x-tar"
         }
       ]
@@ -875,16 +974,20 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/build",
-          "query_keys": [
-            "dockerfile",
-            "version"
-          ],
+          "query": {
+            "dockerfile": [
+              "Dockerfile"
+            ],
+            "version": [
+              "1"
+            ]
+          },
           "content_type": "application/x-tar"
         }
       ]
@@ -895,18 +998,24 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/build",
-          "query_keys": [
-            "dockerfile",
-            "t",
-            "t",
-            "version"
-          ],
+          "query": {
+            "dockerfile": [
+              "Dockerfile"
+            ],
+            "t": [
+              "wc-a",
+              "wc-b"
+            ],
+            "version": [
+              "1"
+            ]
+          },
           "content_type": "application/x-tar"
         }
       ]
@@ -917,17 +1026,23 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/build",
-          "query_keys": [
-            "dockerfile",
-            "q",
-            "version"
-          ],
+          "query": {
+            "dockerfile": [
+              "Dockerfile"
+            ],
+            "q": [
+              "1"
+            ],
+            "version": [
+              "1"
+            ]
+          },
           "content_type": "application/x-tar"
         }
       ]
@@ -946,13 +1061,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/volumes/create",
-          "query_keys": [],
+          "query": {},
           "content_type": "application/json"
         }
       ]
@@ -963,13 +1078,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/volumes",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -980,13 +1095,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/volumes/wcv",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -997,13 +1112,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "DELETE",
           "path": "/volumes/wcv",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1014,13 +1129,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/volumes/prune",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1031,13 +1146,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/networks/create",
-          "query_keys": [],
+          "query": {},
           "content_type": "application/json"
         }
       ]
@@ -1048,13 +1163,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/networks",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1065,13 +1180,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/networks/wcn",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1082,19 +1197,19 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/networks/wcn",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "DELETE",
           "path": "/networks/wcn",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1105,13 +1220,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "POST",
           "path": "/networks/prune",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1122,16 +1237,20 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/events",
-          "query_keys": [
-            "since",
-            "until"
-          ],
+          "query": {
+            "since": [
+              "1577836800.000000000"
+            ],
+            "until": [
+              "1577840400.000000000"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1142,13 +1261,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/system/df",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1159,13 +1278,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/info",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1176,13 +1295,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/secrets",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1193,7 +1312,7 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1204,13 +1323,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/secrets/wcs",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1221,13 +1340,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "DELETE",
           "path": "/secrets/wcs",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]
@@ -1238,15 +1357,17 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/containers/json",
-          "query_keys": [
-            "all"
-          ],
+          "query": {
+            "all": [
+              "1"
+            ]
+          },
           "content_type": ""
         }
       ]
@@ -1257,13 +1378,13 @@
         {
           "method": "HEAD",
           "path": "/_ping",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         },
         {
           "method": "GET",
           "path": "/images/alpine:latest/json",
-          "query_keys": [],
+          "query": {},
           "content_type": ""
         }
       ]

@@ -2,7 +2,9 @@
 """Turn a raw recording (JSONL from mock_socket.py / run.sh) into the
 canonical baseline shape: one entry per battery command with its ordered
 request signatures. Volatile path segments (64-hex ids, 12+ hex tokens)
-are replaced so server-derived ids can't churn the baseline.
+are replaced so server-derived ids can't churn the baseline; query
+values arrive already shape-normalized from the mock (absolute paths are
+{abspath}, plain battery values stay verbatim).
 
 Usage: normalize.py RECORDING.jsonl <podman|docker> VERSION > baseline.json
 """
@@ -40,7 +42,7 @@ def main():
                 {
                     "method": entry["method"],
                     "path": normalize_path(entry["path"]),
-                    "query_keys": entry["query_keys"],
+                    "query": entry["query"],
                     "content_type": entry["content_type"],
                 }
             )
