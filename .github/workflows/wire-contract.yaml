@@ -106,6 +106,17 @@ jobs:
 
       - name: Extract the ${{ matrix.cli }} command tree
         run: |
+          # Docker 29+ filters its help output by the CONNECTED daemon's API
+          # version and Swarm state — against the runner's real daemon that
+          # measures runner state, not the CLI. An unreachable endpoint
+          # renders the full static command surface, so pin DOCKER_HOST to a
+          # dead socket and isolate DOCKER_CONFIG (same isolation run.sh
+          # uses) to make the tree daemon-independent.
+          if [ "${{ matrix.cli }}" = docker ]; then
+            export DOCKER_HOST="unix:///nonexistent-podm-wire-contract"
+            export DOCKER_CONFIG="$RUNNER_TEMP/docker-config"
+            mkdir -p "$DOCKER_CONFIG"
+          fi
           python3 scripts/wire-contract/commands.py extract "${{ matrix.cli }}" "$CLI_BIN" > tree.json
           # Raw root help alongside the extracted tree: section headers vary
           # by binary flavor (static vs distro builds) and by version — this
@@ -117,7 +128,10 @@ jobs:
         run: python3 scripts/wire-contract/compare.py "scripts/wire-contract/baseline-${{ matrix.cli }}.json" normalized.json
 
       - name: Compare the command tree (new-command detection)
-        if: (inputs.mode || 'check') == 'check'
+        # !cancelled(): a request-signature drift must not mask command-surface
+        # drift — both belong in one failure report. (A failed extraction
+        # still stops this step, correctly: there is no tree to compare.)
+        if: ${{ !cancelled() && (inputs.mode || 'check') == 'check' }}
         run: python3 scripts/wire-contract/commands.py compare "scripts/wire-contract/commands-${{ matrix.cli }}.json" tree.json
 
       - name: Prepare refreshed baseline

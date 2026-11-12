@@ -29,11 +29,12 @@ MAX_DEPTH = 3
 HELP_TIMEOUT = 30
 
 # Unstarred top-level names that alias a PATH-installed plugin rather than
-# the binary under test: docker's `builder` forwards to buildx (its help is
-# the plugin's, and it only exists when a plugin is discoverable), so its
-# subcommands vary with the runner, not the CLI version. Starred entries
-# (buildx*, compose*) are already skipped by the star check.
-PLUGIN_ALIASES = {"docker": {"builder"}}
+# the binary under test: docker's `builder` and `bake` forward to buildx
+# (their help is the plugin's, and they only exist when a plugin is
+# discoverable), so their subcommands vary with the runner, not the CLI
+# version. Starred entries (buildx*, compose*) are already skipped by the
+# star check.
+PLUGIN_ALIASES = {"docker": {"builder", "bake"}}
 
 
 class HelpInspectionError(Exception):
