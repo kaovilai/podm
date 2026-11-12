@@ -18,6 +18,12 @@ struct RESTImagePushQuery: Vapor.Content {
     let tag: String?
     let platform: String?
     let destination: String?
+    // Podman 6.2+ sends `--platform` as separate os/arch/variant query fields
+    // (empty strings when unset) instead of one `platform` string; docker keeps
+    // the single param. Decoding both keeps `podman push --platform` selective.
+    let os: String?
+    let arch: String?
+    let variant: String?
 }
 
 extension ImagePushRoute {
@@ -43,9 +49,17 @@ extension ImagePushRoute {
 
             let reference = try resolvedReference(imageName: imageName, tag: query.tag)
 
-            // Parse platform if provided
+            // Parse platform if provided: either the single `platform` string
+            // (docker dialect) or podman 6.2's separate os/arch/variant fields.
+            let osArchVariant = [query.os, query.arch, query.variant]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: "/")
+            let platformString = [query.platform, osArchVariant]
+                .compactMap { $0 }
+                .first { !$0.isEmpty }
             let platform: Platform?
-            if let platformString = query.platform, !platformString.isEmpty {
+            if let platformString {
                 do {
                     platform = try platformOrThrow(platformString)
                 } catch {
