@@ -51,13 +51,28 @@ extension ImagePushRoute {
 
             // Parse platform if provided: either the single `platform` string
             // (docker dialect) or podman 6.2's separate os/arch/variant fields.
-            let osArchVariant = [query.os, query.arch, query.variant]
-                .compactMap { $0 }
-                .filter { !$0.isEmpty }
-                .joined(separator: "/")
-            let platformString = [query.platform, osArchVariant]
-                .compactMap { $0 }
-                .first { !$0.isEmpty }
+            // The fields are POSITIONAL — dropping an empty `arch` and joining
+            // the rest would reinterpret a variant as an architecture
+            // (os=linux&arch=&variant=amd64 must NOT become linux/amd64), so
+            // an incomplete tuple (any field set but os/arch missing) answers
+            // 400 instead. All fields empty/absent means no selection.
+            let os = query.os.flatMap { $0.isEmpty ? nil : $0 }
+            let arch = query.arch.flatMap { $0.isEmpty ? nil : $0 }
+            let variant = query.variant.flatMap { $0.isEmpty ? nil : $0 }
+            let platformString: String?
+            if os != nil || arch != nil || variant != nil {
+                guard let os, let arch else {
+                    throw Abort(
+                        .badRequest,
+                        reason: "incomplete platform fields: os and arch are required when any of os/arch/variant is set"
+                    )
+                }
+                platformString = variant.map { "\(os)/\(arch)/\($0)" } ?? "\(os)/\(arch)"
+            } else if let single = query.platform, !single.isEmpty {
+                platformString = single
+            } else {
+                platformString = nil
+            }
             let platform: Platform?
             if let platformString {
                 do {

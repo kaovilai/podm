@@ -36,9 +36,16 @@ HELP_TIMEOUT = 30
 PLUGIN_ALIASES = {"docker": {"builder"}}
 
 
+class HelpInspectionError(Exception):
+    """A --help invocation failed (timeout or nonzero exit). Treating the
+    failure as 'no subcommands' would silently truncate the tree — and in
+    refresh mode publish an incomplete baseline — so extraction aborts."""
+
+
 def help_lines(binary, args):
-    """--help output for a (sub)command; empty on timeout (a subcommand
-    that hangs on help is not something we can record anyway)."""
+    """--help output for a (sub)command; raises HelpInspectionError on
+    timeout or nonzero exit so a failed inspection can never masquerade
+    as a leaf."""
     try:
         out = subprocess.run(
             [binary, *args, "--help"],
@@ -47,7 +54,13 @@ def help_lines(binary, args):
             timeout=HELP_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
-        return []
+        raise HelpInspectionError(
+            f"'{binary} {' '.join([*args, '--help'])}' timed out after {HELP_TIMEOUT}s"
+        )
+    if out.returncode != 0:
+        raise HelpInspectionError(
+            f"'{binary} {' '.join([*args, '--help'])}' exited with status {out.returncode}"
+        )
     return (out.stdout or "").splitlines()
 
 
@@ -108,12 +121,19 @@ def main():
     mode = sys.argv[1]
     if mode == "extract":
         cli, binary = sys.argv[2], sys.argv[3]
+        try:
+            tree = extract_tree(binary, [cli], cli=cli)
+        except HelpInspectionError as error:
+            # A truncated tree must never reach a baseline: fail the job so
+            # the failure is visible instead of publishing partial coverage.
+            print(f"command-tree extraction failed: {error}", file=sys.stderr)
+            sys.exit(1)
         print(
             json.dumps(
                 {
                     "cli": cli,
                     "cli_version": cli_version(binary),
-                    "commands": extract_tree(binary, [cli], cli=cli),
+                    "commands": tree,
                 },
                 indent=2,
             )

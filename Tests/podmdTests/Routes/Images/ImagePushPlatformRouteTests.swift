@@ -40,6 +40,28 @@ struct ImagePushPlatformRouteTests {
         #expect(recorded == nil)
     }
 
+    @Test("an incomplete platform tuple answers 400, never a shifted variant")
+    func incompleteTupleAnswers400() async throws {
+        // Dropping the empty arch and joining would reinterpret the variant
+        // as the architecture (linux/amd64) — a push the caller never asked
+        // for. Positions are meaningful: require os and arch.
+        try await withApp(configure: { _ in }) { app in
+            try await Self.registerRoutes(app, pushRecorder: Box(nil))
+            try await app.testing().test(.POST, "v1.51/images/alpine:latest/push?os=linux&arch=&variant=amd64") { res async throws in
+                #expect(res.status == .badRequest)
+            }
+            try await app.testing().test(.POST, "v1.51/images/alpine:latest/push?os=linux") { res async throws in
+                #expect(res.status == .badRequest)
+            }
+            try await app.testing().test(.POST, "v1.51/images/alpine:latest/push?arch=arm64") { res async throws in
+                #expect(res.status == .badRequest)
+            }
+            try await app.testing().test(.POST, "v1.51/images/alpine:latest/push?variant=v8") { res async throws in
+                #expect(res.status == .badRequest)
+            }
+        }
+    }
+
     @Test("an invalid platform string still answers 400, not a silent full push")
     func invalidPlatformAnswers400() async throws {
         try await withApp(configure: { _ in }) { app in
