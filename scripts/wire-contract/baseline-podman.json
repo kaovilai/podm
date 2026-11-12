@@ -1,5 +1,6 @@
 {
-  "podman_version": "6.1.4",
+  "cli": "podman",
+  "cli_version": "6.1.4",
   "commands": [
     {
       "command": "podman --version",

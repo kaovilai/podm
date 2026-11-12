@@ -27,8 +27,11 @@ def main():
     base_cmds = {c["command"]: c for c in baseline["commands"]}
     new_cmds = {c["command"]: c for c in recording["commands"]}
 
-    print(f"baseline podman: {baseline['podman_version']}")
-    print(f"tested  podman: {recording['podman_version']}")
+    print(f"baseline: {baseline['cli']} {baseline['cli_version']}")
+    print(f"tested:   {recording['cli']} {recording['cli_version']}")
+    if baseline["cli"] != recording["cli"]:
+        print("comparing different CLIs — wrong baseline file?")
+        sys.exit(2)
     drift = False
 
     for command in sorted(set(base_cmds) | set(new_cmds)):

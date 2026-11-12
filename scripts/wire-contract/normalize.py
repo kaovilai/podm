@@ -4,7 +4,7 @@ canonical baseline shape: one entry per battery command with its ordered
 request signatures. Volatile path segments (64-hex ids, 12+ hex tokens)
 are replaced so server-derived ids can't churn the baseline.
 
-Usage: normalize.py RECORDING.jsonl PODMAN_VERSION > baseline.json
+Usage: normalize.py RECORDING.jsonl <podman|docker> VERSION > baseline.json
 """
 import json
 import re
@@ -21,7 +21,7 @@ def normalize_path(path):
 
 
 def main():
-    recording, podman_version = sys.argv[1], sys.argv[2]
+    recording, cli, cli_version = sys.argv[1], sys.argv[2], sys.argv[3]
     commands = []
     current = None
     with open(recording) as f:
@@ -46,7 +46,7 @@ def main():
             )
     print(
         json.dumps(
-            {"podman_version": podman_version, "commands": commands},
+            {"cli": cli, "cli_version": cli_version, "commands": commands},
             indent=2,
             sort_keys=False,
         )

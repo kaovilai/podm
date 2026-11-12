@@ -1,15 +1,15 @@
 name: wire-contract
 
-# Records what the REAL podman CLI sends to a podm-shaped socket and
-# diffs the request signatures against the checked-in baseline
-# (scripts/wire-contract/baseline.json). Upstream call-signature drift —
-# the class that shipped as #49 (absolute-path -f) and #52 (repeated t
-# key) — fails the job with a per-command diff the day a new CLI behaves
+# Records what the REAL podman and docker CLIs send to a podm-shaped
+# socket and diffs the request signatures against the checked-in baselines
+# (scripts/wire-contract/baseline-<cli>.json). Upstream call-signature
+# drift — the class that shipped as #49 (absolute-path -f), #52 (repeated
+# t key) — fails the job with a per-command diff the day a new CLI behaves
 # differently, instead of waiting for a user to hit it.
 #
-# Runs manually (dev/curiosity: pin any podman version, or refresh the
-# baseline after an intentional podm-side change) and monthly as a
-# canary against the latest podman.
+# Runs manually (dev/curiosity: pin any CLI version, or refresh the
+# baselines after an intentional podm-side change) and monthly as a canary
+# against the latest CLI releases.
 
 on:
   workflow_dispatch:
@@ -17,8 +17,11 @@ on:
       podman-version:
         description: 'podman client to test: "latest", "runner", or a x.y.z pin'
         default: 'latest'
+      docker-version:
+        description: 'docker client to test: "latest", "runner", or a x.y.z pin'
+        default: 'latest'
       mode:
-        description: 'check = diff vs baseline (fail on drift); refresh = upload a new baseline to commit'
+        description: 'check = diff vs baseline (fail on drift); refresh = upload new baselines to commit'
         type: choice
         options: [check, refresh]
         default: 'check'
@@ -33,61 +36,82 @@ jobs:
   record:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cli: [podman, docker]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Acquire the podman client under test
+      - name: Acquire the ${{ matrix.cli }} client under test
         run: |
           set -eu
-          MODE="${{ inputs.podman-version || 'latest' }}"
+          CLI="${{ matrix.cli }}"
+          MODE="${{ (matrix.cli == 'podman' && inputs.podman-version) || (matrix.cli == 'docker' && inputs.docker-version) || 'latest' }}"
           if [ "$MODE" = "runner" ]; then
-            # The runner's own podman, purely as a remote client (the
-            # mock is the "server"; nothing needs a container runtime).
-            echo "PODMAN_BIN=$(command -v podman)" >> "$GITHUB_ENV"
-          else
+            # The runner's own client (the mock is the "server"; nothing
+            # needs a container runtime).
+            echo "CLI_BIN=$(command -v $CLI)" >> "$GITHUB_ENV"
+          elif [ "$CLI" = podman ]; then
             # containers/podman GitHub releases ship a static remote-only
-            # client per version — exactly what the harness needs.
+            # client per version.
             if [ "$MODE" = "latest" ]; then
               TAG=$(gh api repos/containers/podman/releases/latest --jq .tag_name)
             else
               TAG="v$MODE"
             fi
-            mkdir -p "$RUNNER_TEMP/podman-remote" && cd "$RUNNER_TEMP/podman-remote"
+            mkdir -p "$RUNNER_TEMP/cli" && cd "$RUNNER_TEMP/cli"
             curl -sSfL -o remote.tgz \
               "https://github.com/containers/podman/releases/download/$TAG/podman-remote-static-linux_amd64.tar.gz"
             tar -xzf remote.tgz
-            BIN="$RUNNER_TEMP/podman-remote/bin/podman-remote-static-linux_amd64"
+            BIN="$RUNNER_TEMP/cli/bin/podman-remote-static-linux_amd64"
             "$BIN" --version
-            echo "PODMAN_BIN=$BIN" >> "$GITHUB_ENV"
+            echo "CLI_BIN=$BIN" >> "$GITHUB_ENV"
+          else
+            # Docker ships static per-version client bundles.
+            if [ "$MODE" = "latest" ]; then
+              VERSION=$(curl -sSfL https://download.docker.com/linux/static/stable/x86_64/ \
+                | grep -oE 'docker-[0-9]+\.[0-9]+\.[0-9]+\.tgz' | sort -uV | tail -1 \
+                | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+            else
+              VERSION="$MODE"
+            fi
+            mkdir -p "$RUNNER_TEMP/cli" && cd "$RUNNER_TEMP/cli"
+            curl -sSfL -o client.tgz \
+              "https://download.docker.com/linux/static/stable/x86_64/docker-$VERSION.tgz"
+            tar -xzf client.tgz
+            BIN="$RUNNER_TEMP/cli/docker/docker"
+            "$BIN" --version
+            echo "CLI_BIN=$BIN" >> "$GITHUB_ENV"
           fi
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Record the real podman CLI against the mock socket
+      - name: Record the real ${{ matrix.cli }} CLI against the mock socket
         run: |
           set -eu
-          bash scripts/wire-contract/run.sh recording.jsonl "$PODMAN_BIN"
-          V=$("$PODMAN_BIN" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-          echo "PODMAN_VERSION=$V" >> "$GITHUB_ENV"
-          echo "tested podman $V"
+          bash scripts/wire-contract/run.sh recording.jsonl "${{ matrix.cli }}" "$CLI_BIN"
+          V=$("$CLI_BIN" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          echo "CLI_VERSION=$V" >> "$GITHUB_ENV"
+          echo "tested ${{ matrix.cli }} $V"
 
       - name: Normalize the recording
-        run: python3 scripts/wire-contract/normalize.py recording.jsonl "$PODMAN_VERSION" > normalized.json
+        run: python3 scripts/wire-contract/normalize.py recording.jsonl "${{ matrix.cli }}" "$CLI_VERSION" > normalized.json
 
       - name: Compare against the baseline (drift detection)
         if: (inputs.mode || 'check') == 'check'
-        run: python3 scripts/wire-contract/compare.py scripts/wire-contract/baseline.json normalized.json
+        run: python3 scripts/wire-contract/compare.py "scripts/wire-contract/baseline-${{ matrix.cli }}.json" normalized.json
 
       - name: Prepare refreshed baseline
         if: (inputs.mode || 'check') == 'refresh'
-        run: cp normalized.json baseline-refreshed.json
+        run: cp normalized.json "baseline-refreshed-${{ matrix.cli }}.json"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: wire-contract-${{ inputs.podman-version || 'latest' }}
+          name: wire-contract-${{ matrix.cli }}
           path: |
             recording.jsonl
             normalized.json
-            baseline-refreshed.json
+            baseline-refreshed-${{ matrix.cli }}.json
           if-no-files-found: ignore
