@@ -708,6 +708,18 @@ struct ClientContainerService: ClientContainerProtocol {
         try await prune(filters: filters, onLateDelete: nil)
     }
 
+    /// Explicit witness for the two-argument requirement: the three-
+    /// argument implementation does NOT satisfy it (defaulted parameters
+    /// do not create witnesses), so without this, calls through
+    /// `ClientContainerProtocol` would resolve to the extension default
+    /// and silently discard the late-delete callback.
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+        try await prune(filters: filters, onLateDelete: onLateDelete, onDelete: nil)
+    }
+
     func prune(
         filters: [String: [String]],
         onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)? = nil,

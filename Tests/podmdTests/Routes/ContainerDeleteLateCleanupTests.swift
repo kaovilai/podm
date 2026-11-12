@@ -190,6 +190,36 @@ struct ContainerDeleteLateCleanupTests {
         #expect(destroysAfterRefire.count == 1, "finalization is exactly-once")
     }
 
+    /// Review round 3 (Copilot): the three-argument prune implementation
+    /// does not satisfy the two-argument protocol requirement (defaulted
+    /// parameters do not create witnesses) — without an explicit
+    /// forwarding overload, calls through `ClientContainerProtocol` reach
+    /// the extension default and silently discard the late-delete hook.
+    /// This pins the witness structure the production service now uses:
+    /// the two-argument overload forwards to the three-argument one.
+    @Test("a two-argument prune call through the protocol preserves the late-delete hook")
+    func twoArgumentPruneDispatchPreservesHook() async throws {
+        let nativeId = "prune-witness-ctr-5e7"
+        let snapshot = Self.snapshot(id: nativeId, createdAt: 7300)
+        let hexId = DockerContainerID.hexId(for: snapshot)
+        let state = LateHookState()
+        let service = WitnessStructurePruneMock(snapshots: [snapshot], state: state)
+
+        // Typed as the PROTOCOL: this is the dispatch the route's callers
+        // and any other client go through.
+        let client: ClientContainerProtocol = service
+        let hookDelivered = LockedBox(false)
+        _ = try await client.prune(
+            filters: [:],
+            onLateDelete: { _, _ in hookDelivered.set(true) })
+
+        // The stored hook (fired below) proves the two-argument call
+        // REACHED the implementation rather than the extension default
+        // discarding it.
+        await state.firePruneLateDelete(nativeId: nativeId, hexId: hexId)
+        #expect(hookDelivered.value, "the two-argument protocol call must deliver the hook")
+    }
+
     /// Review round 2 (Copilot): a container created between the route's
     /// pre-list and the service's own prune list is INVISIBLE to any
     /// route-local hex map — the old post-loop fell back to the native id
@@ -449,6 +479,63 @@ private struct LatePruneMock: ClientContainerProtocol {
     func prune(
         filters: [String: [String]],
         onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+        if let onLateDelete {
+            await state.storePruneLateDelete(onLateDelete)
+        }
+        return ([], 0)
+    }
+}
+
+/// Mirrors the production service's prune overload structure: the
+/// one-argument convenience, the EXPLICIT two-argument forwarder (the
+/// protocol witness — without it, protocol dispatch hits the extension
+/// default and drops the hook), and the three-argument implementation.
+private struct WitnessStructurePruneMock: ClientContainerProtocol {
+    let snapshots: [ContainerSnapshot]
+    let state: LateHookState
+
+    func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] {
+        snapshots
+    }
+
+    func getContainer(id: String) async throws -> ContainerSnapshot? { nil }
+
+    func enforceContainerRunning(container: ContainerSnapshot) throws {}
+
+    @discardableResult
+    func start(id: String, detachKeys: String?) async throws -> Bool { true }
+
+    func stop(id: String, signal: String?, timeout: Int?) async throws {}
+
+    @discardableResult
+    func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool { true }
+
+    func kill(id: String, signal: String?) async throws {}
+
+    func delete(id: String) async throws {}
+
+    func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait {
+        RESTContainerWait(statusCode: 0)
+    }
+
+    func prune(filters: [String: [String]]) async throws -> (
+        deletedContainers: [String], spaceReclaimed: Int64
+    ) {
+        try await prune(filters: filters, onLateDelete: nil)
+    }
+
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+        try await prune(filters: filters, onLateDelete: onLateDelete, onDelete: nil)
+    }
+
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?,
+        onDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
     ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
         if let onLateDelete {
             await state.storePruneLateDelete(onLateDelete)
