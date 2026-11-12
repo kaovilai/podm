@@ -28,13 +28,14 @@ ENTRY = re.compile(r"^  (\S+?)(\*)?\s{2,}")
 MAX_DEPTH = 3
 HELP_TIMEOUT = 30
 
-# Unstarred top-level names that alias a PATH-installed plugin rather than
-# the binary under test: docker's `builder` and `bake` forward to buildx
-# (their help is the plugin's, and they only exist when a plugin is
-# discoverable), so their subcommands vary with the runner, not the CLI
-# version. Starred entries (buildx*, compose*) are already skipped by the
-# star check.
-PLUGIN_ALIASES = {"docker": {"builder", "bake"}}
+# Top-level names that alias a PATH-installed external provider rather
+# than the binary under test: docker's `builder` and `bake` forward to
+# buildx, and podman's `compose` shells out to podman-compose/docker-compose
+# (its --help exits 125 when no provider is installed — caught live by the
+# fail-loud extraction on run 43207474371). Their presence and help output
+# vary with the runner, not the CLI version, so they are skipped. Docker's
+# starred entries (buildx*, compose*) are already skipped by the star check.
+PLUGIN_ALIASES = {"docker": {"builder", "bake"}, "podman": {"compose"}}
 
 
 class HelpInspectionError(Exception):
