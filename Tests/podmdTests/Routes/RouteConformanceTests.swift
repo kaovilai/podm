@@ -133,7 +133,14 @@ struct RouteConformanceTests {
     /// them makes the suite flaky rather than more sure — routing-phase
     /// coverage and the reverse-registration assertion still guard them.
     private static let networkBoundRoutes: Set<String> = [
-        "GET /distribution/{name:.*}/json"
+        "GET /distribution/{name:.*}/json",
+        // The manifest push route resolves and contacts the DESTINATION
+        // registry even with dummy parameters — a dummy destination's DNS
+        // resolution can take multi-second timeout paths on some CI
+        // resolvers, which is exactly the fixed-deadline flakiness this
+        // set exists to avoid (failed this PR's CI three times while the
+        // route is perfectly healthy).
+        "POST /libpod/manifests/{name:.*}/registry/{destination:.*}",
     ]
 
     @Test("every registered route answers; stub responses appear only in the manifest")
