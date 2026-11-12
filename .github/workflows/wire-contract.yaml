@@ -105,6 +105,7 @@ jobs:
         run: python3 scripts/wire-contract/normalize.py recording.jsonl "${{ matrix.cli }}" "$CLI_VERSION" > normalized.json
 
       - name: Extract the ${{ matrix.cli }} command tree
+        id: extract-tree
         run: |
           # Docker 29+ filters its help output by the CONNECTED daemon's API
           # version and Swarm state — against the runner's real daemon that
@@ -129,9 +130,10 @@ jobs:
 
       - name: Compare the command tree (new-command detection)
         # !cancelled(): a request-signature drift must not mask command-surface
-        # drift — both belong in one failure report. (A failed extraction
-        # still stops this step, correctly: there is no tree to compare.)
-        if: ${{ !cancelled() && (inputs.mode || 'check') == 'check' }}
+        # drift — both belong in one failure report. Scoped to the extraction
+        # step's success: a failed extraction already fails the job with its
+        # own clear error, and there is no tree to compare.
+        if: ${{ !cancelled() && steps.extract-tree.conclusion == 'success' && (inputs.mode || 'check') == 'check' }}
         run: python3 scripts/wire-contract/commands.py compare "scripts/wire-contract/commands-${{ matrix.cli }}.json" tree.json
 
       - name: Prepare refreshed baseline
