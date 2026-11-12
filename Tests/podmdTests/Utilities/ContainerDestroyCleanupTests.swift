@@ -206,12 +206,80 @@ struct ContainerDestroyCleanupTests {
     /// transient failures throw).
     private struct TransientLookupFailure: Error {}
 
+    /// Review round 4 (CodeRabbit): the prune path runs the in-window
+    /// cleanup INLINE in its delete loop — an apiserver that stops
+    /// ANSWERING the replacement lookup (never returns, never throws)
+    /// must not stall the next delete and the prune response. The lookup
+    /// is bounded; on expiry, like on error, the native-keyed state is
+    /// preserved.
+    @Test(
+        "an unanswered replacement lookup is bounded and preserves the native-keyed state",
+        .timeLimit(.minutes(1))
+    )
+    func unansweredLookupIsBounded() async throws {
+        let nativeId = "cleanup-hang-ctr-7b2"
+        let snapshot = Self.snapshot(id: nativeId, createdAt: 7300)
+        let hexId = DockerContainerID.hexId(for: snapshot)
+        await ContainerLogJournal.shared.beginBoot(nativeId: nativeId, epoch: 1)
+        await ContainerLogJournal.shared.append(
+            nativeId: nativeId, epoch: 1,
+            [ContainerLogJournal.Entry(unixNano: 1, streamType: 1, bytes: Data("live\n".utf8))])
+        await ContainerInfoCache.shared.set(
+            hexId: hexId, nativeId: nativeId, image: "alpine:latest", labels: [:])
+
+        let started = Date()
+        await ContainerDestroyCleanup.finalize(
+            client: HangingLookupMock(),
+            broadcaster: EventBroadcaster(),
+            hexId: hexId,
+            nativeId: nativeId,
+            image: "alpine:latest",
+            name: nativeId,
+            labels: [:],
+            checkForReplacement: true,
+            replacementLookupTimeoutNs: 200_000_000
+        )
+
+        #expect(
+            Date().timeIntervalSince(started) < 10,
+            "the cleanup must complete well before the test's limit — the lookup is bounded")
+        // Unanswered is not "confirmed absence": the journal survives.
+        #expect(
+            await ContainerLogJournal.shared.entries(nativeId: nativeId).isEmpty == false,
+            "an unanswered lookup preserves the native-keyed state")
+    }
+
     /// `getContainer` fails the way a transient apiserver error does —
     /// which must NOT be read as "no replacement exists".
     private struct LookupFailingMock: ClientContainerProtocol {
         func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { [] }
         func getContainer(id: String) async throws -> ContainerSnapshot? {
             throw TransientLookupFailure()
+        }
+        func enforceContainerRunning(container: ContainerSnapshot) throws {}
+        @discardableResult
+        func start(id: String, detachKeys: String?) async throws -> Bool { true }
+        func stop(id: String, signal: String?, timeout: Int?) async throws {}
+        @discardableResult
+        func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool { true }
+        func kill(id: String, signal: String?) async throws {}
+        func delete(id: String) async throws {}
+        func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait {
+            RESTContainerWait(statusCode: 0)
+        }
+        func prune(filters: [String: [String]]) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+            ([], 0)
+        }
+    }
+
+    /// `getContainer` never answers at all — the wedged-apiserver shape
+    /// (issue #45): neither nil nor an error, just silence.
+    private struct HangingLookupMock: ClientContainerProtocol {
+        func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { [] }
+        func getContainer(id: String) async throws -> ContainerSnapshot? {
+            // A continuation that is never resumed — the await suspends
+            // forever (the wedged-apiserver shape: neither nil nor error).
+            await withCheckedContinuation { (_: CheckedContinuation<ContainerSnapshot?, Never>) in }
         }
         func enforceContainerRunning(container: ContainerSnapshot) throws {}
         @discardableResult
