@@ -1,6 +1,6 @@
 {
   "cli": "docker",
-  "cli_version": "29.9.2",
+  "cli_version": "29.9.3",
   "commands": [
     {
       "command": "docker --version",
