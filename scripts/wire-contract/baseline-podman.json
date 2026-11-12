@@ -2230,7 +2230,7 @@
       ]
     },
     {
-      "command": "podman secret create wcs -",
+      "command": "podman secret create wcs secret.txt",
       "requests": [
         {
           "method": "GET",

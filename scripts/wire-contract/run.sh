@@ -32,11 +32,20 @@ if [ "$CLI" = docker ]; then
     # override DOCKER_HOST and point the CLI somewhere else entirely.
     export DOCKER_CONFIG="$SOCK_DIR/docker-config"
     mkdir -p "$DOCKER_CONFIG"
+    # Force the legacy builder the baseline records: a system-wide buildx
+    # plugin (e.g. on GitHub runners) is still discoverable with an
+    # isolated DOCKER_CONFIG and would forward `docker build` to BuildKit,
+    # changing the /build request shape — runner noise, not CLI drift.
+    export DOCKER_BUILDKIT=0
 fi
 
 # A tiny deterministic build context.
 CTX=$(mktemp -d)
 printf 'FROM alpine:latest\nRUN echo wire\n' > "$CTX/Dockerfile"
+# Fixed secret payload: `secret create <name> -` with inherited stdin
+# makes docker bail before sending anything (empty stdin) or block
+# (a tty) — a file keeps the secret commands deterministic.
+printf 'wiresecret\n' > "$CTX/secret.txt"
 trap 'kill $MOCK 2>/dev/null; rm -rf "$SOCK_DIR"; rm -rf "$CTX"' EXIT
 
 # The battery: fixed arguments only — relative times, random names, and
@@ -116,7 +125,7 @@ battery=(
     "podman system df"
     "podman system info"
     "podman secret ls"
-    "podman secret create wcs -"
+    "podman secret create wcs secret.txt"
     "podman secret inspect wcs"
     "podman secret rm wcs"
     "podman container exists wct"
@@ -191,7 +200,7 @@ battery=(
     "docker system df"
     "docker system info"
     "docker secret ls"
-    "docker secret create wcs -"
+    "docker secret create wcs secret.txt"
     "docker secret inspect wcs"
     "docker secret rm wcs"
     "docker container ls --all"

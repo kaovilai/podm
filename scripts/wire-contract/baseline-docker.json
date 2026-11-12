@@ -1307,13 +1307,19 @@
       ]
     },
     {
-      "command": "docker secret create wcs -",
+      "command": "docker secret create wcs secret.txt",
       "requests": [
         {
           "method": "HEAD",
           "path": "/_ping",
           "query": {},
           "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/secrets/create",
+          "query": {},
+          "content_type": "application/json"
         }
       ]
     },
