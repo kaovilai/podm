@@ -1,0 +1,1690 @@
+{
+  "podman_version": "6.1.4",
+  "commands": [
+    {
+      "command": "podman --version",
+      "requests": []
+    },
+    {
+      "command": "podman version",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/version",
+          "query_keys": [],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman info",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/info",
+          "query_keys": [],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman ps",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/json",
+          "query_keys": [
+            "all",
+            "external",
+            "filters",
+            "last",
+            "namespace",
+            "size",
+            "sync"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman ps -a",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/json",
+          "query_keys": [
+            "all",
+            "external",
+            "filters",
+            "last",
+            "namespace",
+            "size",
+            "sync"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman images",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/images/json",
+          "query_keys": [
+            "all",
+            "filters"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman images -a",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/images/json",
+          "query_keys": [
+            "all",
+            "filters"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman image ls",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/images/json",
+          "query_keys": [
+            "all",
+            "filters"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman image inspect alpine:latest",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/images/alpine:latest/json",
+          "query_keys": [
+            "size"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman pull docker.io/library/alpine:latest",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/images/pull",
+          "query_keys": [
+            "alltags",
+            "arch",
+            "authfile",
+            "os",
+            "policy",
+            "quiet",
+            "reference",
+            "variant"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman create --name wct alpine:latest echo hi",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/images/pull",
+          "query_keys": [
+            "alltags",
+            "arch",
+            "authfile",
+            "os",
+            "policy",
+            "quiet",
+            "reference",
+            "variant"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman start wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/json",
+          "query_keys": [
+            "all",
+            "filters",
+            "sync"
+          ],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/json",
+          "query_keys": [
+            "size"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman stop wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/json",
+          "query_keys": [
+            "all",
+            "filters",
+            "sync"
+          ],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/json",
+          "query_keys": [
+            "size"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman restart wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/json",
+          "query_keys": [
+            "all",
+            "filters",
+            "sync"
+          ],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/json",
+          "query_keys": [
+            "size"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman kill wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/json",
+          "query_keys": [
+            "all",
+            "sync"
+          ],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/json",
+          "query_keys": [
+            "size"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman pause wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/json",
+          "query_keys": [
+            "all",
+            "filters",
+            "sync"
+          ],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/json",
+          "query_keys": [
+            "size"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman unpause wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/json",
+          "query_keys": [
+            "all",
+            "filters",
+            "sync"
+          ],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/json",
+          "query_keys": [
+            "size"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman init wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/json",
+          "query_keys": [
+            "all",
+            "sync"
+          ],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/json",
+          "query_keys": [
+            "size"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman inspect wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/json",
+          "query_keys": [
+            "size"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman container inspect wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/json",
+          "query_keys": [
+            "size"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman top wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/top",
+          "query_keys": [],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman stats --no-stream",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/stats",
+          "query_keys": [
+            "all",
+            "interval",
+            "stream"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman logs wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/logs",
+          "query_keys": [
+            "follow",
+            "since",
+            "stderr",
+            "stdout",
+            "tail",
+            "timestamps",
+            "until"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman logs --since 2020-01-01T00:00:00Z wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/logs",
+          "query_keys": [
+            "follow",
+            "since",
+            "stderr",
+            "stdout",
+            "tail",
+            "timestamps",
+            "until"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman logs -f --since 2020-01-01T00:00:00Z --until 2020-01-01T00:05:00Z wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/logs",
+          "query_keys": [
+            "follow",
+            "since",
+            "stderr",
+            "stdout",
+            "tail",
+            "timestamps",
+            "until"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman exec wct ls /",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/wct/exec",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/exec//json",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/exec//start",
+          "query_keys": [],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman exec -e FOO=bar wct env",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/wct/exec",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/exec//json",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/exec//start",
+          "query_keys": [],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman rename wct wct2",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/wct/rename",
+          "query_keys": [
+            "name"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman wait wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/wct/wait",
+          "query_keys": [
+            "interval"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman port wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/json",
+          "query_keys": [
+            "all",
+            "sync"
+          ],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/json",
+          "query_keys": [
+            "size"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman diff wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/changes",
+          "query_keys": [
+            "difftype"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman rm wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/json",
+          "query_keys": [
+            "all",
+            "filters",
+            "sync"
+          ],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/json",
+          "query_keys": [
+            "size"
+          ],
+          "content_type": ""
+        },
+        {
+          "method": "DELETE",
+          "path": "/libpod/containers/wct",
+          "query_keys": [
+            "depend",
+            "force",
+            "ignore",
+            "volumes"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman rm -f wct2",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/json",
+          "query_keys": [
+            "all",
+            "filters",
+            "sync"
+          ],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct2/json",
+          "query_keys": [
+            "size"
+          ],
+          "content_type": ""
+        },
+        {
+          "method": "DELETE",
+          "path": "/libpod/containers/wct2",
+          "query_keys": [
+            "depend",
+            "force",
+            "ignore",
+            "volumes"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman container prune -f",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/containers/prune",
+          "query_keys": [
+            "filters"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman run --rm alpine:latest echo hi",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/images/pull",
+          "query_keys": [
+            "alltags",
+            "arch",
+            "authfile",
+            "os",
+            "policy",
+            "quiet",
+            "reference",
+            "variant"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman run --name wcr alpine:latest echo hi",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/images/pull",
+          "query_keys": [
+            "alltags",
+            "arch",
+            "authfile",
+            "os",
+            "policy",
+            "quiet",
+            "reference",
+            "variant"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman run -d alpine:latest",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/images/pull",
+          "query_keys": [
+            "alltags",
+            "arch",
+            "authfile",
+            "os",
+            "policy",
+            "quiet",
+            "reference",
+            "variant"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman tag alpine:latest wctag:1",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/images/alpine:latest/tag",
+          "query_keys": [
+            "repo",
+            "tag"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman rmi wctag:1",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "DELETE",
+          "path": "/libpod/images/remove",
+          "query_keys": [
+            "all",
+            "force",
+            "ignore",
+            "images",
+            "lookupmanifest",
+            "noprune"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman image prune -f",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/images/prune",
+          "query_keys": [
+            "all",
+            "buildcache",
+            "external",
+            "filters"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman history alpine:latest",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/images/alpine:latest/history",
+          "query_keys": [],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman push alpine:latest docker.io/example/wc:1",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/images/alpine:latest/push",
+          "query_keys": [
+            "all",
+            "authfile",
+            "compress",
+            "compressionformat",
+            "destination",
+            "forcecompressionformat",
+            "format",
+            "quiet",
+            "removesignatures"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman search alpine",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/images/search",
+          "query_keys": [
+            "authfile",
+            "filters",
+            "limit",
+            "listtags",
+            "term"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman commit wcr wcimg:1",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/commit",
+          "query_keys": [
+            "author",
+            "comment",
+            "container",
+            "format",
+            "pause",
+            "repo",
+            "squash",
+            "stream",
+            "tag"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman export wcr",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wcr/export",
+          "query_keys": [],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman save -o /tmp/wc.tar alpine:latest",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/images/export",
+          "query_keys": [
+            "compress",
+            "format",
+            "ociacceptuncompressedlayers",
+            "references"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman load -i /tmp/wc.tar",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/images/load",
+          "query_keys": [],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman build -f Dockerfile .",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/build",
+          "query_keys": [
+            "compressionFormat",
+            "dockerfile",
+            "forceCompressionFormat",
+            "forcerm",
+            "httpproxy",
+            "idmappingoptions",
+            "inheritannotations",
+            "isolation",
+            "jobs",
+            "layers",
+            "networkmode",
+            "nsoptions",
+            "omithistory",
+            "outputformat",
+            "pullpolicy",
+            "retry",
+            "retry-delay",
+            "rewritetimestamp",
+            "rm",
+            "shmsize",
+            "t"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman build -t wc-a -t wc-b .",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/build",
+          "query_keys": [
+            "compressionFormat",
+            "dockerfile",
+            "forceCompressionFormat",
+            "forcerm",
+            "httpproxy",
+            "idmappingoptions",
+            "inheritannotations",
+            "isolation",
+            "jobs",
+            "layers",
+            "networkmode",
+            "nsoptions",
+            "omithistory",
+            "output",
+            "outputformat",
+            "pullpolicy",
+            "retry",
+            "retry-delay",
+            "rewritetimestamp",
+            "rm",
+            "shmsize",
+            "t",
+            "t"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman build -q -f Dockerfile .",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/build",
+          "query_keys": [
+            "compressionFormat",
+            "dockerfile",
+            "forceCompressionFormat",
+            "forcerm",
+            "httpproxy",
+            "idmappingoptions",
+            "inheritannotations",
+            "isolation",
+            "jobs",
+            "layers",
+            "networkmode",
+            "nsoptions",
+            "omithistory",
+            "outputformat",
+            "pullpolicy",
+            "q",
+            "retry",
+            "retry-delay",
+            "rewritetimestamp",
+            "rm",
+            "shmsize",
+            "t"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman manifest create wcm alpine:latest",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/manifests/wcm",
+          "query_keys": [
+            "all",
+            "amend",
+            "images"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman manifest inspect wcm",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/manifests/wcm/json",
+          "query_keys": [
+            "authfile"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman volume create wcv",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/volumes/create",
+          "query_keys": [],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman volume ls",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/volumes/json",
+          "query_keys": [
+            "filters"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman volume inspect wcv",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/volumes/wcv/json",
+          "query_keys": [],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman volume rm wcv",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "DELETE",
+          "path": "/libpod/volumes/wcv",
+          "query_keys": [
+            "force"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman volume prune -f",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/volumes/prune",
+          "query_keys": [
+            "dryrun",
+            "filters"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman network create wcn",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/networks/create",
+          "query_keys": [
+            "ignoreIfExists"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman network ls",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/networks/json",
+          "query_keys": [
+            "filters"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman network inspect wcn",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/networks/wcn/json",
+          "query_keys": [],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman network rm wcn",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "DELETE",
+          "path": "/libpod/networks/wcn",
+          "query_keys": [
+            "force",
+            "ignore"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman network prune -f",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/networks/prune",
+          "query_keys": [
+            "filters"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman events --since 2020-01-01T00:00:00Z --until 2020-01-01T01:00:00Z",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/events",
+          "query_keys": [
+            "filters",
+            "since",
+            "stream",
+            "until"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman system df",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/system/df",
+          "query_keys": [],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman system info",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/info",
+          "query_keys": [],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman secret ls",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/secrets/json",
+          "query_keys": [
+            "filters"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman secret create wcs -",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "POST",
+          "path": "/libpod/secrets/create",
+          "query_keys": [
+            "driver",
+            "ignore",
+            "labels",
+            "name",
+            "replace"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman secret inspect wcs",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/secrets/wcs/json",
+          "query_keys": [
+            "showsecret"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman secret rm wcs",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/secrets/wcs/json",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "DELETE",
+          "path": "/libpod/secrets/wcs",
+          "query_keys": [],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman container exists wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/wct/exists",
+          "query_keys": [
+            "external"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman container list --all",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/containers/json",
+          "query_keys": [
+            "all",
+            "external",
+            "filters",
+            "last",
+            "namespace",
+            "size",
+            "sync"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman inspect --type image alpine:latest",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/images/alpine:latest/json",
+          "query_keys": [
+            "size"
+          ],
+          "content_type": ""
+        }
+      ]
+    },
+    {
+      "command": "podman container checkpoint -l",
+      "requests": []
+    },
+    {
+      "command": "podman generate systemd wct",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/libpod/_ping",
+          "query_keys": [],
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "path": "/libpod/generate/wct/systemd",
+          "query_keys": [
+            "containerprefix",
+            "new",
+            "noheader",
+            "podprefix",
+            "separator",
+            "templateunitfile",
+            "usename"
+          ],
+          "content_type": ""
+        }
+      ]
+    }
+  ]
+}
