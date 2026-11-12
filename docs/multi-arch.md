@@ -80,3 +80,40 @@ Running exotic-arch containers would require qemu-user registered *inside each
 container VM* — possible future work, tracked on the roadmap, but not needed
 for the build use-case. If you need to smoke-test a ppc64le image, run it
 somewhere that architecture exists.
+
+## Builder sizing (big projects, emulated arches)
+
+The builder VMs default to 2 vCPUs / 2048 MB each — conservative for a
+laptop, slow for a big multi-stage Go/Rust/Node build, and *very* slow under
+QEMU emulation. Two ways to size up:
+
+**Once, for every build** (env knobs, read at daemon start):
+
+```sh
+launchctl setenv PODM_BUILDER_CPUS 6
+launchctl setenv PODM_BUILDER_MEMORY 6g
+# The QEMU (emulated-arch) builder is sized independently — usually wants more CPU:
+launchctl setenv PODM_QEMU_BUILDER_CPUS 8
+launchctl setenv PODM_QEMU_BUILDER_MEMORY 8g
+```
+
+(or `podm serve` in the foreground with them exported). Knobs take effect
+when the builder is next created; both knobs and per-build asks below
+clamp to the host's core count and physical RAM.
+
+**Per build, only when you ask** — the standard resource flags both CLIs
+already send on `/build`:
+
+```sh
+podman build --memory 6g --cpu-quota 600000 --cpu-period 100000 .
+docker build --memory 6g --cpu-quota 600000 --cpu-period 100000 .
+```
+
+(`--cpu-quota/--cpu-period` is CFS-speak for vCPUs: `quota/period` of
+`600000/100000` = 6.) The flags are absent from the wire when you don't
+pass them, so an un-flagged build never disturbs a running builder. A
+flagged build sizes a builder it has to *create* at the larger of the
+env floor and the ask; if a smaller builder is already running, it is
+recreated at the larger size (the BuildKit cache inside it resets — a
+one-time cost logged at the time, and a build concurrently in flight on
+that builder may fail; re-run it).

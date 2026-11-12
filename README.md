@@ -196,6 +196,8 @@ docker context use podm
 | `PODM_DNS_PORT` | `2054` | Host-side port of podm's embedded DNS resolver |
 | `PODM_DNS_UPSTREAM` | `1.1.1.1:53` | Upstream resolver for names the embedded DNS server cannot answer locally: IPv4 literal with optional `:port` (default `1.1.1.1:53`); `--dns-upstream` flag wins, invalid env warns and keeps the default |
 | `PODM_CLEAN_VOLUMES` | enabled | Set `false` to opt out of removing `/lost+found` from named-volume EXT4 images (it breaks Postgres `initdb`; per-volume opt-out label: `podm.clean-volumes=false`) |
+| `PODM_BUILDER_CPUS` / `PODM_BUILDER_MEMORY` | `2` / `2048MB` | vCPUs and memory for the Rosetta (native + amd64-via-Rosetta) builder VM. Memory accepts bytes or `k`/`m`/`g` suffixes. Read at daemon start; takes effect when the builder is next created or recreated |
+| `PODM_QEMU_BUILDER_CPUS` / `PODM_QEMU_BUILDER_MEMORY` | `2` / `2048MB` | Same, for the QEMU (emulated-arch: s390x, ppc64le, …) builder VM — emulated builds are CPU-hungry, so big multi-arch projects usually want this higher |
 | `CONTAINER_HOST` / `DOCKER_HOST` | set by shim | Point the real CLIs at `unix://$HOME/.podm/container.sock` — normally you never set these yourself |
 
 ### Volume sync modes

@@ -64,7 +64,14 @@ enum RouteRegistry {
         // #35), no payload half (nothing can execute a plugin rootfs).
         let pluginStore = PluginStore(storageDirectory: appleContainerAppSupportUrl)
         let archiveClient = ClientArchiveService(appSupportPath: appleContainerAppSupportUrl)
-        let builderClient = ClientBuilderService(appSupportURL: appleContainerAppSupportUrl, containerSystemConfig: systemConfig)
+        // Builder VM sizing knobs (PODM_BUILDER_* / PODM_QEMU_BUILDER_*),
+        // read once at boot; explicit per-build --memory/--cpu-quota asks
+        // escalate on top. See BuilderResourceKnobs.
+        let builderEnv = ProcessInfo.processInfo.environment
+        let builderClient = ClientBuilderService(
+            rosettaResources: BuilderResourceKnobs.provision(qemu: false, env: builderEnv),
+            qemuResources: BuilderResourceKnobs.provision(qemu: true, env: builderEnv),
+            appSupportURL: appleContainerAppSupportUrl, containerSystemConfig: systemConfig)
 
         // Create and install regex routing middleware with logging
         let regexRouter = app.regexRouter(with: app.logger)

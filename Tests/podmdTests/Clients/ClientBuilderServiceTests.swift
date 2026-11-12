@@ -23,8 +23,7 @@ struct ClientBuilderServiceConfigurationTests {
             imageEnv: nil,
             useRosetta: false,
             qemu: false,
-            builderCPUs: 2,
-            builderMemory: "2048MB",
+            resources: BuilderResourceRequest(memoryInBytes: 2_147_483_648, cpus: 2),
             exportsMountPath: "/tmp/exports",
             networkId: "default",
             nameserver: "192.168.65.1"
@@ -40,8 +39,7 @@ struct ClientBuilderServiceConfigurationTests {
             imageEnv: ["PATH=/usr/bin"],
             useRosetta: true,
             qemu: false,
-            builderCPUs: 4,
-            builderMemory: "4096MB",
+            resources: BuilderResourceRequest(memoryInBytes: 4_294_967_296, cpus: 4),
             exportsMountPath: "/tmp/exports",
             networkId: "mynet",
             nameserver: "192.168.65.1"
@@ -51,6 +49,23 @@ struct ClientBuilderServiceConfigurationTests {
         #expect(config.rosetta == true)
         #expect(config.networks.first?.network == "mynet")
         #expect(config.dns?.nameservers == ["192.168.65.1"])
+    }
+
+    @Test("Resources land on the VM configuration as vCPUs and bytes")
+    func resourcesLand() throws {
+        let config = try ClientBuilderService.builderContainerConfiguration(
+            builderContainerId: "buildkit",
+            imageDescription: makeImageDescription(),
+            imageEnv: nil,
+            useRosetta: false,
+            qemu: false,
+            resources: BuilderResourceRequest(memoryInBytes: 6_442_450_944, cpus: 6),
+            exportsMountPath: "/tmp/exports",
+            networkId: "default",
+            nameserver: "192.168.65.1"
+        )
+        #expect(config.resources.cpus == 6)
+        #expect(config.resources.memoryInBytes == 6_442_450_944)
     }
 
     @Test("--enable-qemu is derived solely from qemu, independent of useRosetta")
@@ -65,8 +80,7 @@ struct ClientBuilderServiceConfigurationTests {
             imageEnv: nil,
             useRosetta: false,
             qemu: false,
-            builderCPUs: 2,
-            builderMemory: "2048MB",
+            resources: BuilderResourceRequest(memoryInBytes: 2_147_483_648, cpus: 2),
             exportsMountPath: "/tmp/exports",
             networkId: "default",
             nameserver: "192.168.65.1"
@@ -80,8 +94,7 @@ struct ClientBuilderServiceConfigurationTests {
             imageEnv: nil,
             useRosetta: false,
             qemu: true,
-            builderCPUs: 2,
-            builderMemory: "2048MB",
+            resources: BuilderResourceRequest(memoryInBytes: 2_147_483_648, cpus: 2),
             exportsMountPath: "/tmp/exports",
             networkId: "default",
             nameserver: "192.168.65.1"
