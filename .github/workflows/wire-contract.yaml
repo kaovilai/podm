@@ -105,7 +105,12 @@ jobs:
         run: python3 scripts/wire-contract/normalize.py recording.jsonl "${{ matrix.cli }}" "$CLI_VERSION" > normalized.json
 
       - name: Extract the ${{ matrix.cli }} command tree
-        run: python3 scripts/wire-contract/commands.py extract "${{ matrix.cli }}" "$CLI_BIN" > tree.json
+        run: |
+          python3 scripts/wire-contract/commands.py extract "${{ matrix.cli }}" "$CLI_BIN" > tree.json
+          # Raw root help alongside the extracted tree: section headers vary
+          # by binary flavor (static vs distro builds) and by version — this
+          # is the ground truth to diff against when the tree looks wrong.
+          "$CLI_BIN" --help > help-root.txt
 
       - name: Compare against the baseline (drift detection)
         if: (inputs.mode || 'check') == 'check'
@@ -129,6 +134,7 @@ jobs:
             recording.jsonl
             normalized.json
             tree.json
+            help-root.txt
             baseline-refreshed-${{ matrix.cli }}.json
             commands-refreshed-${{ matrix.cli }}.json
           if-no-files-found: ignore
