@@ -13,7 +13,6 @@
     "podman attach",
     "podman build",
     "podman commit",
-    "podman compose",
     "podman container",
     "podman container attach",
     "podman container checkpoint",
