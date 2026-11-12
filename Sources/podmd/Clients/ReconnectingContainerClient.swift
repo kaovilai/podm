@@ -73,6 +73,15 @@ actor ReconnectingContainerClient<Client: Sendable> {
                 reconnectCount += 1
                 client = makeClient()
             }
+            // Re-check the permit AFTER reconstruction: `expire()` runs on
+            // the hang-recovery timer, independently of this actor, and can
+            // land while `makeClient()` builds the fresh connection. Without
+            // this second check a retry dispatched past the caller's final
+            // deadline could delete or stop a recreated same-name container —
+            // the exact hazard the permit exists to prevent.
+            if let allowRetry, !allowRetry() {
+                throw error
+            }
             return try await operation(client)
         }
     }

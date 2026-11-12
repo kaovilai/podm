@@ -78,7 +78,16 @@ actor ContainerInfoCache {
         } else {
             if let sibling = autoRemoveSibling[hexId] {
                 autoRemoveSibling.removeValue(forKey: hexId)
-                if sibling == nativeId, autoRemoveSibling[sibling] == hexId {
+                // The reverse key dies when it still points back at THIS
+                // hex id: the mutual pairing itself proves the mark is this
+                // instance's, so requiring the caller's `nativeId` to match
+                // is unnecessary — and a caller with NO native id (a delete
+                // whose eager identity capture failed) would otherwise leave
+                // the reverse link behind, where a non-`--rm` same-name
+                // replacement's exit observer could consume the stale mark.
+                // A replacement's mark points at the REPLACEMENT's hex id
+                // and survives.
+                if autoRemoveSibling[sibling] == hexId {
                     autoRemoveSibling.removeValue(forKey: sibling)
                 }
             }

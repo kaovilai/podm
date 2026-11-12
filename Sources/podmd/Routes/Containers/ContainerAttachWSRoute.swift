@@ -97,6 +97,17 @@ extension ContainerAttachWSRoute {
 
         let process: ClientProcess
         do {
+            // A native id is a reusable name (Utility.createContainerID
+            // passes the container name through): a delete of a previous
+            // same-name container may still have a recovery bootout in
+            // flight (issue #45) — bootstrap only after it finishes, or the
+            // late bootout would kill this container's freshly-registered
+            // runtime job. Same barrier as the HTTP attach paths
+            // (ContainerAttachRoute) and the service's start.
+            await ContainerRuntimeJobRecovery.awaitNoOutstandingBootout(
+                nativeId: container.id,
+                runtimeHandler: container.configuration.runtimeHandler
+            )
             process = try await ContainerClient().bootstrap(id: container.id, stdio: pipes.stdioArray)
         } catch {
             pipes.closeAll()

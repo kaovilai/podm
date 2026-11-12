@@ -63,7 +63,22 @@ actor VMLifecycleAdmission {
     /// against the deadline; `acquire()` stays cancellation-correct on both
     /// sides (a cancelled waiter is removed from the queue, and a waiter
     /// granted a slot just as cancellation lands hands it back).
-    func withSlot<T: Sendable>(timeoutNs: UInt64, _ body: @Sendable () async throws -> T) async throws -> T {
+    /// - Parameters:
+    ///   - timeoutNs: how long a queued caller waits for a slot before
+    ///     failing with `QueueTimeout`.
+    ///   - interpose: test-only hook, invoked synchronously on the calling
+    ///     task after the slot is held but immediately BEFORE the
+    ///     post-acquisition cancellation guard — the one point a test can
+    ///     land a cancellation deterministically between a successful
+    ///     acquisition and the guard. No external scheduling can target that
+    ///     gap: until moments before the guard runs, the caller is suspended
+    ///     inside the acquisition race. Production callers omit it.
+    ///   - body: the operation to run while holding the slot.
+    func withSlot<T: Sendable>(
+        timeoutNs: UInt64,
+        interpose: (@Sendable () -> Void)? = nil,
+        _ body: @Sendable () async throws -> T
+    ) async throws -> T {
         // Fast path: a free slot needs no timer and no child task.
         try Task.checkCancellation()
         if available > 0 {
@@ -95,6 +110,9 @@ actor VMLifecycleAdmission {
                 throw timeout
             }
         }
+        // Test seam (see `interpose`): lands between acquisition and the
+        // guard below. nil for every production caller.
+        interpose?()
         // The slot is held on every path that reaches here. One more gap
         // remains on the queued path: the acquirer may have completed
         // successfully BEFORE the calling task was cancelled — cancelling a

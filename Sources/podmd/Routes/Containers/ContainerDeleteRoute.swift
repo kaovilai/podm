@@ -27,16 +27,10 @@ extension ContainerDeleteRoute {
             let snapshot = try? await client.getContainer(id: id)
             let cached = await ContainerInfoCache.shared.get(id: id)
 
-            let eventImage = snapshot?.configuration.image.reference ?? cached?.image ?? ""
-            let eventName = snapshot?.id ?? cached?.nativeId ?? id
-            let eventLabels =
-                snapshot.map { LabelNormalization.restore($0.configuration.labels) }
-                ?? cached?.labels ?? [:]
             // Use the canonical 64-char Docker ID so the destroy event matches the id
             // carried by create/start/die — derived from the snapshot, then the cache,
             // falling back to the request reference only when neither is available.
-            let eventId = snapshot.map { DockerContainerID.hexId(for: $0) } ?? cached?.hexId ?? id
-            let nativeId = snapshot?.id ?? cached?.nativeId
+            let eagerHexId = snapshot.map { DockerContainerID.hexId(for: $0) } ?? cached?.hexId ?? id
             // Captured EAGERLY: the late-success cleanup below runs after
             // this request's response has been sent, when the Request (and
             // its application storage) must no longer be touched.
@@ -55,21 +49,62 @@ extension ContainerDeleteRoute {
             /// container's cleanup. A FAILED replacement lookup counts as
             /// "a replacement may exist": only a successful lookup returning
             /// nil proves the native id unowned.
-            let finalizeRemove: @Sendable (_ checkForReplacement: Bool) async -> Void = { checkForReplacement in
-                await ContainerDestroyCleanup.finalize(
-                    client: client,
-                    broadcaster: broadcaster,
-                    hexId: eventId,
-                    nativeId: nativeId,
-                    image: eventImage,
-                    name: eventName,
-                    labels: eventLabels,
-                    checkForReplacement: checkForReplacement
-                )
+            func makeFinalizer(
+                hexId: String,
+                nativeId: String?,
+                image: String,
+                name: String,
+                labels: [String: String]
+            ) -> @Sendable (_ checkForReplacement: Bool) async -> Void {
+                { checkForReplacement in
+                    await ContainerDestroyCleanup.finalize(
+                        client: client,
+                        broadcaster: broadcaster,
+                        hexId: hexId,
+                        nativeId: nativeId,
+                        image: image,
+                        name: name,
+                        labels: labels,
+                        checkForReplacement: checkForReplacement
+                    )
+                }
             }
+
+            /// Eager identity — the best-effort snapshot, then the cache. The
+            /// 404 fallback below only finalizes when one of them existed,
+            /// so its finalization is never keyed by the bare request
+            /// reference.
+            let eagerFinalizer = makeFinalizer(
+                hexId: eagerHexId,
+                nativeId: snapshot?.id ?? cached?.nativeId,
+                image: snapshot?.configuration.image.reference ?? cached?.image ?? "",
+                name: snapshot?.id ?? cached?.nativeId ?? id,
+                labels: snapshot.map { LabelNormalization.restore($0.configuration.labels) }
+                    ?? cached?.labels ?? [:]
+            )
 
             do {
                 let container = try await client.getContainer(id: id)
+
+                // Refresh the finalization identity from the AUTHORITATIVE
+                // lookup when it succeeds: the eager capture above can be
+                // degenerate — a failed best-effort lookup with no cache
+                // entry leaves only the request reference (a REUSABLE name)
+                // and no native id — which would key the once-only
+                // finalizer gate by the name (suppressing a later
+                // same-name instance's cleanup), skip the native-keyed
+                // teardown (log journal, restart counter) and emit the
+                // destroy event under the wrong Actor.ID.
+                let finalizeRemove =
+                    container.map { found in
+                        makeFinalizer(
+                            hexId: DockerContainerID.hexId(for: found),
+                            nativeId: found.id,
+                            image: found.configuration.image.reference,
+                            name: found.id,
+                            labels: LabelNormalization.restore(found.configuration.labels)
+                        )
+                    } ?? eagerFinalizer
 
                 // Docker Engine API: removing a running container requires force=true.
                 // Checked before any side effect (healthcheck stop, DNS cleanup) so a
@@ -121,9 +156,16 @@ extension ContainerDeleteRoute {
                 // (rename reservations, log journal, destroy event) — scoped
                 // to THIS instance, never a same-name replacement.
                 try await client.delete(id: id, onLateSuccess: { await finalizeRemove(true) })
+
+                // The delete succeeded in THIS request — no same-name
+                // replacement can exist yet (the apiserver serializes container
+                // operations), so the native-keyed teardown is unconditional.
+                await finalizeRemove(false)
+                // Docker Engine API: DELETE /containers/{id} returns 204 No Content.
+                return .noContent
             } catch ClientContainerError.notFound {
                 if snapshot != nil || cached != nil {
-                    await finalizeRemove(true)
+                    await eagerFinalizer(true)
                 }
                 // An earlier finalization (a prune, or a late wedge-recovery
                 // success) may have left this instance's native-keyed
@@ -134,7 +176,7 @@ extension ContainerDeleteRoute {
                 // recovers: one bounded re-check (no-op without a pending
                 // marker — e.g. when the reference is a native or short id
                 // that cannot name the hex-keyed marker).
-                await ContainerDestroyCleanup.retryUnresolvedNativeCleanup(client: client, hexId: eventId)
+                await ContainerDestroyCleanup.retryUnresolvedNativeCleanup(client: client, hexId: eagerHexId)
                 throw Abort(.notFound, reason: "No such container: \(id)")
             } catch ClientContainerError.ambiguousId(let reference, let matches) {
                 let matchList = matches.joined(separator: ", ")
@@ -170,13 +212,6 @@ extension ContainerDeleteRoute {
                 req.logger.error("Failed to delete container \(id): \(error)")
                 throw Abort(.internalServerError, reason: "Failed to delete container: \(error)")
             }
-
-            // The delete succeeded in THIS request — no same-name
-            // replacement can exist yet (the apiserver serializes container
-            // operations), so the native-keyed teardown is unconditional.
-            await finalizeRemove(false)
-            // Docker Engine API: DELETE /containers/{id} returns 204 No Content.
-            return .noContent
         }
     }
 }

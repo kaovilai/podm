@@ -102,6 +102,14 @@ struct VMLifecycleAdmissionTests {
 
     @Test("A caller cancelled after its acquisition succeeded never runs its body — the slot is handed back")
     func cancelledAfterAcquisitionNeverRunsBody() async throws {
+        // The SLOT-LEAK hammer: cancellation is fired from outside, so where
+        // it lands relative to withSlot's post-acquisition guard is up to the
+        // scheduler (see the comment below the loop). What this test pins is
+        // the invariant that holds on every interleaving — the slot always
+        // comes back. The guard itself (cancellation observed after
+        // acquisition ⇒ body never entered) is pinned deterministically by
+        // postAcquisitionCancellationIsGuarded below via the `interpose`
+        // seam.
         actor CancelledBodyRuns {
             private(set) var count = 0
             func record(_ cancelled: Bool) {
@@ -159,6 +167,58 @@ struct VMLifecycleAdmissionTests {
             let probe = try await admission.withSlot { true }
             #expect(probe)
         }
+    }
+
+    @Test("Cancellation landing between acquisition and the guard never enters the body — the slot is handed back")
+    func postAcquisitionCancellationIsGuarded() async throws {
+        actor BodyRuns {
+            private(set) var count = 0
+            func record() { count += 1 }
+        }
+
+        let admission = VMLifecycleAdmission(limit: 1)
+        let bodyRuns = BodyRuns()
+        let holderAcquired = AsyncStream<Void>.makeStream()
+        let releaseHolder = AsyncStream<Void>.makeStream()
+
+        let holder = Task {
+            try await admission.withSlot {
+                holderAcquired.continuation.yield(())
+                for await _ in releaseHolder.stream { break }
+            }
+        }
+        var acquiredIterator = holderAcquired.stream.makeAsyncIterator()
+        _ = await acquiredIterator.next()
+
+        let caller = Task {
+            try await admission.withSlot(
+                timeoutNs: 60_000_000_000,
+                interpose: {
+                    // Cancel the CALLING task exactly between its successful
+                    // acquisition and the post-acquisition guard — the gap
+                    // the hammer above cannot target deterministically.
+                    withUnsafeCurrentTask { $0?.cancel() }
+                }
+            ) {
+                await bodyRuns.record()
+            }
+        }
+        try? await Task.sleep(nanoseconds: 10_000_000)  // let the caller queue
+
+        releaseHolder.continuation.yield(())
+        releaseHolder.continuation.finish()
+
+        await #expect(throws: CancellationError.self) {
+            try await caller.value
+        }
+        #expect(
+            await bodyRuns.count == 0,
+            "cancellation observed after acquisition must prevent the body from ever running")
+        // The slot came back: the next caller is admitted immediately (a
+        // leak here hangs to the test's time limit).
+        let probe = try await admission.withSlot { true }
+        #expect(probe)
+        _ = try await holder.value
     }
 
     @Test("A caller already cancelled before acquire() ever runs is still never admitted")
