@@ -13,6 +13,10 @@ struct RESTContainerPruneResponse: Content {
 
 struct ContainerPruneRoute: RouteCollection {
     let client: ClientContainerProtocol
+    /// Per-finalize replacement-lookup budget for this route's cleanup;
+    /// injectable so tests can shrink it. Production uses the shared
+    /// default.
+    var replacementLookupTimeoutNs: UInt64 = ContainerDestroyCleanup.replacementLookupTimeoutNs
 
     func boot(routes: RoutesBuilder) throws {
         try routes.registerVersionedRoute(.POST, pattern: "/containers/prune", use: handler)
@@ -60,6 +64,13 @@ extension ContainerPruneRoute {
             /// replacement lookup must not read as "no replacement
             /// exists": the replacement's journal and restart state are
             /// preserved unless a successful lookup confirms absence.
+            // One shared lookup-health flag covers the WHOLE request: once
+            // one finalize's replacement lookup times out (the apiserver
+            // stopped answering), later finalizes skip the lookup and treat
+            // the native id as unanswered — without this, a prune of N
+            // containers could stall N × the lookup timeout in lookups
+            // alone; with it, the worst case is ≈ one timeout per request.
+            let lookupHealth = ContainerDestroyCleanup.ReplacementLookupHealth()
             let finalizeLateDelete: @Sendable (_ nativeId: String, _ hexId: String) async -> Void = { nativeId, hexId in
                 let snapshot = snapshotByID[hexId] ?? snapshotByID[nativeId]
                 await ContainerDestroyCleanup.finalize(
@@ -70,7 +81,9 @@ extension ContainerPruneRoute {
                     image: snapshot?.configuration.image.reference ?? "",
                     name: snapshot?.id ?? nativeId,
                     labels: LabelNormalization.restore(snapshot?.configuration.labels ?? [:]),
-                    checkForReplacement: true
+                    checkForReplacement: true,
+                    replacementLookupTimeoutNs: replacementLookupTimeoutNs,
+                    lookupHealth: lookupHealth
                 )
             }
 

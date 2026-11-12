@@ -153,6 +153,9 @@ struct ContainerDestroyCleanupTests {
             await ContainerInfoCache.shared.get(id: nativeId)?.hexId == replacementHex,
             "the replacement keeps the native cache key")
         #expect(await ContainerInfoCache.shared.get(id: originalHex) == nil, "the original's hex key is dropped")
+        #expect(
+            await ContainerDestroyFinalizer.shared.unresolvedNativeId(hexId: originalHex) == nil,
+            "a CONFIRMED live replacement leaves nothing pending — the skip was the answer, not an open question")
         let destroys = await broadcaster.snapshot(since: 1, until: nil) { $0.status == "destroy" }
         #expect(destroys.count == 1)
         #expect(destroys.first?.id == originalHex, "the destroy event identifies the ORIGINAL instance")
@@ -247,6 +250,163 @@ struct ContainerDestroyCleanupTests {
         #expect(
             await ContainerLogJournal.shared.entries(nativeId: nativeId).isEmpty == false,
             "an unanswered lookup preserves the native-keyed state")
+    }
+
+    /// Review round 5 (CodeRabbit 4546087749): finalizeOnce marks the HEX
+    /// key complete even when the ownership lookup went unanswered —
+    /// without a tracked marker, the exactly-once gate would make the
+    /// skipped native-keyed cleanup permanent, so a later DELETE 404
+    /// fallback could never re-attempt it after the apiserver recovers.
+    @Test(
+        "a failed replacement lookup marks the native-keyed cleanup unresolved",
+        .timeLimit(.minutes(1))
+    )
+    func failedLookupMarksNativeCleanupUnresolved() async throws {
+        let nativeId = "cleanup-unres-ctr-2c4"
+        let snapshot = Self.snapshot(id: nativeId, createdAt: 7600)
+        let hexId = DockerContainerID.hexId(for: snapshot)
+        await ContainerLogJournal.shared.beginBoot(nativeId: nativeId, epoch: 1)
+        await ContainerLogJournal.shared.append(
+            nativeId: nativeId, epoch: 1,
+            [ContainerLogJournal.Entry(unixNano: 1, streamType: 1, bytes: Data("pend\n".utf8))])
+        _ = await ContainerRestartState.shared.nextAttempt(id: nativeId)
+
+        await ContainerDestroyCleanup.finalize(
+            client: LookupFailingMock(),
+            broadcaster: EventBroadcaster(),
+            hexId: hexId,
+            nativeId: nativeId,
+            image: "alpine:latest",
+            name: nativeId,
+            labels: [:],
+            checkForReplacement: true
+        )
+
+        #expect(
+            await ContainerDestroyFinalizer.shared.unresolvedNativeId(hexId: hexId) == nativeId,
+            "the pending native-keyed cleanup is tracked on the finalizer, not silently dropped by the once-only gate")
+    }
+
+    @Test(
+        "a later healthy re-check runs the deferred native teardown, clears the marker, and adds no destroy event",
+        .timeLimit(.minutes(1))
+    )
+    func healthyRecheckCompletesDeferredNativeTeardown() async throws {
+        let nativeId = "cleanup-retry-ctr-4d8"
+        let snapshot = Self.snapshot(id: nativeId, createdAt: 7700)
+        let hexId = DockerContainerID.hexId(for: snapshot)
+        await ContainerLogJournal.shared.beginBoot(nativeId: nativeId, epoch: 1)
+        await ContainerLogJournal.shared.append(
+            nativeId: nativeId, epoch: 1,
+            [ContainerLogJournal.Entry(unixNano: 1, streamType: 1, bytes: Data("pend\n".utf8))])
+        _ = await ContainerRestartState.shared.nextAttempt(id: nativeId)
+
+        // The original finalization: the apiserver was failing, so the
+        // native-keyed teardown was skipped and left pending.
+        let broadcaster = EventBroadcaster()
+        await ContainerDestroyCleanup.finalize(
+            client: LookupFailingMock(),
+            broadcaster: broadcaster,
+            hexId: hexId,
+            nativeId: nativeId,
+            image: "alpine:latest",
+            name: nativeId,
+            labels: [:],
+            checkForReplacement: true
+        )
+        #expect(
+            await ContainerDestroyFinalizer.shared.unresolvedNativeId(hexId: hexId) == nativeId)
+
+        // The apiserver recovered: the DELETE 404 fallback's re-check.
+        await ContainerDestroyCleanup.retryUnresolvedNativeCleanup(
+            client: AbsentContainerMock(), hexId: hexId)
+
+        #expect(
+            await ContainerLogJournal.shared.entries(nativeId: nativeId).isEmpty,
+            "the deferred journal teardown ran")
+        #expect(
+            await ContainerRestartState.shared.count(id: nativeId) == 0,
+            "the deferred restart-counter reset ran")
+        #expect(
+            await ContainerDestroyFinalizer.shared.unresolvedNativeId(hexId: hexId) == nil,
+            "the marker is cleared once ownership was resolved")
+        let destroys = await broadcaster.snapshot(since: 1, until: nil) { $0.status == "destroy" }
+        #expect(
+            destroys.count == 1,
+            "the destroy event fired exactly once across the original finalization and the re-check — the re-check does not re-emit")
+    }
+
+    @Test(
+        "an unanswered re-check leaves the marker for a later fallback",
+        .timeLimit(.minutes(1))
+    )
+    func unansweredRecheckKeepsMarker() async throws {
+        let nativeId = "cleanup-still-ctr-6e2"
+        let snapshot = Self.snapshot(id: nativeId, createdAt: 7800)
+        let hexId = DockerContainerID.hexId(for: snapshot)
+        await ContainerLogJournal.shared.beginBoot(nativeId: nativeId, epoch: 1)
+        await ContainerLogJournal.shared.append(
+            nativeId: nativeId, epoch: 1,
+            [ContainerLogJournal.Entry(unixNano: 1, streamType: 1, bytes: Data("pend\n".utf8))])
+
+        await ContainerDestroyCleanup.finalize(
+            client: HangingLookupMock(),
+            broadcaster: EventBroadcaster(),
+            hexId: hexId,
+            nativeId: nativeId,
+            image: "alpine:latest",
+            name: nativeId,
+            labels: [:],
+            checkForReplacement: true,
+            replacementLookupTimeoutNs: 200_000_000
+        )
+        // The fallback's re-check while the apiserver is STILL wedged.
+        await ContainerDestroyCleanup.retryUnresolvedNativeCleanup(
+            client: HangingLookupMock(), hexId: hexId, replacementLookupTimeoutNs: 200_000_000)
+
+        #expect(
+            await ContainerDestroyFinalizer.shared.unresolvedNativeId(hexId: hexId) == nativeId,
+            "an unanswered re-check keeps the marker — a later fallback can try again")
+        #expect(
+            await ContainerLogJournal.shared.entries(nativeId: nativeId).isEmpty == false,
+            "the native-keyed state is still preserved")
+    }
+
+    @Test(
+        "a re-check finding a live replacement clears the marker without tearing down",
+        .timeLimit(.minutes(1))
+    )
+    func recheckFindingReplacementClearsMarker() async throws {
+        let nativeId = "cleanup-owned-ctr-8f4"
+        let original = Self.snapshot(id: nativeId, createdAt: 7900)
+        let replacement = Self.snapshot(id: nativeId, createdAt: 7950)
+        let hexId = DockerContainerID.hexId(for: original)
+        await ContainerLogJournal.shared.beginBoot(nativeId: nativeId, epoch: 1)
+        await ContainerLogJournal.shared.append(
+            nativeId: nativeId, epoch: 1,
+            [ContainerLogJournal.Entry(unixNano: 1, streamType: 1, bytes: Data("live\n".utf8))])
+
+        await ContainerDestroyCleanup.finalize(
+            client: LookupFailingMock(),
+            broadcaster: EventBroadcaster(),
+            hexId: hexId,
+            nativeId: nativeId,
+            image: "alpine:latest",
+            name: nativeId,
+            labels: [:],
+            checkForReplacement: true
+        )
+        // The fallback's re-check now resolves the native id to the live
+        // same-name replacement.
+        await ContainerDestroyCleanup.retryUnresolvedNativeCleanup(
+            client: SnapshotClientMock(snapshot: replacement), hexId: hexId)
+
+        #expect(
+            await ContainerDestroyFinalizer.shared.unresolvedNativeId(hexId: hexId) == nil,
+            "the marker is cleared — the skip was correct, nothing is pending")
+        #expect(
+            await ContainerLogJournal.shared.entries(nativeId: nativeId).isEmpty == false,
+            "the live replacement's journal survives the re-check")
     }
 
     /// `getContainer` fails the way a transient apiserver error does —

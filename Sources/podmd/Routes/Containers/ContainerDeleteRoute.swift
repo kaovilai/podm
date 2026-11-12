@@ -125,6 +125,16 @@ extension ContainerDeleteRoute {
                 if snapshot != nil || cached != nil {
                     await finalizeRemove(true)
                 }
+                // An earlier finalization (a prune, or a late wedge-recovery
+                // success) may have left this instance's native-keyed
+                // cleanup PENDING — its ownership lookup failed or timed
+                // out, so the journal teardown and restart-counter reset
+                // were skipped to protect a possible same-name replacement.
+                // This fallback is the retry point once the apiserver
+                // recovers: one bounded re-check (no-op without a pending
+                // marker — e.g. when the reference is a native or short id
+                // that cannot name the hex-keyed marker).
+                await ContainerDestroyCleanup.retryUnresolvedNativeCleanup(client: client, hexId: eventId)
                 throw Abort(.notFound, reason: "No such container: \(id)")
             } catch ClientContainerError.ambiguousId(let reference, let matches) {
                 let matchList = matches.joined(separator: ", ")

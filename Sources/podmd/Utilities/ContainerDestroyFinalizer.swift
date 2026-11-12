@@ -16,6 +16,17 @@ import Foundation
 /// answering the duplicate before the body finished would let its caller
 /// (e.g. a DELETE 404 fallback) respond while the rename override still
 /// exists, so a create of the same name in that window gets a spurious 409.
+///
+/// A completed finalization whose ownership lookup went unanswered keeps a
+/// per-hex "native cleanup unresolved" marker (hex id → native id): the
+/// hex-keyed cleanup ran, but the native-keyed teardown (log journal,
+/// restart counter) was skipped because ownership could not be checked.
+/// The marker outlives the `completed` entry's exactly-once gate — without
+/// it, that gate would make the skip permanent, so a later DELETE 404
+/// fallback could never re-attempt the native-keyed cleanup even after the
+/// apiserver recovers. The marker is cleared when a re-check resolves
+/// ownership (see `ContainerDestroyCleanup.retryUnresolvedNativeCleanup`)
+/// and expires with the same TTL as `completed`.
 actor ContainerDestroyFinalizer {
     static let shared = ContainerDestroyFinalizer()
 
@@ -27,6 +38,25 @@ actor ContainerDestroyFinalizer {
 
     private var inFlight: [String: Task<Void, Never>] = [:]
     private var completed: [String: Date] = [:]
+    private var unresolvedNativeCleanup: [String: (nativeId: String, markedAt: Date)] = [:]
+
+    /// Records that `hexId`'s finalization could not determine whether a
+    /// same-name replacement owns the native-keyed state, so the
+    /// native-keyed teardown is still pending.
+    func markNativeCleanupUnresolved(hexId: String, nativeId: String) {
+        unresolvedNativeCleanup[hexId] = (nativeId, Date())
+    }
+
+    /// The native id whose teardown is still pending for `hexId`, if any.
+    func unresolvedNativeId(hexId: String) -> String? {
+        unresolvedNativeCleanup[hexId]?.nativeId
+    }
+
+    /// Drops the pending marker — ownership was resolved (the teardown ran,
+    /// or a live replacement proved the skip correct).
+    func clearNativeCleanupUnresolved(hexId: String) {
+        unresolvedNativeCleanup.removeValue(forKey: hexId)
+    }
 
     /// Runs `body` for `key` unless this finalizer already ran (or is
     /// running) for it. The body is instance-scoped by construction: it is
@@ -49,6 +79,7 @@ actor ContainerDestroyFinalizer {
     private func prune() {
         let cutoff = Date().addingTimeInterval(-Self.memoryTTL)
         completed = completed.filter { $0.value > cutoff }
+        unresolvedNativeCleanup = unresolvedNativeCleanup.filter { $0.value.markedAt > cutoff }
         if completed.count > Self.maxMemory {
             let newest = completed.sorted { $0.value > $1.value }.prefix(Self.maxMemory)
             completed = Dictionary(uniqueKeysWithValues: newest.map { ($0.key, $0.value) })

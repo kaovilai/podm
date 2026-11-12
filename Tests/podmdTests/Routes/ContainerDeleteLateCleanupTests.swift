@@ -317,6 +317,141 @@ struct ContainerDeleteLateCleanupTests {
             "the replacement's journal must survive the original's late cleanup")
     }
 
+    /// Review round 5 (CodeRabbit 4546087743): the prune loop awaits each
+    /// finalize inline, and each finalize's replacement lookup can burn the
+    /// full lookup timeout when the apiserver stops answering — a prune of
+    /// N containers could stall N × the timeout in lookups alone. The
+    /// request now shares one lookup-health flag: after the FIRST timeout,
+    /// later finalizes in the same prune skip the lookup and treat the id
+    /// as unanswered (worst case ≈ one timeout per prune request).
+    @Test(
+        "a prune stops issuing replacement lookups after the first one times out",
+        .timeLimit(.minutes(1))
+    )
+    func pruneStopsIssuingLookupsAfterFirstTimeout() async throws {
+        let first = Self.snapshot(id: "prune-hang-ctr-1a2", createdAt: 8100)
+        let second = Self.snapshot(id: "prune-hang-ctr-3b4", createdAt: 8200)
+        let firstHex = DockerContainerID.hexId(for: first)
+        let secondHex = DockerContainerID.hexId(for: second)
+        for nativeId in [first.id, second.id] {
+            await ContainerLogJournal.shared.beginBoot(nativeId: nativeId, epoch: 1)
+            await ContainerLogJournal.shared.append(
+                nativeId: nativeId, epoch: 1,
+                [ContainerLogJournal.Entry(unixNano: 1, streamType: 1, bytes: Data("j\n".utf8))])
+        }
+
+        let state = LookupCallCounter()
+        let mock = HangingLookupPruneMock(snapshots: [first, second], state: state)
+        let broadcaster = EventBroadcaster()
+
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+            app.storage[EventBroadcasterKey.self] = broadcaster
+            try app.register(
+                collection: ContainerPruneRoute(
+                    client: mock, replacementLookupTimeoutNs: 200_000_000))
+
+            try await app.testing().test(.POST, "/v1.51/containers/prune") { res async in
+                #expect(res.status == .ok)
+                #expect(res.body.string.contains(first.id))
+                #expect(res.body.string.contains(second.id))
+            }
+        }
+
+        #expect(
+            await state.count == 1,
+            "only the FIRST deleted container pays the lookup timeout — the second must not issue a lookup at all")
+        // Skipped lookups count as unanswered, not as confirmed absence:
+        // both native-keyed states are preserved AND tracked as pending.
+        for (nativeId, hexId) in [(first.id, firstHex), (second.id, secondHex)] {
+            #expect(
+                await ContainerLogJournal.shared.entries(nativeId: nativeId).isEmpty == false,
+                "an unanswered (skipped) lookup preserves the native-keyed state")
+            #expect(
+                await ContainerDestroyFinalizer.shared.unresolvedNativeId(hexId: hexId) == nativeId,
+                "the skipped lookup's native-keyed cleanup is tracked as pending")
+        }
+        let destroys = await broadcaster.snapshot(since: 1, until: nil) { $0.status == "destroy" }
+        #expect(destroys.count == 2, "both containers still get their destroy events")
+    }
+
+    /// Review round 5 (CodeRabbit 4546087749): a prune whose replacement
+    /// lookup failed leaves the native-keyed cleanup pending (tracked on
+    /// the finalizer) — the DELETE 404 fallback is the retry point once the
+    /// apiserver recovers: it re-attempts the teardown, without re-emitting
+    /// the destroy event.
+    @Test(
+        "the DELETE 404 fallback retries a native-keyed cleanup a failed prune lookup left pending",
+        .timeLimit(.minutes(1))
+    )
+    func deleteFallbackRetriesUnresolvedNativeCleanup() async throws {
+        let nativeId = "fallback-retry-ctr-6f1"
+        let snapshot = Self.snapshot(id: nativeId, createdAt: 8300)
+        let hexId = DockerContainerID.hexId(for: snapshot)
+        await ContainerLogJournal.shared.beginBoot(nativeId: nativeId, epoch: 1)
+        await ContainerLogJournal.shared.append(
+            nativeId: nativeId, epoch: 1,
+            [ContainerLogJournal.Entry(unixNano: 1, streamType: 1, bytes: Data("w\n".utf8))])
+        _ = await ContainerRestartState.shared.nextAttempt(id: nativeId)
+
+        // The prune: the container is deleted, but its finalize's
+        // replacement lookup FAILED (transient apiserver error) — the
+        // native-keyed teardown was skipped and left pending.
+        let broadcaster = EventBroadcaster()
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+            app.storage[EventBroadcasterKey.self] = broadcaster
+            try app.register(
+                collection: ContainerPruneRoute(client: LookupFailingPruneMock(snapshot: snapshot)))
+
+            try await app.testing().test(.POST, "/v1.51/containers/prune") { res async in
+                #expect(res.status == .ok)
+                #expect(res.body.string.contains(nativeId))
+            }
+        }
+        #expect(
+            await ContainerLogJournal.shared.entries(nativeId: nativeId).isEmpty == false,
+            "the failed lookup preserved the native-keyed state")
+        #expect(
+            await ContainerDestroyFinalizer.shared.unresolvedNativeId(hexId: hexId) == nativeId,
+            "the prune left the native-keyed cleanup pending")
+
+        // The client retries the delete by hex id: the container is gone
+        // (healthy getContainer answers nil, the delete 404s) — the
+        // fallback's re-check resolves ownership and completes the
+        // deferred teardown.
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+            app.storage[EventBroadcasterKey.self] = broadcaster
+            try app.register(
+                collection: ContainerDeleteRoute(client: AbsentNotFoundDeleteMock()))
+
+            try await app.testing().test(.DELETE, "/v1.51/containers/\(hexId)") { res async in
+                #expect(res.status == .notFound)
+            }
+        }
+
+        #expect(
+            await ContainerLogJournal.shared.entries(nativeId: nativeId).isEmpty,
+            "the fallback's re-check completed the deferred journal teardown")
+        #expect(
+            await ContainerRestartState.shared.count(id: nativeId) == 0,
+            "the fallback's re-check completed the deferred restart-counter reset")
+        #expect(
+            await ContainerDestroyFinalizer.shared.unresolvedNativeId(hexId: hexId) == nil,
+            "the pending marker is cleared")
+        let destroys = await broadcaster.snapshot(since: 1, until: nil) { $0.status == "destroy" }
+        #expect(
+            destroys.count == 1,
+            "exactly one destroy event across the prune and the fallback's retry")
+    }
+
     // MARK: helpers
 
     private static func snapshot(id: String, createdAt: TimeInterval) -> ContainerSnapshot {
@@ -601,3 +736,169 @@ private struct ServiceIdentityPruneMock: ClientContainerProtocol {
         return ([unlistedSnapshot.id], 0)
     }
 }
+
+/// Counts `getContainer` calls from any task.
+private actor LookupCallCounter {
+    private(set) var count = 0
+    func record() { count += 1 }
+}
+
+/// A prune that deletes every listed container in-window (calling onDelete
+/// per container, like the production service's loop) while every
+/// replacement lookup hangs forever — the wedged-apiserver shape (issue
+/// #45). Each hanging lookup is counted.
+private struct HangingLookupPruneMock: ClientContainerProtocol {
+    let snapshots: [ContainerSnapshot]
+    let state: LookupCallCounter
+
+    func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] {
+        snapshots
+    }
+
+    func getContainer(id: String) async throws -> ContainerSnapshot? {
+        await state.record()
+        // Neither nil nor an error — just silence.
+        return await withCheckedContinuation {
+            (_: CheckedContinuation<ContainerSnapshot?, Never>) in
+        }
+    }
+
+    func enforceContainerRunning(container: ContainerSnapshot) throws {}
+
+    @discardableResult
+    func start(id: String, detachKeys: String?) async throws -> Bool { true }
+
+    func stop(id: String, signal: String?, timeout: Int?) async throws {}
+
+    @discardableResult
+    func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool { true }
+
+    func kill(id: String, signal: String?) async throws {}
+
+    func delete(id: String) async throws {}
+
+    func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait {
+        RESTContainerWait(statusCode: 0)
+    }
+
+    func prune(filters: [String: [String]]) async throws -> (
+        deletedContainers: [String], spaceReclaimed: Int64
+    ) {
+        ([], 0)
+    }
+
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+        try await prune(filters: filters, onLateDelete: onLateDelete, onDelete: nil)
+    }
+
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?,
+        onDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+        for snapshot in snapshots {
+            await onDelete?(snapshot.id, DockerContainerID.hexId(for: snapshot))
+        }
+        return (snapshots.map(\.id), 0)
+    }
+}
+
+/// A prune that deletes its one container in-window while every replacement
+/// lookup FAILS (a transient apiserver error — not confirmed absence).
+private struct LookupFailingPruneMock: ClientContainerProtocol {
+    let snapshot: ContainerSnapshot
+
+    func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] {
+        [snapshot]
+    }
+
+    func getContainer(id: String) async throws -> ContainerSnapshot? {
+        throw TransientLookupFailure()
+    }
+
+    func enforceContainerRunning(container: ContainerSnapshot) throws {}
+
+    @discardableResult
+    func start(id: String, detachKeys: String?) async throws -> Bool { true }
+
+    func stop(id: String, signal: String?, timeout: Int?) async throws {}
+
+    @discardableResult
+    func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool { true }
+
+    func kill(id: String, signal: String?) async throws {}
+
+    func delete(id: String) async throws {}
+
+    func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait {
+        RESTContainerWait(statusCode: 0)
+    }
+
+    func prune(filters: [String: [String]]) async throws -> (
+        deletedContainers: [String], spaceReclaimed: Int64
+    ) {
+        ([], 0)
+    }
+
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+        try await prune(filters: filters, onLateDelete: onLateDelete, onDelete: nil)
+    }
+
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?,
+        onDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+        await onDelete?(snapshot.id, DockerContainerID.hexId(for: snapshot))
+        return ([snapshot.id], 0)
+    }
+}
+
+/// A healthy apiserver for a container that is already gone: lookups
+/// answer nil (confirmed absence), the delete itself 404s — the DELETE
+/// route's fallback shape.
+private struct AbsentNotFoundDeleteMock: ClientContainerProtocol {
+    func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { [] }
+
+    func getContainer(id: String) async throws -> ContainerSnapshot? { nil }
+
+    func enforceContainerRunning(container: ContainerSnapshot) throws {}
+
+    @discardableResult
+    func start(id: String, detachKeys: String?) async throws -> Bool { true }
+
+    func stop(id: String, signal: String?, timeout: Int?) async throws {}
+
+    @discardableResult
+    func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool { true }
+
+    func kill(id: String, signal: String?) async throws {}
+
+    func delete(id: String) async throws {
+        throw ClientContainerError.notFound(id: id)
+    }
+
+    func delete(id: String, onLateSuccess: (@Sendable () async -> Void)?) async throws {
+        throw ClientContainerError.notFound(id: id)
+    }
+
+    func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait {
+        RESTContainerWait(statusCode: 0)
+    }
+
+    func prune(filters: [String: [String]]) async throws -> (
+        deletedContainers: [String], spaceReclaimed: Int64
+    ) {
+        ([], 0)
+    }
+}
+
+/// A transient apiserver failure (shared shape with the cleanup tests'
+/// mock): NOT a confirmed absence.
+private struct TransientLookupFailure: Error {}
