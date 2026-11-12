@@ -100,6 +100,64 @@ struct VMLifecycleAdmissionTests {
         #expect(await ran.value == false, "a cancelled waiter must never run its body")
     }
 
+    @Test("A caller cancelled after its acquisition succeeded never runs its body — the slot is handed back")
+    func cancelledAfterAcquisitionNeverRunsBody() async throws {
+        actor CancelledBodyRuns {
+            private(set) var count = 0
+            func record(_ cancelled: Bool) {
+                if cancelled { count += 1 }
+            }
+        }
+
+        // Hammer the gap: release the only slot and cancel the queued
+        // caller as close behind as the scheduler allows. Some iterations
+        // land the cancellation while the caller is still resuming from its
+        // SUCCESSFUL acquisition (cancelling a completed acquirer does not
+        // change its result, so the race returns .acquired) — the body must
+        // never observe a cancelled task, and the slot must come back.
+        for _ in 0..<100 {
+            let admission = VMLifecycleAdmission(limit: 1)
+            let cancelledBodies = CancelledBodyRuns()
+            let holderAcquired = AsyncStream<Void>.makeStream()
+            let releaseHolder = AsyncStream<Void>.makeStream()
+
+            let holder = Task {
+                try await admission.withSlot {
+                    holderAcquired.continuation.yield(())
+                    for await _ in releaseHolder.stream { break }
+                }
+            }
+            var acquiredIterator = holderAcquired.stream.makeAsyncIterator()
+            _ = await acquiredIterator.next()
+
+            let caller = Task {
+                try await admission.withSlot(timeoutNs: 60_000_000_000) {
+                    // Read synchronously at body entry: the fix's
+                    // post-acquire check and this read are one synchronous
+                    // sequence, so a body that observes cancellation is a
+                    // body that STARTED cancelled.
+                    let cancelledAtStart = Task.isCancelled
+                    await cancelledBodies.record(cancelledAtStart)
+                }
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)  // let the caller queue
+
+            releaseHolder.continuation.yield(())
+            releaseHolder.continuation.finish()
+            caller.cancel()
+            _ = try await holder.value
+            _ = (try? await caller.value) ?? nil
+
+            #expect(
+                await cancelledBodies.count == 0,
+                "the body must never start in a cancelled task")
+            // No slot leaked: the very next call must be admitted (a leak
+            // here hangs to the test's time limit).
+            let probe = try await admission.withSlot { true }
+            #expect(probe)
+        }
+    }
+
     @Test("A caller already cancelled before acquire() ever runs is still never admitted")
     func preCancelledCallerNeverAdmitted() async throws {
         for _ in 0..<200 {

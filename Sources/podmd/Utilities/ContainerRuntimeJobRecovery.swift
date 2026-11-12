@@ -119,6 +119,35 @@ enum ContainerRuntimeJobRecovery {
         }
     }
 
+    /// The operation's own completion, recorded the moment it happens —
+    /// synchronously inside the operation's task, NOT merely when a racing
+    /// timer observes it. The first-window timer can win while the
+    /// operation is finishing concurrently; the bootout scheduling and
+    /// claiming decisions in `withHangRecovery` consult this latch so a
+    /// bootout is never scheduled or run for an operation that already
+    /// completed. Without it, an operation finishing in the gap between
+    /// the timer winning and `schedule` registering the bootout leaves the
+    /// registry still clear — a same-name replacement's create/start waits
+    /// for nothing, and the bootout task can claim its token before the
+    /// second race's `operationFinished` suppresses it, killing the
+    /// replacement's freshly-registered runtime job.
+    final class OperationCompletion: @unchecked Sendable {
+        private let lock = NSLock()
+        private var finished = false
+
+        var isFinished: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return finished
+        }
+
+        func markFinished() {
+            lock.lock()
+            finished = true
+            lock.unlock()
+        }
+    }
+
     /// Coordination between outstanding recovery bootouts and the
     /// create/start of same-named containers. Native ids are REUSABLE names
     /// (`Utility.createContainerID(name:)` is the container name), so a
@@ -274,7 +303,13 @@ enum ContainerRuntimeJobRecovery {
     /// replacement has re-registered it, which is why the bootout is
     /// registered in `OutstandingBootoutRegistry`: one that has not
     /// STARTED when the operation finishes is suppressed, and create/start
-    /// of the native id wait for one that already started.
+    /// of the native id wait for one that already started. The operation's
+    /// completion is recorded by its own task (`OperationCompletion`) and
+    /// consulted both before the bootout is scheduled and when the bootout
+    /// task claims its token — the first timer can win while the operation
+    /// is finishing concurrently, and the registry alone would leave a
+    /// window between the timer winning and the bootout being registered
+    /// in which a same-name replacement passes the still-clear registry.
     ///
     /// After the final deadline the caller receives
     /// `ClientContainerError.runtimeJobWedged` while the operation task
@@ -303,7 +338,15 @@ enum ContainerRuntimeJobRecovery {
         onLateSuccess: (@Sendable () async -> Void)? = nil,
         _ operation: @escaping @Sendable () async throws -> Void
     ) async throws {
-        let task = Task<Void, Error> { try await operation() }
+        // Recorded by the operation's own task the moment it finishes, so
+        // the bootout decisions below see the completion no matter which
+        // observer (first race, second race, or the bootout task's claim)
+        // gets there first.
+        let completion = OperationCompletion()
+        let task = Task<Void, Error> {
+            defer { completion.markFinished() }
+            try await operation()
+        }
 
         switch await race(task, timeoutNs: firstWindowNs) {
         case .succeeded:
@@ -315,35 +358,48 @@ enum ContainerRuntimeJobRecovery {
         }
 
         let label = domainQualifiedLabel(runtimeHandler: runtimeHandler, nativeId: nativeId)
-        // Register the bootout as outstanding BEFORE spawning it: from here
-        // until it finishes (or is suppressed), create/start of this native
-        // id must wait — the id is a reusable name and a replacement's
-        // freshly-registered runtime job must not be caught by this bootout.
-        let token = await OutstandingBootoutRegistry.shared.schedule(label: label)
+        // The operation may have finished in the gap between the first
+        // timer winning and this point — while the registry is still
+        // clear, so a same-name replacement's create/start would not wait
+        // for anything. Skip the bootout entirely when the operation
+        // already completed: there is nothing to unwedge, and a bootout
+        // now could only hit a replacement's fresh runtime job.
+        let scheduledToken: UUID?
+        if completion.isFinished {
+            scheduledToken = nil
+        } else {
+            // Register the bootout as outstanding BEFORE spawning it: from here
+            // until it finishes (or is suppressed), create/start of this native
+            // id must wait — the id is a reusable name and a replacement's
+            // freshly-registered runtime job must not be caught by this bootout.
+            let token = await OutstandingBootoutRegistry.shared.schedule(label: label)
+            scheduledToken = token
 
-        // The hook blocks (launchctl waits for launchd to answer) — a
-        // detached task would still occupy a cooperative-pool worker, so it
-        // runs on a blocking-capable GCD queue instead. Deliberately NOT
-        // awaited: see the doc comment above.
-        _ = Task<Int32, Never>(priority: .utility) {
-            // Suppress recovery work that has not STARTED when the
-            // operation finishes: if the operation completed while this
-            // task was still queued, the job behind `label` may already
-            // belong to a same-name replacement — do nothing.
-            guard await OutstandingBootoutRegistry.shared.starting(label: label, token: token) else {
-                return 0
+            // The hook blocks (launchctl waits for launchd to answer) — a
+            // detached task would still occupy a cooperative-pool worker, so it
+            // runs on a blocking-capable GCD queue instead. Deliberately NOT
+            // awaited: see the doc comment above.
+            _ = Task<Int32, Never>(priority: .utility) {
+                await runRegisteredBootout(
+                    registry: .shared,
+                    label: label,
+                    token: token,
+                    completion: completion,
+                    bootout: bootout
+                )
             }
-            let status = await runBootout(bootout, label: label)
-            await OutstandingBootoutRegistry.shared.bootoutFinished(label: label)
-            return status
         }
 
         switch await race(task, timeoutNs: secondWindowNs) {
         case .succeeded:
-            await OutstandingBootoutRegistry.shared.operationFinished(label: label, token: token)
+            if let token = scheduledToken {
+                await OutstandingBootoutRegistry.shared.operationFinished(label: label, token: token)
+            }
             return
         case .failed(let error):
-            await OutstandingBootoutRegistry.shared.operationFinished(label: label, token: token)
+            if let token = scheduledToken {
+                await OutstandingBootoutRegistry.shared.operationFinished(label: label, token: token)
+            }
             throw error
         case nil:
             // Final deadline: the operation is abandoned. Mark it expired so
@@ -352,10 +408,43 @@ enum ContainerRuntimeJobRecovery {
             expiry?.expire()
             // The still-running operation may yet succeed once the wedge
             // clears. Watch it: on late success run the caller's cleanup,
-            // and suppress any bootout of ours that never started.
-            watchForLateCompletion(task, label: label, token: token, onLateSuccess: onLateSuccess)
+            // and suppress any bootout of ours that never started. (Also
+            // when no bootout was scheduled — the operation had already
+            // finished at first-window expiry, and the second race's timer
+            // nevertheless won the resume — the hook must still fire.)
+            watchForLateCompletion(task, label: label, token: scheduledToken, onLateSuccess: onLateSuccess)
             throw ClientContainerError.runtimeJobWedged(nativeId: nativeId, label: label)
         }
+    }
+
+    /// The bootout task's body: claims its scheduled token and runs the
+    /// (blocking) hook, unless the operation has already completed — the
+    /// job behind `label` may by now belong to a same-name replacement, so
+    /// the claim consults the operation's own completion latch, which is
+    /// marked synchronously by the operation's task. An operation that
+    /// finishes after the claim (while the bootout is already in flight
+    /// against launchd) does not stop it: same-name create/start waits for
+    /// a running bootout via `waitUntilClear`.
+    static func runRegisteredBootout(
+        registry: OutstandingBootoutRegistry,
+        label: String,
+        token: UUID,
+        completion: OperationCompletion,
+        bootout: @escaping @Sendable (_ domainQualifiedLabel: String) -> Int32
+    ) async -> Int32 {
+        // Suppress recovery work for an operation that already finished:
+        // if it completed while this task was still queued — or in the gap
+        // before `schedule` registered the bootout — do nothing.
+        if completion.isFinished {
+            await registry.operationFinished(label: label, token: token)
+            return 0
+        }
+        guard await registry.starting(label: label, token: token) else {
+            return 0
+        }
+        let status = await runBootout(bootout, label: label)
+        await registry.bootoutFinished(label: label)
+        return status
     }
 
     /// Observes an operation that outlived its final deadline. Unstructured
@@ -364,14 +453,16 @@ enum ContainerRuntimeJobRecovery {
     private static func watchForLateCompletion(
         _ task: Task<Void, Error>,
         label: String,
-        token: UUID,
+        token: UUID?,
         onLateSuccess: (@Sendable () async -> Void)?
     ) {
         _ = Task<Void, Never> {
             let succeeded = (try? await task.value) != nil
             // The operation finished (late): suppress any bootout of ours
             // that never started — its target may be a replacement by now.
-            await OutstandingBootoutRegistry.shared.operationFinished(label: label, token: token)
+            if let token {
+                await OutstandingBootoutRegistry.shared.operationFinished(label: label, token: token)
+            }
             if succeeded {
                 await onLateSuccess?()
             }

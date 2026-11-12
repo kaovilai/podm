@@ -162,6 +162,9 @@ struct NewEventsTests {
 
     @Test("container prune emits a per-container 'destroy' before the aggregate prune")
     func containerPruneEmitsPerContainerDestroy() async throws {
+        // OWN pruned id: the destroy dedup is process-wide, so this test
+        // must not reuse the id the aggregate-only prune test finalizes.
+        let prunedId = "prune-destroy-evt-ctr"
         let broadcaster = EventBroadcaster()
         let stream = await broadcaster.stream()
         // Collect both the destroy and the aggregate prune to assert ordering/coexistence.
@@ -179,7 +182,7 @@ struct NewEventsTests {
             app.setRegexRouter(regexRouter)
             regexRouter.installMiddleware(on: app)
             app.storage[EventBroadcasterKey.self] = broadcaster
-            try app.register(collection: ContainerPruneRoute(client: StubContainerClient()))
+            try app.register(collection: ContainerPruneRoute(client: StubContainerClient(prunedContainer: prunedId)))
 
             try await app.testing().test(.POST, "/v1.51/containers/prune") { res async in
                 #expect(res.status == .ok)
@@ -191,9 +194,9 @@ struct NewEventsTests {
 
         let destroy = events.first { $0.Action == "destroy" }
         let prune = events.first { $0.Action == "prune" }
-        // moby fires a `destroy` per removed container (StubContainerClient prunes "my-container")…
+        // moby fires a `destroy` per removed container (the stub prunes `prunedId`)…
         #expect(destroy != nil, "container prune must emit a per-container destroy")
-        #expect(destroy?.Actor.ID == "my-container")
+        #expect(destroy?.Actor.ID == prunedId)
         // …then the aggregate prune, and the destroy must precede it.
         #expect(prune != nil)
         if let di = events.firstIndex(where: { $0.Action == "destroy" }),
@@ -450,6 +453,17 @@ private struct DieAfterStartMock: ClientContainerProtocol {
 }
 
 private struct StubContainerClient: ClientContainerProtocol {
+    /// The id prune reports as deleted. Each test that asserts on the
+    /// per-container destroy event must use its OWN id: the destroy
+    /// dedup (`ContainerDestroyFinalizer.shared`) is process-wide and
+    /// keyed by this id, so two tests pruning the same id suppress the
+    /// second test's event.
+    private let prunedContainer: String
+
+    init(prunedContainer: String = "my-container") {
+        self.prunedContainer = prunedContainer
+    }
+
     func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { [] }
     func getContainer(id: String) async throws -> ContainerSnapshot? { nil }
     func enforceContainerRunning(container: ContainerSnapshot) throws {}
@@ -462,7 +476,7 @@ private struct StubContainerClient: ClientContainerProtocol {
         RESTContainerWait(statusCode: 0)
     }
     func prune(filters: [String: [String]]) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
-        (["my-container"], 1024)
+        ([prunedContainer], 1024)
     }
 }
 

@@ -12,8 +12,10 @@ import Foundation
 ///
 /// Only the first runs the body, so exactly one destroy event fires and the
 /// store teardowns happen once. A call that arrives while the body is
-/// already running returns immediately — the in-flight call owns the
-/// cleanup.
+/// already running WAITS for it — the in-flight call owns the cleanup, and
+/// answering the duplicate before the body finished would let its caller
+/// (e.g. a DELETE 404 fallback) respond while the rename override still
+/// exists, so a create of the same name in that window gets a spurious 409.
 actor ContainerDestroyFinalizer {
     static let shared = ContainerDestroyFinalizer()
 
@@ -23,18 +25,23 @@ actor ContainerDestroyFinalizer {
     private static let memoryTTL: TimeInterval = 3600
     private static let maxMemory = 4096
 
-    private var inProgress: Set<String> = []
+    private var inFlight: [String: Task<Void, Never>] = [:]
     private var completed: [String: Date] = [:]
 
     /// Runs `body` for `key` unless this finalizer already ran (or is
     /// running) for it. The body is instance-scoped by construction: it is
     /// built from the deleted container's captured snapshot/hex id and must
     /// never touch a same-name replacement.
-    func finalizeOnce(key: String, _ body: @Sendable () async -> Void) async {
+    func finalizeOnce(key: String, _ body: @escaping @Sendable () async -> Void) async {
         if completed[key] != nil { return }
-        guard inProgress.insert(key).inserted else { return }
-        await body()
-        inProgress.remove(key)
+        if let running = inFlight[key] {
+            await running.value
+            return
+        }
+        let task = Task<Void, Never> { await body() }
+        inFlight[key] = task
+        await task.value
+        inFlight.removeValue(forKey: key)
         prune()
         completed[key] = Date()
     }

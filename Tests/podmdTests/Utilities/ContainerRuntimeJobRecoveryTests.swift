@@ -619,6 +619,79 @@ struct ContainerRuntimeJobRecoveryTests {
         #expect(lateRan.isSet() == false, "the normal success path owns its own cleanup")
     }
 
+    // MARK: review round 1 (PR #57) — completion recorded by the operation itself
+
+    @Test("the operation's completion latch is marked the moment the operation finishes")
+    func operationCompletionLatchMarksOnFinish() async throws {
+        let completion = ContainerRuntimeJobRecovery.OperationCompletion()
+        #expect(completion.isFinished == false, "not finished before the operation runs")
+        let gate = WedgeGate()
+        let task = Task<Void, Error> {
+            defer { completion.markFinished() }
+            await gate.wait()
+        }
+        #expect(completion.isFinished == false, "still running while the operation is suspended")
+        gate.open()
+        try await task.value
+        #expect(completion.isFinished, "marked synchronously with the operation's completion")
+    }
+
+    @Test(
+        "a bootout whose operation already finished is suppressed at claim time",
+        .timeLimit(.minutes(1))
+    )
+    func bootoutSuppressedWhenOperationAlreadyFinished() async throws {
+        let registry = ContainerRuntimeJobRecovery.OutstandingBootoutRegistry()
+        let label = "gui/501/com.apple.container.container-runtime-linux.reg-fin"
+        let token = await registry.schedule(label: label)
+        let completion = ContainerRuntimeJobRecovery.OperationCompletion()
+        // The operation finished after the first timer won but before the
+        // bootout task claimed its token — the claim must see the latch and
+        // refuse to run, or the bootout could kill a same-name
+        // replacement's freshly-registered runtime job.
+        completion.markFinished()
+        let bootouts = BootoutLog()
+        let status = await ContainerRuntimeJobRecovery.runRegisteredBootout(
+            registry: registry,
+            label: label,
+            token: token,
+            completion: completion,
+            bootout: { label in
+                bootouts.record(label)
+                return 0
+            }
+        )
+        #expect(status == 0)
+        #expect(bootouts.labels.isEmpty, "the hook must not run for a finished operation")
+        #expect(await registry.isClear(label: label), "the suppressed bootout leaves nothing outstanding")
+    }
+
+    @Test(
+        "a bootout whose operation is still in flight claims and runs",
+        .timeLimit(.minutes(1))
+    )
+    func bootoutRunsWhileOperationInFlight() async throws {
+        let registry = ContainerRuntimeJobRecovery.OutstandingBootoutRegistry()
+        let label = "gui/501/com.apple.container.container-runtime-linux.reg-run"
+        let token = await registry.schedule(label: label)
+        let completion = ContainerRuntimeJobRecovery.OperationCompletion()
+        #expect(completion.isFinished == false, "the operation is still wedged")
+        let bootouts = BootoutLog()
+        let status = await ContainerRuntimeJobRecovery.runRegisteredBootout(
+            registry: registry,
+            label: label,
+            token: token,
+            completion: completion,
+            bootout: { label in
+                bootouts.record(label)
+                return 0
+            }
+        )
+        #expect(status == 0)
+        #expect(bootouts.labels.count == 1, "the bootout runs for a still-wedged operation")
+        #expect(await registry.isClear(label: label), "the finished bootout leaves nothing outstanding")
+    }
+
     private static func snapshot(id: String, status: RuntimeStatus) -> ContainerSnapshot {
         let proc = ProcessConfiguration(
             executable: "/bin/sh", arguments: [], environment: [],

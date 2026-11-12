@@ -179,13 +179,13 @@ struct ContainerDeleteLateCleanupTests {
         await state.firePruneLateDelete(nativeId: nativeId, hexId: hexId)
 
         #expect(await ContainerLogJournal.shared.entries(nativeId: nativeId).isEmpty, "the journal dies with the container")
-        let destroys = await broadcaster.snapshot(since: 1, until: nil) { $0.status == "destroy" && $0.id == nativeId }
-        #expect(destroys.count == 1, "exactly one destroy event for the late-deleted container")
+        let destroys = await broadcaster.snapshot(since: 1, until: nil) { $0.status == "destroy" && $0.id == hexId }
+        #expect(destroys.count == 1, "exactly one destroy event for the late-deleted container, keyed by its hex id")
 
         // A duplicate late completion must not double the event.
         await state.firePruneLateDelete(nativeId: nativeId, hexId: hexId)
         let destroysAfterRefire = await broadcaster.snapshot(since: 1, until: nil) {
-            $0.status == "destroy" && $0.id == nativeId
+            $0.status == "destroy" && $0.id == hexId
         }
         #expect(destroysAfterRefire.count == 1, "finalization is exactly-once")
     }

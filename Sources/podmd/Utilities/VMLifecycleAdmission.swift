@@ -95,6 +95,17 @@ actor VMLifecycleAdmission {
                 throw timeout
             }
         }
+        // The slot is held on every path that reaches here. One more gap
+        // remains on the queued path: the acquirer may have completed
+        // successfully BEFORE the calling task was cancelled — cancelling a
+        // completed acquirer does not change its successful result, so the
+        // race returned .acquired and neither catch branch ran. Without
+        // this check the cancelled caller's body (e.g. a force-stop) would
+        // run anyway. Hand the slot back and surface the cancellation.
+        if Task.isCancelled {
+            release()
+            throw CancellationError()
+        }
         do {
             let result = try await body()
             release()

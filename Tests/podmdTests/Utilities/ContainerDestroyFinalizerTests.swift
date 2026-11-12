@@ -30,23 +30,26 @@ struct ContainerDestroyFinalizerTests {
         #expect(runs.countSync() == 2)
     }
 
-    @Test("a call that arrives while the body is running is a no-op, not a wait")
-    func inFlightCallIsNoOp() async throws {
+    @Test("a call that arrives while the body is running waits for it, without re-running it")
+    func inFlightCallWaitsWithoutRerunning() async throws {
         let finalizer = ContainerDestroyFinalizer()
         let firstStarted = WedgeGate()
         let releaseFirst = WedgeGate()
+        let bodyFinished = WedgeGate()
 
         let first = Task<Void, Never> {
             await finalizer.finalizeOnce(key: "hex-inflight") {
                 firstStarted.open()
                 await releaseFirst.wait()
+                bodyFinished.open()
             }
         }
         await firstStarted.wait()
 
         // A second finalize for the same key while the first body is still
-        // running must not run the body again (and must not block on the
-        // in-flight one).
+        // running must not run the body again — and must WAIT for the
+        // in-flight one, so its caller cannot answer (e.g. a DELETE 404
+        // fallback) before the cleanup has actually finished.
         let second = Task<Void, Never> {
             await finalizer.finalizeOnce(key: "hex-inflight") { Issue.record("must not run") }
         }
@@ -54,6 +57,36 @@ struct ContainerDestroyFinalizerTests {
         releaseFirst.open()
         await first.value
         await second.value
+        #expect(bodyFinished.isOpen, "the duplicate returns only after the body finished")
+    }
+
+    @Test("a duplicate's return implies the cleanup completed — no 409 window on the rename override")
+    func duplicateReturnImpliesCompletion() async throws {
+        let finalizer = ContainerDestroyFinalizer()
+        let firstStarted = WedgeGate()
+        let releaseFirst = WedgeGate()
+        let overrideRemoved = WedgeGate()
+
+        let first = Task<Void, Never> {
+            await finalizer.finalizeOnce(key: "hex-dup") {
+                firstStarted.open()
+                await releaseFirst.wait()
+                overrideRemoved.open()
+            }
+        }
+        await firstStarted.wait()
+
+        // The DELETE 404 fallback's duplicate finalization: when it returns,
+        // the rename override removal (the body's last step here) must have
+        // happened — a create of the same name in between would 409.
+        let second = Task<Void, Never> {
+            await finalizer.finalizeOnce(key: "hex-dup") {}
+        }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        releaseFirst.open()
+        await second.value
+        #expect(overrideRemoved.isOpen, "the duplicate observes the completed cleanup")
+        await first.value
     }
 }
 
@@ -63,6 +96,12 @@ private final class WedgeGate: @unchecked Sendable {
     private let lock = NSLock()
     private var opened = false
     private var waiter: CheckedContinuation<Void, Never>?
+
+    var isOpen: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return opened
+    }
 
     func open() {
         lock.lock()

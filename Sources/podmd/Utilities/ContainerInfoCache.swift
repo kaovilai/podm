@@ -61,13 +61,29 @@ actor ContainerInfoCache {
         if let nativeId, store[nativeId]?.hexId == hexId {
             store.removeValue(forKey: nativeId)
         }
-        // --rm marks die with the instance, same dedup as remove(id:).
-        var keys = [hexId]
-        if let nativeId { keys.append(nativeId) }
-        for key in keys {
-            if let sibling = autoRemoveSibling[key] {
-                autoRemoveSibling.removeValue(forKey: key)
+        // --rm marks die with the instance, same dedup as remove(id:) — but
+        // instance-scoped like the store removal above: a same-name
+        // replacement may own the native-id mark by now (its
+        // markAutoRemove overwrote the native key to point at the
+        // REPLACEMENT's hex id), and its exit observer still needs that
+        // mark for auto-removal. Only this instance's half of a pairing —
+        // and a native key that still points back at THIS hex id — dies.
+        if hexId == nativeId {
+            // No-identity fallback: nothing to disambiguate — behaves like
+            // remove(id:).
+            if let sibling = autoRemoveSibling[hexId] {
+                autoRemoveSibling.removeValue(forKey: hexId)
                 autoRemoveSibling.removeValue(forKey: sibling)
+            }
+        } else {
+            if let sibling = autoRemoveSibling[hexId] {
+                autoRemoveSibling.removeValue(forKey: hexId)
+                if sibling == nativeId, autoRemoveSibling[sibling] == hexId {
+                    autoRemoveSibling.removeValue(forKey: sibling)
+                }
+            }
+            if let nativeId, autoRemoveSibling[nativeId] == hexId {
+                autoRemoveSibling.removeValue(forKey: nativeId)
             }
         }
     }
