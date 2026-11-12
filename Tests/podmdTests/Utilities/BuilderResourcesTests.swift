@@ -114,28 +114,35 @@ struct BuilderResourcesTests {
 
     @Test("Replacement never shrinks a field the builder already has")
     func replacementNeverShrinks() {
-        // An 8 GiB / 2-vCPU builder (created by a memory-only ask) faced with
-        // a CPU-only ask for more vCPUs must keep its 8 GiB — per-field max
-        // with the existing allocation folded in, not a redistribution.
+        // Host-relative on BOTH fields: CI's macOS runners have as little as
+        // 7 GiB RAM and 3 processors, and desiredResources clamps to the host.
+        // The "big" allocation is what the host allows of 8 GiB / whatever it
+        // allows of 6 vCPUs — still strictly above the 2 GiB / 2-vCPU floor.
+        let bigMemory = min(8_589_934_592, BuilderResourceRequest.hostMemoryClamp)
+        let bigCPUs = min(6, BuilderResourceRequest.hostCPUsClamp)
         let configured = BuilderResourceRequest(memoryInBytes: 2_147_483_648, cpus: 2)
-        let existing = BuilderResourceRequest(memoryInBytes: 8_589_934_592, cpus: 2)
+
+        // A memory-rich builder (created by a memory-only ask) faced with a
+        // CPU-only ask keeps its memory — per-field max with the existing
+        // allocation folded in, not a redistribution.
+        let existing = BuilderResourceRequest(memoryInBytes: bigMemory, cpus: 2)
         let cpuOnlyAsk = BuilderResourceRequest(memoryInBytes: 0, cpus: 4)
         let desired = ClientBuilderService.desiredResources(
             requested: cpuOnlyAsk, configured: configured, existing: existing)
-        #expect(desired.memoryInBytes == 8_589_934_592)
+        #expect(desired.memoryInBytes == bigMemory)
         #expect(desired.cpus == min(4, BuilderResourceRequest.hostCPUsClamp))
 
         // And the reverse: a memory-only ask keeps extra vCPUs the builder has.
         let memoryOnlyAsk = BuilderResourceRequest(memoryInBytes: 4_294_967_296, cpus: 0)
-        let existingFatCPUs = BuilderResourceRequest(memoryInBytes: 2_147_483_648, cpus: 6)
+        let existingFatCPUs = BuilderResourceRequest(memoryInBytes: 2_147_483_648, cpus: bigCPUs)
         let desired2 = ClientBuilderService.desiredResources(
             requested: memoryOnlyAsk, configured: configured, existing: existingFatCPUs)
         #expect(desired2.memoryInBytes == 4_294_967_296)
-        #expect(desired2.cpus == 6)
+        #expect(desired2.cpus == bigCPUs)
 
         // An existing allocation above the env floor is never pulled back down.
         let unflagged = ClientBuilderService.desiredResources(requested: nil, configured: configured, existing: existing)
-        #expect(unflagged == existing)
+        #expect(unflagged == BuilderResourceRequest(memoryInBytes: bigMemory, cpus: 2))
     }
 
     // MARK: - Env knobs
