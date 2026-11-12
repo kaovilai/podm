@@ -133,7 +133,14 @@ struct RouteConformanceTests {
     /// them makes the suite flaky rather than more sure — routing-phase
     /// coverage and the reverse-registration assertion still guard them.
     private static let networkBoundRoutes: Set<String> = [
-        "GET /distribution/{name:.*}/json"
+        "GET /distribution/{name:.*}/json",
+        // The manifest push route resolves and contacts the DESTINATION
+        // registry even with dummy parameters — a dummy destination's DNS
+        // resolution can take multi-second timeout paths on some CI
+        // resolvers, which is exactly the fixed-deadline flakiness this
+        // set exists to avoid (failed this PR's CI three times while the
+        // route is perfectly healthy).
+        "POST /libpod/manifests/{name:.*}/registry/{destination:.*}",
     ]
 
     @Test("every registered route answers; stub responses appear only in the manifest")
@@ -193,7 +200,18 @@ struct RouteConformanceTests {
                     }
                     return await probe.outcome
                 }
-                let outcome = await AsyncRace.firstOrTimeout(probeTask, timeoutNs: 5_000_000_000)
+                // Two deadlines: routes EXPECTED to hit the deadline (the
+                // streaming set) keep the short 5 s — each would otherwise
+                // cost the full window and the suite would crawl. Every
+                // OTHER route gets 60 s: CI runners intermittently stall
+                // 10-20 s (the documented runner-stall class), and a
+                // stalled probe must read as SLOW, not as a hung route —
+                // healthy routes answer in well under a second when the
+                // machine is running, so the generous deadline only costs
+                // detection latency for a genuinely-hung route.
+                let isStreamingRoute = Self.streamingRoutes.contains(key)
+                let outcome = await AsyncRace.firstOrTimeout(
+                    probeTask, timeoutNs: isStreamingRoute ? 5_000_000_000 : 60_000_000_000)
 
                 switch outcome {
                 case nil:

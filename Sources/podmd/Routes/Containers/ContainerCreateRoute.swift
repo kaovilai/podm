@@ -702,6 +702,16 @@ extension ContainerCreateRoute {
             let container: ContainerSnapshot
             do {
                 let containerClient = ContainerClient()
+                // A native id is a reusable name (Utility.createContainerID
+                // passes the container name through): a delete of a previous
+                // same-name container may still have a recovery bootout in
+                // flight (issue #45). The new container's runtime job must
+                // not be registered until that bootout finishes, or the late
+                // bootout would kill it.
+                await ContainerRuntimeJobRecovery.awaitNoOutstandingBootout(
+                    nativeId: containerConfiguration.id,
+                    runtimeHandler: containerConfiguration.runtimeHandler
+                )
                 try await containerClient.create(configuration: containerConfiguration, options: options, kernel: kernel)
                 container = try await containerClient.get(id: containerConfiguration.id)
                 req.logger.debug("Container created successfully with ID: \(container.id)")

@@ -103,4 +103,126 @@ struct ContainerInfoCacheTests {
         #expect(await cache.consumeAutoRemove(id: "hex123") == false)
         #expect(await cache.consumeAutoRemove(id: "native-name") == false)
     }
+
+    // MARK: review round 2 — instance-scoped removal (reusable native ids)
+
+    @Test("removeInstance clears the hex and native entries of the owning instance")
+    func removeInstanceClearsOwnEntries() async {
+        let cache = ContainerInfoCache()
+        await cache.set(hexId: "hexA", nativeId: "shared-name", image: "alpine", labels: [:])
+
+        await cache.removeInstance(hexId: "hexA", nativeId: "shared-name")
+
+        #expect(await cache.get(id: "hexA") == nil)
+        #expect(await cache.get(id: "shared-name") == nil)
+    }
+
+    @Test("removeInstance never touches a same-name replacement's native entry")
+    func removeInstanceProtectsReplacement() async {
+        let cache = ContainerInfoCache()
+        // The original instance, then a same-name replacement created after
+        // the original's delete went missing (native ids are reusable names).
+        await cache.set(hexId: "hexOriginal", nativeId: "shared-name", image: "alpine", labels: [:])
+        await cache.set(hexId: "hexReplacement", nativeId: "shared-name", image: "nginx", labels: [:])
+
+        // The late cleanup of the ORIGINAL instance — the replacement's
+        // entries must survive it.
+        await cache.removeInstance(hexId: "hexOriginal", nativeId: "shared-name")
+
+        #expect(await cache.get(id: "hexOriginal") == nil, "the original's hex key is gone")
+        #expect(
+            await cache.get(id: "shared-name")?.hexId == "hexReplacement",
+            "the replacement keeps the native key")
+        #expect(
+            await cache.get(id: "hexReplacement")?.hexId == "hexReplacement",
+            "the replacement keeps its hex key")
+    }
+
+    @Test("removeInstance clears the instance's --rm marks")
+    func removeInstanceClearsAutoRemoveMark() async {
+        let cache = ContainerInfoCache()
+        await cache.set(hexId: "hexB", nativeId: "native-b", image: "alpine", labels: [:])
+        await cache.markAutoRemove(hexId: "hexB", nativeId: "native-b")
+
+        await cache.removeInstance(hexId: "hexB", nativeId: "native-b")
+
+        #expect(await cache.consumeAutoRemove(id: "hexB") == false)
+        #expect(await cache.consumeAutoRemove(id: "native-b") == false)
+    }
+
+    // MARK: review round 1 (PR #57) — instance-scoped --rm marks
+
+    @Test("removeInstance keeps a same-name replacement's --rm marks")
+    func removeInstanceKeepsReplacementAutoRemoveMark() async {
+        let cache = ContainerInfoCache()
+        // BOTH instances ran with --rm under the same reusable native id:
+        // the original marked first, then the replacement re-marked the
+        // native key to point at its own hex id.
+        await cache.set(hexId: "hexOriginal", nativeId: "shared-name", image: "alpine", labels: [:])
+        await cache.markAutoRemove(hexId: "hexOriginal", nativeId: "shared-name")
+        await cache.set(hexId: "hexReplacement", nativeId: "shared-name", image: "nginx", labels: [:])
+        await cache.markAutoRemove(hexId: "hexReplacement", nativeId: "shared-name")
+
+        // The original instance's late cleanup — the replacement's exit
+        // observer must still find ITS mark and auto-remove it.
+        await cache.removeInstance(hexId: "hexOriginal", nativeId: "shared-name")
+
+        #expect(
+            await cache.consumeAutoRemove(id: "hexReplacement") == true,
+            "the replacement's --rm mark survives the original's cleanup")
+        #expect(await cache.consumeAutoRemove(id: "hexOriginal") == false)
+    }
+
+    @Test("removeInstance drops the native --rm key only while it points back at this instance")
+    func removeInstanceDropsNativeMarkOnlyWhenPaired() async {
+        let cache = ContainerInfoCache()
+        // The original was marked --rm, and NO replacement re-marked the
+        // native key: the pairing still belongs to the original, so both
+        // halves die with it.
+        await cache.set(hexId: "hexPair", nativeId: "native-pair", image: "alpine", labels: [:])
+        await cache.markAutoRemove(hexId: "hexPair", nativeId: "native-pair")
+
+        await cache.removeInstance(hexId: "hexPair", nativeId: "native-pair")
+
+        #expect(await cache.consumeAutoRemove(id: "native-pair") == false)
+    }
+
+    // MARK: review round 6 — no-native-id cleanup
+
+    @Test("removeInstance without a native id still drops the reverse --rm link of its own pairing")
+    func removeInstanceWithoutNativeIdDropsReverseLink() async {
+        // Review round 6 (PR #51): a DELETE by full hex id whose eager
+        // lookup failed with no cache entry finalized with nativeId nil —
+        // the reverse link lingered, and a non---rm same-name replacement's
+        // exit observer could consume the stale native mark. The pairing,
+        // not the caller's knowledge of the native id, decides: the reverse
+        // key dies while it still points back at THIS hex id.
+        let cache = ContainerInfoCache()
+        await cache.markAutoRemove(hexId: "hexNoNative", nativeId: "native-no-native")
+
+        await cache.removeInstance(hexId: "hexNoNative", nativeId: nil)
+
+        #expect(
+            await cache.consumeAutoRemove(id: "native-no-native") == false,
+            "the reverse --rm link must die with the instance even when the caller has no native id")
+        #expect(await cache.consumeAutoRemove(id: "hexNoNative") == false)
+    }
+
+    @Test("removeInstance without a native id never drops a replacement's reverse --rm link")
+    func removeInstanceWithoutNativeIdProtectsReplacement() async {
+        let cache = ContainerInfoCache()
+        // The original marked --rm; a same-name replacement re-marked the
+        // native key to point at ITS hex id.
+        await cache.markAutoRemove(hexId: "hexOriginal", nativeId: "shared-name")
+        await cache.markAutoRemove(hexId: "hexReplacement", nativeId: "shared-name")
+
+        // The original's cleanup with no native id captured: the shared
+        // native key points at the REPLACEMENT, so it must survive.
+        await cache.removeInstance(hexId: "hexOriginal", nativeId: nil)
+
+        #expect(
+            await cache.consumeAutoRemove(id: "shared-name") == true,
+            "the replacement's --rm mark survives the original's no-native-id cleanup")
+        #expect(await cache.consumeAutoRemove(id: "hexOriginal") == false)
+    }
 }

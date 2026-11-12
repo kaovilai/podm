@@ -316,6 +316,16 @@ extension ContainerAttachRoute {
 
         let process: ClientProcess
         do {
+            // A native id is a reusable name (Utility.createContainerID
+            // passes the container name through): a delete of a previous
+            // same-name container may still have a recovery bootout in
+            // flight (issue #45) — bootstrap only after it finishes, or the
+            // late bootout would kill this container's freshly-registered
+            // runtime job.
+            await ContainerRuntimeJobRecovery.awaitNoOutstandingBootout(
+                nativeId: container.id,
+                runtimeHandler: container.configuration.runtimeHandler
+            )
             process = try await ContainerClient().bootstrap(id: container.id, stdio: pipes.stdioArray)
         } catch {
             pipes.closeAll()
@@ -578,6 +588,16 @@ extension ContainerAttachRoute {
 
         let process: ClientProcess
         do {
+            // A native id is a reusable name (Utility.createContainerID
+            // passes the container name through): a delete of a previous
+            // same-name container may still have a recovery bootout in
+            // flight (issue #45) — bootstrap only after it finishes, or the
+            // late bootout would kill this container's freshly-registered
+            // runtime job.
+            await ContainerRuntimeJobRecovery.awaitNoOutstandingBootout(
+                nativeId: container.id,
+                runtimeHandler: container.configuration.runtimeHandler
+            )
             process = try await ContainerClient().bootstrap(id: container.id, stdio: pipes.stdioArray)
         } catch {
             pipes.closeAll()

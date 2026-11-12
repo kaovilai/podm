@@ -122,8 +122,38 @@ protocol ClientContainerProtocol: Sendable {
     func restart(id: String, signal: String?, timeout: Int?) async throws -> Bool
     func kill(id: String, signal: String?) async throws
     func delete(id: String) async throws
+    /// `delete(id:)` with a hook for the wedge-recovery path: when the
+    /// apiserver delete is abandoned past its recovery windows but then
+    /// succeeds late (e.g. the operator restarted the wedged apiserver),
+    /// `onLateSuccess` runs the caller's instance-scoped cleanup — without
+    /// it, rename reservations and log journals leak and no destroy event
+    /// fires. Test mocks model neither wedges nor late completions and
+    /// inherit the passthrough below.
+    func delete(id: String, onLateSuccess: (@Sendable () async -> Void)?) async throws
     func wait(id: String, condition: ContainerWaitCondition) async throws -> RESTContainerWait
     func prune(filters: [String: [String]]) async throws -> (deletedContainers: [String], spaceReclaimed: Int64)
+    /// `prune(filters:)` with the same late-completion hook as
+    /// `delete(id:onLateSuccess:)`, invoked per container whose prune delete
+    /// succeeded after being abandoned past its recovery windows. The
+    /// parameter is optional (like `delete`'s) so the production service's
+    /// implementation — which defaults it to nil — is the protocol witness;
+    /// a non-optional requirement would silently resolve to the passthrough
+    /// extension default below and drop the hook.
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64)
+    /// `prune(filters:onLateDelete:)` plus a per-container hook for deletes
+    /// that succeeded WITHIN the prune call — carrying the service's own
+    /// captured pre-delete hex ID, the identity the route cannot know for a
+    /// container created between its list and the service's (its own map
+    /// would miss, and the fallback native id would key the finalizer
+    /// wrong). Same optional-parameter rule as above.
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?,
+        onDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64)
 }
 
 extension ClientContainerProtocol {
@@ -133,6 +163,32 @@ extension ClientContainerProtocol {
     /// wedges) inherit the passthrough.
     func stopForForceRemoval(id: String) async throws {
         try await stop(id: id, signal: nil, timeout: nil)
+    }
+
+    /// Default: mocks never run the wedge recovery, so there is no late
+    /// completion to hook.
+    func delete(id: String, onLateSuccess: (@Sendable () async -> Void)?) async throws {
+        try await delete(id: id)
+    }
+
+    /// Default: mocks never run the wedge recovery, so there is no late
+    /// completion to hook.
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+        try await prune(filters: filters)
+    }
+
+    /// Default: mocks model neither wedge recovery nor per-instance hex
+    /// capture — the in-window delete hook is dropped, matching the
+    /// late-completion default above.
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?,
+        onDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+        try await prune(filters: filters, onLateDelete: onLateDelete)
     }
 }
 
@@ -145,6 +201,13 @@ enum ClientContainerError: Error {
     /// runtime job was booted out of launchd — the Apple Container
     /// apiserver itself is stuck (issue #45, apple/container#1884).
     case runtimeJobWedged(nativeId: String, label: String)
+    /// The force-removal stop never even started: every
+    /// `VMLifecycleAdmission` slot was held for longer than the bounded
+    /// admission wait — most plausibly by ordinary stops wedged against
+    /// the same stuck apiserver (a wedged `stopInternal` holds its slot
+    /// forever). The force-delete fails with this instead of queueing
+    /// behind them indefinitely.
+    case admissionTimedOut(nativeId: String)
 }
 
 struct ClientContainerService: ClientContainerProtocol {
@@ -378,6 +441,17 @@ struct ClientContainerService: ClientContainerProtocol {
 
         let stdio = [stdin, stdout, stderr]
 
+        // A native id is a reusable name (Utility.createContainerID passes
+        // the container name through): a delete of a previous same-name
+        // container may still have a recovery bootout in flight. Starting
+        // (or restarting) this container must wait until that bootout
+        // finishes, or it would kill THIS container's freshly-bootstrapped
+        // runtime job.
+        await ContainerRuntimeJobRecovery.awaitNoOutstandingBootout(
+            nativeId: container.id,
+            runtimeHandler: container.configuration.runtimeHandler
+        )
+
         do {
             let process = try await containerClient.withClient { try await $0.bootstrap(id: container.id, stdio: stdio) }
             // Clear any exit code recorded by a previous run of this container so
@@ -427,10 +501,25 @@ struct ClientContainerService: ClientContainerProtocol {
             throw ClientContainerError.notFound(id: id)
         }
         await ContainerRestartState.shared.markExplicitlyStopped(id: container.id)
-        try await Self.withAdmissionScopedRecovery(container: container) {
-            try await self.stopInternal(container: container, signal: nil, timeout: nil)
+        // A reconnect retry issued after the recovery deadline could stop a
+        // recreated same-name container — gate it on the recovery expiry.
+        let expiry = ContainerRuntimeJobRecovery.RecoveryExpiry()
+        try await Self.withAdmissionScopedRecovery(
+            container: container,
+            expiry: expiry
+        ) {
+            try await self.stopInternal(container: container, signal: nil, timeout: nil, expiry: expiry)
         }
     }
+
+    /// How long the delete path's force-stop may wait in the
+    /// `VMLifecycleAdmission` queue before failing with an actionable
+    /// error. Generous against a healthy-but-deep backlog of concurrent VM
+    /// transitions, but strictly bounded: a wedged ordinary stop holds its
+    /// slot forever, and without this cap a force-delete would queue behind
+    /// the wedged holders indefinitely — before its own recovery windows
+    /// even start.
+    static let forceRemovalAdmissionWaitCapNs: UInt64 = 60_000_000_000
 
     /// The delete path's force-stop: the runtime-job wedge guard (issue #45)
     /// wraps only the native stop, INSIDE the `VMLifecycleAdmission` slot
@@ -439,6 +528,12 @@ struct ClientContainerService: ClientContainerProtocol {
     /// (a healthy boot/stop backlog must never be mistaken for a wedge, and
     /// a bootout must never fire outside the limiter).
     ///
+    /// The admission QUEUE wait itself is bounded by
+    /// `admissionQueueTimeoutNs`: if every slot is held by operations
+    /// wedged against a stuck apiserver (each holding its slot forever),
+    /// the force-stop fails with `ClientContainerError.admissionTimedOut`
+    /// instead of waiting forever before either recovery window starts.
+    ///
     /// Static with injected `stop`/`bootout`/windows so tests exercise the
     /// admission/recovery composition without a live apiserver.
     static func withAdmissionScopedRecovery(
@@ -446,26 +541,40 @@ struct ClientContainerService: ClientContainerProtocol {
         admission: VMLifecycleAdmission = .shared,
         firstWindowNs: UInt64 = ContainerRuntimeJobRecovery.firstWindowNs,
         secondWindowNs: UInt64 = ContainerRuntimeJobRecovery.secondWindowNs,
+        admissionQueueTimeoutNs: UInt64 = ClientContainerService.forceRemovalAdmissionWaitCapNs,
         bootout: @escaping @Sendable (_ domainQualifiedLabel: String) -> Int32 = ContainerRuntimeJobRecovery.liveBootout,
+        expiry: ContainerRuntimeJobRecovery.RecoveryExpiry? = nil,
         stop: @escaping @Sendable () async throws -> Void
     ) async throws {
-        try await admission.withSlot {
-            try await ContainerRuntimeJobRecovery.withHangRecovery(
-                nativeId: container.id,
-                runtimeHandler: container.configuration.runtimeHandler,
-                firstWindowNs: firstWindowNs,
-                secondWindowNs: secondWindowNs,
-                bootout: bootout
-            ) {
-                try await stop()
+        do {
+            try await admission.withSlot(timeoutNs: admissionQueueTimeoutNs) {
+                try await ContainerRuntimeJobRecovery.withHangRecovery(
+                    nativeId: container.id,
+                    runtimeHandler: container.configuration.runtimeHandler,
+                    firstWindowNs: firstWindowNs,
+                    secondWindowNs: secondWindowNs,
+                    bootout: bootout,
+                    expiry: expiry
+                ) {
+                    try await stop()
+                }
             }
+        } catch is VMLifecycleAdmission.QueueTimeout {
+            throw ClientContainerError.admissionTimedOut(nativeId: container.id)
         }
     }
 
-    private func stopInternal(container: ContainerSnapshot, signal: String?, timeout: Int?) async throws {
+    private func stopInternal(
+        container: ContainerSnapshot,
+        signal: String?,
+        timeout: Int?,
+        expiry: ContainerRuntimeJobRecovery.RecoveryExpiry? = nil
+    ) async throws {
         let signal = signal ?? "SIGTERM"
         let options = ContainerStopOptions(timeoutInSeconds: Int32(timeout ?? 5), signal: signal)
-        try await containerClient.withClient { try await $0.stop(id: container.id, opts: options) }
+        try await containerClient.withClient(allowRetry: expiry?.retryPermit) {
+            try await $0.stop(id: container.id, opts: options)
+        }
     }
 
     func kill(id: String, signal: String?) async throws {
@@ -509,17 +618,34 @@ struct ClientContainerService: ClientContainerProtocol {
     }
 
     func delete(id: String) async throws {
+        try await delete(id: id, onLateSuccess: nil)
+    }
+
+    func delete(id: String, onLateSuccess: (@Sendable () async -> Void)? = nil) async throws {
         guard let container = try await getContainer(id: id) else {
             throw ClientContainerError.notFound(id: id)
         }
         // The apiserver's delete can hang forever when the container's
         // runtime job is wedged in launchd (issue #45) — bound it, boot the
-        // job out on timeout, then give it a second window.
+        // job out on timeout, then give it a second window. If the delete
+        // still succeeds after the final deadline (the wedge cleared late,
+        // e.g. the operator restarted the apiserver), `onLateSuccess`
+        // preserves the caller's cleanup — without it, rename reservations
+        // and log journals leak and the destroy event never fires.
+        let expiry = ContainerRuntimeJobRecovery.RecoveryExpiry()
         try await ContainerRuntimeJobRecovery.withHangRecovery(
             nativeId: container.id,
-            runtimeHandler: container.configuration.runtimeHandler
+            runtimeHandler: container.configuration.runtimeHandler,
+            expiry: expiry,
+            onLateSuccess: onLateSuccess
         ) {
-            try await self.containerClient.withClient { try await $0.delete(id: container.id) }
+            // A reconnect retry issued after the final deadline must never
+            // land on a recreated same-name container (native ids are
+            // reusable names) — the permit switches the retry off once the
+            // operation is expired.
+            try await self.containerClient.withClient(allowRetry: expiry.retryPermit) {
+                try await $0.delete(id: container.id)
+            }
         }
     }
 
@@ -579,6 +705,26 @@ struct ClientContainerService: ClientContainerProtocol {
     }
 
     func prune(filters: [String: [String]]) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+        try await prune(filters: filters, onLateDelete: nil)
+    }
+
+    /// Explicit witness for the two-argument requirement: the three-
+    /// argument implementation does NOT satisfy it (defaulted parameters
+    /// do not create witnesses), so without this, calls through
+    /// `ClientContainerProtocol` would resolve to the extension default
+    /// and silently discard the late-delete callback.
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+        try await prune(filters: filters, onLateDelete: onLateDelete, onDelete: nil)
+    }
+
+    func prune(
+        filters: [String: [String]],
+        onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)? = nil,
+        onDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)? = nil
+    ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
         let allContainers = Self.withoutDNSSidecars(try await containerClient.withClient { try await $0.list() })
 
         var containersToDelete: [ContainerSnapshot] = allContainers.filter { $0.status == .stopped }
@@ -658,17 +804,37 @@ struct ClientContainerService: ClientContainerProtocol {
                 let hexId = DockerContainerID.hexId(for: container)
                 // Same wedge guard as delete(id:) — one wedged container
                 // must not hang the whole prune loop forever (issue #45).
+                // If this prune delete is abandoned past its recovery
+                // windows but succeeds late, the container's rename
+                // override must still die with it — otherwise the name
+                // stays reserved (create/rename 409) forever, even across
+                // daemon restarts, since the map is persisted.
+                let expiry = ContainerRuntimeJobRecovery.RecoveryExpiry()
                 try await ContainerRuntimeJobRecovery.withHangRecovery(
                     nativeId: container.id,
-                    runtimeHandler: container.configuration.runtimeHandler
+                    runtimeHandler: container.configuration.runtimeHandler,
+                    expiry: expiry,
+                    onLateSuccess: {
+                        // Instance-scoped by hex key: a same-name
+                        // replacement gets a fresh hex id and keeps its own
+                        // override.
+                        await ContainerNameOverrideStore.shared.remove(hexId: hexId)
+                        await onLateDelete?(container.id, hexId)
+                    }
                 ) {
-                    try await self.containerClient.withClient { try await $0.delete(id: container.id) }
+                    try await self.containerClient.withClient(allowRetry: expiry.retryPermit) {
+                        try await $0.delete(id: container.id)
+                    }
                 }
                 deletedIds.append(container.id)
                 // A renamed container's override dies with it — otherwise the
                 // name stays reserved (create/rename 409) forever, even across
                 // daemon restarts, since the map is persisted.
                 await ContainerNameOverrideStore.shared.remove(hexId: hexId)
+                // In-window delete: hand the route the SERVICE's captured
+                // pre-delete identity — its own list predates this prune and
+                // cannot know a container created in between.
+                await onDelete?(container.id, hexId)
             } catch {
                 continue
             }

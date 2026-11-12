@@ -409,9 +409,10 @@ struct ContainerLogJournalLifecycleRouteTests {
     /// Mock whose prune reports one deleted container (the native id).
     private actor PruneReportingMock: ClientContainerProtocol {
         private let snapshot: ContainerSnapshot
+        private var pruned = false
         init(snapshot: ContainerSnapshot) { self.snapshot = snapshot }
         func list(showAll: Bool, filters: [String: [String]]) async throws -> [ContainerSnapshot] { [snapshot] }
-        func getContainer(id: String) async throws -> ContainerSnapshot? { snapshot }
+        func getContainer(id: String) async throws -> ContainerSnapshot? { pruned ? nil : snapshot }
         nonisolated func enforceContainerRunning(container: ContainerSnapshot) throws {}
         func start(id: String, detachKeys: String?) async throws -> Bool { true }
         func stop(id: String, signal: String?, timeout: Int?) async throws {}
@@ -422,7 +423,20 @@ struct ContainerLogJournalLifecycleRouteTests {
             RESTContainerWait(statusCode: 0)
         }
         func prune(filters: [String: [String]]) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
-            ([snapshot.id], 0)
+            pruned = true
+            return ([snapshot.id], 0)
+        }
+
+        /// Models the production service's in-window identity capture (the
+        /// route's cleanup runs through this hook with the captured hex id).
+        func prune(
+            filters: [String: [String]],
+            onLateDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?,
+            onDelete: (@Sendable (_ nativeId: String, _ hexId: String) async -> Void)?
+        ) async throws -> (deletedContainers: [String], spaceReclaimed: Int64) {
+            pruned = true
+            await onDelete?(snapshot.id, DockerContainerID.hexId(for: snapshot))
+            return ([snapshot.id], 0)
         }
     }
 
