@@ -243,6 +243,35 @@ How it works:
 
 Details and examples: [docs/multi-arch.md](docs/multi-arch.md).
 
+### What stays resident after a build
+
+Builder VMs are **not** torn down when the build finishes — they keep running so
+the next build reuses the warm BuildKit cache instead of paying a cold start
+(image fetch + VM boot + BuildKit init, minutes on first run). That means:
+
+- Each running builder holds its configured size in RAM — 2 vCPU / 2048 MB per
+  flavor by default (`PODM_BUILDER_*` / `PODM_QEMU_BUILDER_*` above), more if
+  you sized it up. A build that used the QEMU (emulated-arch) builder leaves
+  **two** builders resident.
+- The daemon itself won't idle-exit while a builder runs: podmd's idle exit
+  (`PODM_IDLE_EXIT_SECS`, default 90 s under launchd) counts running
+  containers, and builders are containers. That's deliberate — a stopped
+  daemon would just be woken again by the next build anyway.
+
+To reclaim the RAM, stop the builder(s) — they are ordinary containers:
+
+```bash
+docker stop buildkit        # the Rosetta (native + amd64) builder
+docker stop buildkit-qemu   # only exists if you built emulated arches
+```
+
+Stopping is **cache-preserving**: the builder's disk (with the BuildKit cache)
+survives a stop, and the next build starts the same VM again — you pay the boot,
+not the cache rebuild. Only a *replacement* (recreating the builder to size it
+up, or deleting the container) resets the cache. Once no builder runs and no
+other activity is in flight, podmd itself exits per `PODM_IDLE_EXIT_SECS` and
+consumes zero RAM until the next client call wakes it.
+
 ## How it works
 
 ```
