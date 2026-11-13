@@ -326,10 +326,11 @@ struct ClientBuilderService: ClientBuilderProtocol {
     /// One slot PER FLAVOR, not one shared: a QEMU cold start (image fetch,
     /// VM create, BuildKit boot — minutes on first run) must not block a
     /// Rosetta build whose builder is already running, an unbounded wait
-    /// that connect/ensureReachable only start counting after it. Two
-    /// flavors booting concurrently is the PRE-PR behavior (split-build
-    /// cold-starts both at once) and within `VMLifecycleAdmission.shared`'s
-    /// own tolerance (limit >= 2 concurrent VM transitions).
+    /// that connect/ensureReachable only start counting after it. Cross-
+    /// flavor concurrent builder creation is not new: two build CLIENTS
+    /// (one per flavor) already race builder creation without any gating,
+    /// and builder creation has never gone through
+    /// `VMLifecycleAdmission.shared`'s transition pool.
     private let rosettaReplacementSerializer = VMLifecycleAdmission(limit: 1)
     private let qemuReplacementSerializer = VMLifecycleAdmission(limit: 1)
 
