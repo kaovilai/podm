@@ -409,6 +409,14 @@ struct ClientBuilderService: ClientBuilderProtocol {
         qemu ? qemuResources : rosettaResources
     }
 
+    /// The replacement slot a given builder flavor serializes through —
+    /// internal (not private) so a regression test can pin that the two
+    /// flavors do NOT share one slot (a shared one lets a QEMU cold start
+    /// block Rosetta builds; see the fields' doc comment).
+    func replacementSerializer(forQEMU qemu: Bool) -> VMLifecycleAdmission {
+        qemu ? qemuReplacementSerializer : rosettaReplacementSerializer
+    }
+
     /// Per-field max of the build's explicit ask, the env floor, and the
     /// builder's current allocation, clamped to the host — replacement never
     /// shrinks a field the running builder already has. A blank/absent
