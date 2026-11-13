@@ -7,6 +7,11 @@ import Testing
 /// The service wiring: each flavor must serialize through its OWN slot.
 /// This is the regression test for the shared-slot mistake — it fails if
 /// both flavors ever resolve to the same admission instance.
+///
+/// The admission primitive's own semantics (same-instance serialization,
+/// FIFO handoff, cancellation correctness) are covered deterministically by
+/// VMLifecycleAdmissionTests — a separate sleep-timing test here was
+/// runner-stall-flaky (the classic macOS-runner class) and added nothing.
 @Suite("ClientBuilderService replacement slot wiring")
 struct BuilderReplacementSlotWiringTests {
 
