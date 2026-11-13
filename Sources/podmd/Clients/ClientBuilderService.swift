@@ -348,7 +348,7 @@ struct ClientBuilderService: ClientBuilderProtocol {
         // first-run cold start (builder image fetch + VM boot + BuildKit
         // init); beyond it, the queued build fails fast with an actionable
         // QueueTimeout instead of hanging.
-        return try await replacementSerializer(forQEMU: qemu).withSlot(timeoutNs: 900_000_000_000_000) { [self] in
+        return try await replacementSerializer(forQEMU: qemu).withSlot(timeoutNs: 900_000_000_000) { [self] in
             let container: ContainerSnapshot
             do {
                 container = try await containerClient.withClient { try await $0.get(id: containerID) }
