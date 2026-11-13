@@ -100,10 +100,15 @@ enum LabelNormalization {
     /// Returns true if the labels dict contains the reserved internal mapping key.
     /// Create routes must reject such inputs to prevent silent data loss.
     /// The message names the FIRST reserved key found, so the 400 is
-    /// actionable when a client sent several.
+    /// actionable when a client sent several. Both the ORIGINAL key and its
+    /// NORMALIZED form are checked: sanitize() lowercases keys and turns
+    /// underscores into hyphens, so `COM.APPLE.CONTAINER.RESOURCE.ROLE` or
+    /// `podm_label_original_keys` would otherwise slip past an exact-match
+    /// guard and land on the container as the reserved key itself.
     static func firstReservedKey(in labels: [String: String]) -> String? {
-        for key in reservedKeys where labels[key] != nil {
-            return key
+        for key in labels.keys {
+            if reservedKeys.contains(key) { return key }
+            if reservedKeys.contains(sanitizeKey(key)) { return key }
         }
         return nil
     }

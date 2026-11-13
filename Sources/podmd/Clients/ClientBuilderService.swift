@@ -341,8 +341,14 @@ struct ClientBuilderService: ClientBuilderProtocol {
         // Per-flavor slot (through the tested accessor — the single source
         // of truth the wiring regression test pins): same-flavor lookups and
         // replacements stay atomic, the other flavor never waits on this
-        // one's cold start.
-        return try await replacementSerializer(forQEMU: qemu).withSlot { [self] in
+        // one's cold start. The WAIT is bounded: a holder whose container
+        // operations hang against a wedged apiserver (the apple/container
+        // XPC-hang class) would otherwise queue every later build on this
+        // flavor indefinitely. 15 minutes comfortably covers a legitimate
+        // first-run cold start (builder image fetch + VM boot + BuildKit
+        // init); beyond it, the queued build fails fast with an actionable
+        // QueueTimeout instead of hanging.
+        return try await replacementSerializer(forQEMU: qemu).withSlot(timeoutNs: 900_000_000_000_000) { [self] in
             let container: ContainerSnapshot
             do {
                 container = try await containerClient.withClient { try await $0.get(id: containerID) }
