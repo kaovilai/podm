@@ -12,8 +12,12 @@ import Testing
 /// The test exercises `VMLifecycleAdmission` pairs directly:
 /// `ClientBuilderService`'s per-flavor fields are two independent instances
 /// of exactly this shape, and its container clients aren't injectable
-/// without a wider refactor — the primitive-level pin plus CI's multi-arch
-/// integration test (which really creates both builders) are the coverage.
+/// without a wider refactor. The wiring itself is pinned separately
+/// (BuilderReplacementSlotWiringTests, via the accessor the production path
+/// uses). No CI job exercises real builder creation — the multi-arch
+/// integration test is disabled because GitHub's macOS runners cannot boot
+/// VMs (actions/runner-images#12933) — so runtime verification of
+/// concurrent builder starts is a VM-capable-host activity.
 @Suite("Builder replacement serialization semantics")
 struct BuilderReplacementSerializationTests {
 
