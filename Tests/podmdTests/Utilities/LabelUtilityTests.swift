@@ -97,13 +97,16 @@ struct LabelNormalizationTests {
         // ClientBuilderService gates stop/delete/resize on the role label; if
         // a user container could carry it, a container named after a builder
         // would be deleted by the resize path. It must be rejected at create.
-        #expect(LabelNormalization.containsReservedKey(
-            [ResourceLabelKeys.role: "builder"]) == true)
-        #expect(LabelNormalization.containsReservedKey(
-            [ResourceLabelKeys.plugin: "x"]) == true)
-        #expect(LabelNormalization.firstReservedKey(in: [
-            ResourceLabelKeys.role: "builder"
-        ]) == ResourceLabelKeys.role)
+        #expect(
+            LabelNormalization.containsReservedKey(
+                [ResourceLabelKeys.role: "builder"]) == true)
+        #expect(
+            LabelNormalization.containsReservedKey(
+                [ResourceLabelKeys.plugin: "x"]) == true)
+        #expect(
+            LabelNormalization.firstReservedKey(in: [
+                ResourceLabelKeys.role: "builder"
+            ]) == ResourceLabelKeys.role)
     }
 
     @Test("Reserved mapping key in input is detected by containsReservedKey")
