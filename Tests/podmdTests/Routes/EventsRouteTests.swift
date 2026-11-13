@@ -114,12 +114,21 @@ struct EventsRouteTests {
             // The request runs concurrently; the test itself broadcasts an
             // event 200 ms in — from the test's perspective deterministic,
             // and always before the earliest possible response end (the
-            // 2 s deadline). Whether the subscription is live by then (the
+            // deadline below). Whether the subscription is live by then (the
             // event streams) or not (the event replays from history via
             // since=0), the body contains it. A fire-and-forget broadcast
             // Task cannot be used here: on a saturated runner it can be
             // starved past the deadline entirely.
-            let deadline = nanoNow() + 2_000_000_000
+            //
+            // The deadline is 15 s, not a tighter 2 s: the stream ends when
+            // the `until` timer fires, and a macOS-runner stall (the
+            // documented 10–20 s class) that lands anywhere between request
+            // start and the broadcast expires a short deadline before the
+            // event exists — this test flaked on three PRs that way (always
+            // green on rerun). 15 s covers the stall class; the happy path
+            // still broadcasts at ~200 ms, and the suite runs tests in
+            // parallel so the longer timer rides alongside the rest.
+            let deadline = nanoNow() + 15_000_000_000
             async let response = app.testing().test(
                 .GET, "/v1.51/events?since=0&until=\(param(deadline))"
             ) { res async in
