@@ -91,13 +91,15 @@ enum BuilderResourceKnobs {
         let memoryKey = qemu ? "PODM_QEMU_BUILDER_MEMORY" : "PODM_BUILDER_MEMORY"
         var cpus = positiveInt64(env[cpusKey])
         if env[cpusKey] != nil, cpus == nil {
+            // The raw value is deliberately NOT interpolated: env vars can
+            // carry secrets pasted by mistake, and warnings land in logs.
             logger?.warning(
-                "podm: ignoring invalid \(cpusKey) '\(env[cpusKey] ?? "")' — expected a positive whole number; using \(defaultCPUs)")
+                "podm: ignoring invalid \(cpusKey) — expected a positive whole number; using \(defaultCPUs)")
         }
         var memory = memoryInBytes(env[memoryKey])
         if env[memoryKey] != nil, memory == nil {
             logger?.warning(
-                "podm: ignoring invalid \(memoryKey) '\(env[memoryKey] ?? "")' — expected bytes or a k/m/g suffix; using \(defaultMemoryInBytes)")
+                "podm: ignoring invalid \(memoryKey) — expected bytes or a k/m/g suffix; using \(defaultMemoryInBytes)")
         }
         let clampedCPUs = cpus.map { min($0, BuilderResourceRequest.hostCPUsClamp) }
         let clampedMemory = memory.map { min($0, BuilderResourceRequest.hostMemoryClamp) }

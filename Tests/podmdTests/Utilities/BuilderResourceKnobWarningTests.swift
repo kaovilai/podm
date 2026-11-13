@@ -65,8 +65,11 @@ struct BuilderResourceKnobWarningTests {
             logger: logger)
         let warnings = captured.warnings()
         #expect(warnings.count == 2)
-        #expect(warnings.contains { $0.contains("PODM_BUILDER_CPUS") && $0.contains("fast") })
-        #expect(warnings.contains { $0.contains("PODM_BUILDER_MEMORY") && $0.contains("6GiB") })
+        // Key names only — the raw values are deliberately NOT logged
+        // (env vars can carry secrets pasted by mistake).
+        #expect(warnings.contains { $0.contains("PODM_BUILDER_CPUS") })
+        #expect(warnings.contains { $0.contains("PODM_BUILDER_MEMORY") })
+        #expect(warnings.allSatisfy { !$0.contains("fast") && !$0.contains("6GiB") })
 
         // Valid and absent values never warn.
         let quiet = CapturedLog()
