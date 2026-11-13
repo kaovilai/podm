@@ -121,9 +121,15 @@ struct LabelNormalizationTests {
         #expect(
             LabelNormalization.containsReservedKey(
                 ["com.apple.container.resource.role.": "builder"]) == true)
+        // Case variant of the mapping key, PRESERVING its hyphen placement —
+        // dots never become hyphens, so PODM.LABEL.ORIGINAL.KEYS would be a
+        // different key entirely.
         #expect(
             LabelNormalization.containsReservedKey(
-                ["PODM.LABEL.ORIGINAL.KEYS": "x"]) == true)
+                ["PODM.LABEL-ORIGINAL-KEYS": "x"]) == true)
+        #expect(
+            LabelNormalization.containsReservedKey(
+                ["PODM.LABEL.ORIGINAL.KEYS": "x"]) == false)
         // Underscores become HYPHENS, not dots — the underscore form is a
         // genuinely different key, not a forgery vector. Pinned so the
         // normalization contract stays explicit.
