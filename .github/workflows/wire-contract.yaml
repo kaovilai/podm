@@ -47,7 +47,7 @@ jobs:
       matrix:
         cli: [podman, docker]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Acquire the ${{ matrix.cli }} client under test
         run: |
@@ -142,7 +142,7 @@ jobs:
           cp normalized.json "baseline-refreshed-${{ matrix.cli }}.json"
           cp tree.json "commands-refreshed-${{ matrix.cli }}.json"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: wire-contract-${{ matrix.cli }}
