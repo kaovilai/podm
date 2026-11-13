@@ -1,3 +1,4 @@
+import ContainerResource
 import Foundation
 import Testing
 
@@ -89,6 +90,20 @@ struct LabelNormalizationTests {
     func originallyEmptyKeyDropped() {
         // "" normalizes to "" — the guard must fire even when normalizedKey == key
         #expect(LabelNormalization.sanitize(["": "value"]).isEmpty)
+    }
+
+    @Test("The system resource-role label is reserved — builder identity is unforgeable")
+    func systemRoleLabelReserved() {
+        // ClientBuilderService gates stop/delete/resize on the role label; if
+        // a user container could carry it, a container named after a builder
+        // would be deleted by the resize path. It must be rejected at create.
+        #expect(LabelNormalization.containsReservedKey(
+            [ResourceLabelKeys.role: "builder"]) == true)
+        #expect(LabelNormalization.containsReservedKey(
+            [ResourceLabelKeys.plugin: "x"]) == true)
+        #expect(LabelNormalization.firstReservedKey(in: [
+            ResourceLabelKeys.role: "builder"
+        ]) == ResourceLabelKeys.role)
     }
 
     @Test("Reserved mapping key in input is detected by containsReservedKey")

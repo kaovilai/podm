@@ -1,3 +1,4 @@
+import ContainerResource
 import Foundation
 import Logging
 
@@ -14,6 +15,16 @@ enum LabelNormalization {
     /// Internal label used to store the reverse mapping normalized → original key.
     /// Stripped from all Docker API responses so it is invisible to clients.
     static let mappingKey = "podm.label-original-keys"
+
+    /// Keys no client may set. Beyond podm's own internal label, the SYSTEM
+    /// resource-role label is identity for podm's builder lifecycle paths
+    /// (`ClientBuilderService.isPodmBuilder` gates stop/delete/resize on
+    /// it): if a user container could carry it, a container named after a
+    /// builder would be treated as one — and deleted. `com.apple.container.*`
+    /// keys are Apple Container system labels, not user labels.
+    static var reservedKeys: [String] {
+        [mappingKey, ResourceLabelKeys.role, ResourceLabelKeys.plugin]
+    }
 
     private static let log = Logger(label: "podm.labels")
 
@@ -88,8 +99,17 @@ enum LabelNormalization {
 
     /// Returns true if the labels dict contains the reserved internal mapping key.
     /// Create routes must reject such inputs to prevent silent data loss.
+    /// The message names the FIRST reserved key found, so the 400 is
+    /// actionable when a client sent several.
+    static func firstReservedKey(in labels: [String: String]) -> String? {
+        for key in reservedKeys where labels[key] != nil {
+            return key
+        }
+        return nil
+    }
+
     static func containsReservedKey(_ labels: [String: String]) -> Bool {
-        labels[mappingKey] != nil
+        firstReservedKey(in: labels) != nil
     }
 
     // MARK: - Mapping: build and restore
