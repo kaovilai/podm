@@ -313,26 +313,25 @@ struct ClientBuilderService: ClientBuilderProtocol {
         return try await containerClient.withClient { try await $0.dial(id: container.id, port: builderPort) }
     }
 
-    /// Serializes builder lookup/replace decisions per process. Actor method
-    /// execution is mutually exclusive, so two concurrent builds that both
-    /// find an undersized builder can't ping-pong-recreate it at different
-    /// sizes (the second replace would otherwise stop the first's fresh VM).
-    private let replacementSerializer = BuilderReplacementSerializer()
-
-    private actor BuilderReplacementSerializer {
-        func run<T: Sendable>(_ body: @escaping @Sendable () async throws -> T) async throws -> T {
-            try await body()
-        }
-    }
+    /// Serializes builder lookup/replace decisions per process: a ONE-SLOT
+    /// `VMLifecycleAdmission`, deliberately NOT a bare actor — actor methods
+    /// are reentrant across await points, so an actor method that awaits a
+    /// closure does not exclude other callers while that closure runs.
+    /// Concurrent resizing calls would then read the same stale snapshot and
+    /// delete each other's fresh VM (each seeing the other's replacement as
+    /// an undersized leftover). The admission's continuation-based slot is
+    /// held for the whole closure — lookup, replacement, and startup all
+    /// happen under it.
+    private let replacementSerializer = VMLifecycleAdmission(limit: 1)
 
     private func runningBuilderContainer(
         qemu: Bool, requested: BuilderResourceRequest? = nil, logger: Logger?
     ) async throws -> ContainerSnapshot {
         let containerID = resolvedContainerId(qemu: qemu)
-        // Everything inside the serializer is a quick get/create/replace
-        // decision — never a reachability wait — so holding it can't stall
-        // the other flavor's cold start for long.
-        return try await replacementSerializer.run { [self] in
+        // Everything inside the slot is a quick get/create/replace decision —
+        // never a reachability wait — so holding it can't stall the other
+        // flavor's cold start for long.
+        return try await replacementSerializer.withSlot { [self] in
             let container: ContainerSnapshot
             do {
                 container = try await containerClient.withClient { try await $0.get(id: containerID) }
