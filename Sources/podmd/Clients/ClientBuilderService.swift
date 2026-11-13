@@ -338,10 +338,11 @@ struct ClientBuilderService: ClientBuilderProtocol {
         qemu: Bool, requested: BuilderResourceRequest? = nil, logger: Logger?
     ) async throws -> ContainerSnapshot {
         let containerID = resolvedContainerId(qemu: qemu)
-        // Per-flavor slot: same-flavor lookups/replacements stay atomic, the
-        // other flavor never waits on this one's cold start.
-        let serializer = qemu ? qemuReplacementSerializer : rosettaReplacementSerializer
-        return try await serializer.withSlot { [self] in
+        // Per-flavor slot (through the tested accessor — the single source
+        // of truth the wiring regression test pins): same-flavor lookups and
+        // replacements stay atomic, the other flavor never waits on this
+        // one's cold start.
+        return try await replacementSerializer(forQEMU: qemu).withSlot { [self] in
             let container: ContainerSnapshot
             do {
                 container = try await containerClient.withClient { try await $0.get(id: containerID) }
