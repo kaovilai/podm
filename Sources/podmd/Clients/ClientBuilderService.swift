@@ -379,6 +379,18 @@ struct ClientBuilderService: ClientBuilderProtocol {
         _ container: ContainerSnapshot, qemu: Bool, requested: BuilderResourceRequest?, logger: Logger?
     ) async throws -> ContainerSnapshot {
         let containerID = resolvedContainerId(qemu: qemu)
+        // The role label — not the name — is a builder's identity. An ordinary
+        // `docker run --name buildkit` container answering to the builder's
+        // lookup name must never be stopped, deleted, or resized by these
+        // paths (deletion destroys its writable disk); fail with a clear
+        // name-collision error instead of touching it.
+        guard Self.isPodmBuilder(container) else {
+            throw ContainerizationError(
+                .invalidState,
+                message:
+                    "container '\(containerID)' exists but is not a podm builder (no \(ResourceLabelKeys.role)=\(ResourceRoleValues.builder) label) — refusing to stop, delete, or resize it. Remove or rename that container, or configure a different builder id."
+            )
+        }
         let current = Self.effectiveResources(of: container)
         let desired = Self.desiredResources(
             requested: requested, configured: configuredResources(qemu: qemu), existing: current)
@@ -430,6 +442,14 @@ struct ClientBuilderService: ClientBuilderProtocol {
             memoryInBytes: max(ask?.memoryInBytes ?? 0, max(configured.memoryInBytes, existing?.memoryInBytes ?? 0)),
             cpus: max(ask?.cpus ?? 0, max(configured.cpus, existing?.cpus ?? 0))
         ).clampedToHost()
+    }
+
+    /// `true` only for containers podm itself provisioned as builders. The
+    /// role label is the identity, NOT the name: an ordinary container that
+    /// happens to be named `buildkit` must never be treated as a builder by
+    /// the sizing or lifecycle paths.
+    static func isPodmBuilder(_ container: ContainerSnapshot) -> Bool {
+        container.configuration.labels[ResourceLabelKeys.role] == ResourceRoleValues.builder
     }
 
     /// The resources a builder snapshot effectively has. A pre-existing
