@@ -214,6 +214,29 @@ extension BuildRoute {
         { req in
             var query = try req.query.decode(RESTBuildQuery.self)
 
+            // Honest rejection of unsupported-but-build-changing params (issue
+            // #54): silently ignoring them builds the WRONG thing — a
+            // Dockerfile using `COPY --from=<name>` fails mid-build with a
+            // confusing "no such context" error, and a remote URL context
+            // fails as "Dockerfile does not exist" in the daemon's cwd. A
+            // request-level 400 names the actual gap instead.
+            // `additionalbuildcontexts` arrives REPEATED (one JSON map entry
+            // per --build-context), so presence is checked on the raw query —
+            // Vapor's decoder would keep only the last scalar value.
+            if !allQueryValues(named: "additionalbuildcontexts", from: req.url.query).isEmpty {
+                throw Abort(
+                    .badRequest,
+                    reason:
+                        "additional build contexts (--build-context) are not supported; a Dockerfile using COPY --from=<name> would fail mid-build"
+                )
+            }
+            if let remote = query.remote, !remote.isEmpty {
+                throw Abort(
+                    .badRequest,
+                    reason: "remote build contexts are not supported; pass a local context directory"
+                )
+            }
+
             // Apply Docker API defaults if not provided
             if query.dockerfile == nil { query.dockerfile = "Dockerfile" }
             if query.q == nil { query.q = false }
