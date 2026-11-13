@@ -63,6 +63,18 @@ struct BuildUnsupportedParamsTests {
             try await app.testing().test(.POST, "v1.51/build?additionalbuildcontexts=ctx2") { res async throws in
                 #expect(res.status == .badRequest)
             }
+            // THE repeated-key edge the raw-query guard exists for: a
+            // populated occurrence followed by an EMPTY one. Vapor's decoder
+            // keeps only the LAST value — a decoded-field check would see the
+            // empty string and wave the build through to its mid-build
+            // failure; the raw-query presence check must still reject it.
+            try await app.testing().test(
+                .POST,
+                "v1.51/build?additionalbuildcontexts=%7B%22ctx2%22%3A%20%22.%2Fextra%22%7D&additionalbuildcontexts="
+            ) { res async throws in
+                #expect(res.status == .badRequest)
+                #expect(try Self.body(res).contains("additional build contexts"))
+            }
         }
     }
 
