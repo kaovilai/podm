@@ -251,8 +251,11 @@ the next build reuses the warm BuildKit cache instead of paying a cold start
 
 - Each running builder holds its configured size in RAM — 2 vCPU / 2048 MB per
   flavor by default (`PODM_BUILDER_*` / `PODM_QEMU_BUILDER_*` above), more if
-  you sized it up. A build that used the QEMU (emulated-arch) builder leaves
-  **two** builders resident.
+  you sized it up. How many builders are resident depends on what your builds
+  used: an arm64/amd64 build leaves the Rosetta builder, an emulated-arch
+  build leaves the QEMU builder, a mixed-platform build leaves **both** — and
+  builders started by earlier builds stay resident too, regardless of what
+  the latest build used.
 - The daemon itself won't idle-exit while a builder runs: podmd's idle exit
   (`PODM_IDLE_EXIT_SECS`, default 90 s under launchd) counts running
   containers, and builders are containers. That's deliberate — a stopped
