@@ -109,6 +109,26 @@ struct LabelNormalizationTests {
             ]) == ResourceLabelKeys.role)
     }
 
+    @Test("Reserved keys are detected through their NORMALIZED forms too")
+    func normalizedReservedDetected() {
+        // sanitize() lowercases keys and turns underscores into hyphens, so
+        // case/underscore variants would land on the container AS the
+        // reserved key — bypassing an exact-match guard and forging builder
+        // identity.
+        #expect(
+            LabelNormalization.containsReservedKey(
+                ["COM.APPLE.CONTAINER.RESOURCE.ROLE": "builder"]) == true)
+        #expect(
+            LabelNormalization.containsReservedKey(
+                ["com_apple_container_resource_role": "builder"]) == true)
+        #expect(
+            LabelNormalization.containsReservedKey(
+                ["PODM_LABEL_ORIGINAL_KEYS": "x"]) == true)
+        #expect(
+            LabelNormalization.containsReservedKey(
+                ["Com.Example.Own": "x"]) == false)
+    }
+
     @Test("Reserved mapping key in input is detected by containsReservedKey")
     func reservedMappingKeyDetected() {
         let labels = [LabelNormalization.mappingKey: "anything"]
