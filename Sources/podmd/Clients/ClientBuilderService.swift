@@ -45,6 +45,17 @@ protocol ClientBuilderProtocol: Sendable {
     /// Connect to the builder, starting it if necessary.
     /// Pass `qemu: true` when the build requires platforms other than arm64/amd64.
     func connect(timeout: Duration, retryInterval: Duration, qemu: Bool, logger: Logger) async throws -> Builder
+    /// Size-aware variants: `requested` carries the build's explicit
+    /// --memory / --cpu-quota / --cpu-period ask (nil when the user passed
+    /// no resource flags — never a default). Implementations size a builder
+    /// they have to create at max(configured, requested) and may recreate a
+    /// running builder that is smaller than an explicit ask.
+    func ensureReachable(
+        timeout: Duration, retryInterval: Duration, qemu: Bool, requested: BuilderResourceRequest?, logger: Logger
+    ) async throws
+    func connect(
+        timeout: Duration, retryInterval: Duration, qemu: Bool, requested: BuilderResourceRequest?, logger: Logger
+    ) async throws -> Builder
     func prune(_ request: BuilderPruneRequest, logger: Logger) async throws -> BuilderPruneResult
     func diskUsage(logger: Logger) async throws -> [BuilderCacheRecord]
 }
@@ -57,6 +68,19 @@ extension ClientBuilderProtocol {
     func connect(timeout: Duration, retryInterval: Duration, logger: Logger) async throws -> Builder {
         try await connect(timeout: timeout, retryInterval: retryInterval, qemu: false, logger: logger)
     }
+
+    // Default size-aware behavior: no explicit ask, so the 4-argument form
+    // applies. Existing mocks only implement the 4-argument requirements.
+    func ensureReachable(
+        timeout: Duration, retryInterval: Duration, qemu: Bool, requested: BuilderResourceRequest?, logger: Logger
+    ) async throws {
+        try await ensureReachable(timeout: timeout, retryInterval: retryInterval, qemu: qemu, logger: logger)
+    }
+    func connect(
+        timeout: Duration, retryInterval: Duration, qemu: Bool, requested: BuilderResourceRequest?, logger: Logger
+    ) async throws -> Builder {
+        try await connect(timeout: timeout, retryInterval: retryInterval, qemu: qemu, logger: logger)
+    }
 }
 
 struct ClientBuilderService: ClientBuilderProtocol {
@@ -64,23 +88,31 @@ struct ClientBuilderService: ClientBuilderProtocol {
     private let networkClient = ReconnectingContainerClient(makeClient: { NetworkClient() })
     private let builderContainerId: String
     private let builderPort: UInt32
-    private let builderCPUs: Int64
-    private let builderMemory: String
+    /// Per-flavor sizing floors from PODM_BUILDER_* / PODM_QEMU_BUILDER_*
+    /// env knobs (boot-time); explicit per-build requests escalate on top.
+    private let rosettaResources: BuilderResourceRequest
+    private let qemuResources: BuilderResourceRequest
     private let appSupportURL: URL
     private let containerSystemConfig: ContainerSystemConfig
 
     init(
         builderContainerId: String = "buildkit",
         builderPort: UInt32 = 8088,
-        builderCPUs: Int64 = 2,
-        builderMemory: String = "2048MB",
+        rosettaResources: BuilderResourceRequest = BuilderResourceRequest(
+            memoryInBytes: BuilderResourceKnobs.defaultMemoryInBytes,
+            cpus: BuilderResourceKnobs.defaultCPUs
+        ),
+        qemuResources: BuilderResourceRequest = BuilderResourceRequest(
+            memoryInBytes: BuilderResourceKnobs.defaultMemoryInBytes,
+            cpus: BuilderResourceKnobs.defaultCPUs
+        ),
         appSupportURL: URL,
         containerSystemConfig: ContainerSystemConfig
     ) {
         self.builderContainerId = builderContainerId
         self.builderPort = builderPort
-        self.builderCPUs = builderCPUs
-        self.builderMemory = builderMemory
+        self.rosettaResources = rosettaResources
+        self.qemuResources = qemuResources
         self.appSupportURL = appSupportURL
         self.containerSystemConfig = containerSystemConfig
     }
@@ -206,7 +238,13 @@ struct ClientBuilderService: ClientBuilderProtocol {
     }
 
     func ensureReachable(timeout: Duration, retryInterval: Duration, qemu: Bool, logger: Logger) async throws {
-        _ = try await runningBuilderContainer(qemu: qemu, logger: logger)
+        try await ensureReachable(timeout: timeout, retryInterval: retryInterval, qemu: qemu, requested: nil, logger: logger)
+    }
+
+    func ensureReachable(
+        timeout: Duration, retryInterval: Duration, qemu: Bool, requested: BuilderResourceRequest?, logger: Logger
+    ) async throws {
+        _ = try await runningBuilderContainer(qemu: qemu, requested: requested, logger: logger)
 
         let clock = ContinuousClock()
         let deadline = clock.now + timeout
@@ -214,7 +252,7 @@ struct ClientBuilderService: ClientBuilderProtocol {
 
         while clock.now < deadline {
             do {
-                let socket = try await dialBuilderSocket(qemu: qemu)
+                let socket = try await dialBuilderSocket(qemu: qemu, requested: requested)
                 try? socket.close()
                 return
             } catch {
@@ -232,7 +270,13 @@ struct ClientBuilderService: ClientBuilderProtocol {
     }
 
     func connect(timeout: Duration, retryInterval: Duration, qemu: Bool, logger: Logger) async throws -> Builder {
-        _ = try await runningBuilderContainer(qemu: qemu, logger: logger)
+        try await connect(timeout: timeout, retryInterval: retryInterval, qemu: qemu, requested: nil, logger: logger)
+    }
+
+    func connect(
+        timeout: Duration, retryInterval: Duration, qemu: Bool, requested: BuilderResourceRequest?, logger: Logger
+    ) async throws -> Builder {
+        _ = try await runningBuilderContainer(qemu: qemu, requested: requested, logger: logger)
 
         let clock = ContinuousClock()
         let deadline = clock.now + timeout
@@ -240,7 +284,7 @@ struct ClientBuilderService: ClientBuilderProtocol {
 
         while clock.now < deadline {
             do {
-                let socket = try await dialBuilderSocket(qemu: qemu)
+                let socket = try await dialBuilderSocket(qemu: qemu, requested: requested)
                 let group = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
                 let builder = try await Builder(socket: socket, group: group, logger: logger)
                 do {
@@ -264,40 +308,174 @@ struct ClientBuilderService: ClientBuilderProtocol {
         throw ContainerizationError(.timeout, message: "Timeout waiting for connection to builder")
     }
 
-    private func dialBuilderSocket(qemu: Bool) async throws -> FileHandle {
-        let container = try await runningBuilderContainer(qemu: qemu, logger: nil)
+    private func dialBuilderSocket(qemu: Bool, requested: BuilderResourceRequest? = nil) async throws -> FileHandle {
+        let container = try await runningBuilderContainer(qemu: qemu, requested: requested, logger: nil)
         return try await containerClient.withClient { try await $0.dial(id: container.id, port: builderPort) }
     }
 
-    private func runningBuilderContainer(qemu: Bool, logger: Logger?) async throws -> ContainerSnapshot {
-        let containerID = resolvedContainerId(qemu: qemu)
-        let container: ContainerSnapshot
-        do {
-            container = try await containerClient.withClient { try await $0.get(id: containerID) }
-        } catch let error as ContainerizationError where error.code == .notFound {
-            logger?.info("Builder container not found, creating a new builder instance")
-            do {
-                return try await createAndStartBuilder(qemu: qemu, logger: logger)
-            } catch {
-                // A concurrent caller may have created it between our own `get` miss and this
-                // `create` call — this codebase's own split-build (see BuildRoute) can now
-                // issue genuinely concurrent build requests, some of which may need the same
-                // cold-started builder. If someone else won the race, use what they created
-                // instead of failing this request; if `get` also fails, this wasn't a race —
-                // propagate the original creation error. Routed through the same status
-                // handling below (not returned directly) — the race winner's container could
-                // still be `.stopped`/`.stopping` at the exact moment we observe it.
-                guard let existing = try? await containerClient.withClient({ try await $0.get(id: containerID) }) else {
-                    throw error
-                }
-                return try await ensureRunning(existing, qemu: qemu, logger: logger)
-            }
-        }
+    /// Serializes builder lookup/replace decisions PER FLAVOR: a one-slot
+    /// `VMLifecycleAdmission` each, deliberately NOT a bare actor — actor
+    /// methods are reentrant across await points, so an actor method that
+    /// awaits a closure does not exclude other callers while that closure
+    /// runs. Concurrent resizing calls on the same flavor would then read
+    /// the same stale snapshot and delete each other's fresh VM (each seeing
+    /// the other's replacement as an undersized leftover). The admission's
+    /// continuation-based slot is held for the whole closure — lookup,
+    /// replacement, and startup all happen under it.
+    ///
+    /// One slot PER FLAVOR, not one shared: a QEMU cold start (image fetch,
+    /// VM create, BuildKit boot — minutes on first run) must not block a
+    /// Rosetta build whose builder is already running, an unbounded wait
+    /// that connect/ensureReachable only start counting after it. Cross-
+    /// flavor concurrent builder creation is not new: two build CLIENTS
+    /// (one per flavor) already race builder creation without any gating,
+    /// and builder creation has never gone through
+    /// `VMLifecycleAdmission.shared`'s transition pool.
+    private let rosettaReplacementSerializer = VMLifecycleAdmission(limit: 1)
+    private let qemuReplacementSerializer = VMLifecycleAdmission(limit: 1)
 
-        return try await ensureRunning(container, qemu: qemu, logger: logger)
+    private func runningBuilderContainer(
+        qemu: Bool, requested: BuilderResourceRequest? = nil, logger: Logger?
+    ) async throws -> ContainerSnapshot {
+        let containerID = resolvedContainerId(qemu: qemu)
+        // Per-flavor slot (through the tested accessor — the single source
+        // of truth the wiring regression test pins): same-flavor lookups and
+        // replacements stay atomic, the other flavor never waits on this
+        // one's cold start. The WAIT is bounded: a holder whose container
+        // operations hang against a wedged apiserver (the apple/container
+        // XPC-hang class) would otherwise queue every later build on this
+        // flavor indefinitely. 15 minutes comfortably covers a legitimate
+        // first-run cold start (builder image fetch + VM boot + BuildKit
+        // init); beyond it, the queued build fails fast with an actionable
+        // QueueTimeout instead of hanging.
+        return try await replacementSerializer(forQEMU: qemu).withSlot(timeoutNs: 900_000_000_000) { [self] in
+            let container: ContainerSnapshot
+            do {
+                container = try await containerClient.withClient { try await $0.get(id: containerID) }
+            } catch let error as ContainerizationError where error.code == .notFound {
+                logger?.info("Builder container not found, creating a new builder instance")
+                do {
+                    let resources = Self.desiredResources(
+                        requested: requested, configured: configuredResources(qemu: qemu), existing: nil)
+                    return try await createAndStartBuilder(qemu: qemu, resources: resources, logger: logger)
+                } catch {
+                    // A concurrent caller may have created it between our own `get` miss and this
+                    // `create` call — this codebase's own split-build (see BuildRoute) can now
+                    // issue genuinely concurrent build requests, some of which may need the same
+                    // cold-started builder. If someone else won the race, use what they created
+                    // instead of failing this request — but still through the sizing logic below,
+                    // because the winner may have provisioned SMALLER than this caller's ask;
+                    // if `get` also fails, this wasn't a race — propagate the original error.
+                    guard let existing = try? await containerClient.withClient({ try await $0.get(id: containerID) }) else {
+                        throw error
+                    }
+                    return try await sizedExistingBuilder(existing, qemu: qemu, requested: requested, logger: logger)
+                }
+            }
+
+            return try await sizedExistingBuilder(container, qemu: qemu, requested: requested, logger: logger)
+        }
     }
 
-    private func ensureRunning(_ container: ContainerSnapshot, qemu: Bool, logger: Logger?) async throws -> ContainerSnapshot {
+    /// Applies the sizing decision to a builder that exists: keep it when it
+    /// already covers what this build wants, replace it — never shrinking a
+    /// field it already has — when an explicit ask or a raised env floor
+    /// exceeds its current allocation.
+    private func sizedExistingBuilder(
+        _ container: ContainerSnapshot, qemu: Bool, requested: BuilderResourceRequest?, logger: Logger?
+    ) async throws -> ContainerSnapshot {
+        let containerID = resolvedContainerId(qemu: qemu)
+        // The role label — not the name — is a builder's identity. An ordinary
+        // `docker run --name buildkit` container answering to the builder's
+        // lookup name must never be stopped, deleted, or resized by these
+        // paths (deletion destroys its writable disk); fail with a clear
+        // name-collision error instead of touching it.
+        guard Self.isPodmBuilder(container) else {
+            throw ContainerizationError(
+                .invalidState,
+                message:
+                    "container '\(containerID)' exists but is not a podm builder (no \(ResourceLabelKeys.role)=\(ResourceRoleValues.builder) label) — refusing to stop, delete, or resize it. Remove or rename that container, or configure a different builder id."
+            )
+        }
+        let current = Self.effectiveResources(of: container)
+        let desired = Self.desiredResources(
+            requested: requested, configured: configuredResources(qemu: qemu), existing: current)
+        // `desired` folds `current` in per field, so this fires exactly when
+        // the explicit ask or the env floor exceeds what the builder has —
+        // never when they merely redistribute between fields.
+        if current.memoryInBytes < desired.memoryInBytes || current.cpus < desired.cpus {
+            logger?.warning(
+                """
+                Builder '\(containerID)' (\(current.memoryInBytes) bytes / \(current.cpus) vCPU) is smaller \
+                than wanted (\(desired.memoryInBytes) bytes / \(desired.cpus) vCPU) — recreating it at the \
+                larger size. The BuildKit cache inside the old builder is reset; a build concurrently \
+                in flight on this builder may fail.
+                """
+            )
+            do {
+                try await containerClient.withClient { try await $0.stop(id: container.id) }
+            } catch {
+                logger?.warning("Stopping undersized builder '\(containerID)' failed (\(error)) — trying to delete it anyway")
+            }
+            try? await containerClient.withClient { try await $0.delete(id: container.id) }
+            return try await createAndStartBuilder(qemu: qemu, resources: desired, logger: logger)
+        }
+        return try await ensureRunning(container, qemu: qemu, resources: desired, logger: logger)
+    }
+
+    /// The floor for this flavor: env knobs at boot (RouteRegistry).
+    private func configuredResources(qemu: Bool) -> BuilderResourceRequest {
+        qemu ? qemuResources : rosettaResources
+    }
+
+    /// The replacement slot a given builder flavor serializes through —
+    /// internal (not private) so a regression test can pin that the two
+    /// flavors do NOT share one slot (a shared one lets a QEMU cold start
+    /// block Rosetta builds; see the fields' doc comment).
+    func replacementSerializer(forQEMU qemu: Bool) -> VMLifecycleAdmission {
+        qemu ? qemuReplacementSerializer : rosettaReplacementSerializer
+    }
+
+    /// Per-field max of the build's explicit ask, the env floor, and the
+    /// builder's current allocation, clamped to the host — replacement never
+    /// shrinks a field the running builder already has. A blank/absent
+    /// request contributes nothing; `existing` may be nil (fresh creation).
+    static func desiredResources(
+        requested: BuilderResourceRequest?, configured: BuilderResourceRequest, existing: BuilderResourceRequest?
+    ) -> BuilderResourceRequest {
+        let ask = (requested?.isBlank == false) ? requested : nil
+        return BuilderResourceRequest(
+            memoryInBytes: max(ask?.memoryInBytes ?? 0, max(configured.memoryInBytes, existing?.memoryInBytes ?? 0)),
+            cpus: max(ask?.cpus ?? 0, max(configured.cpus, existing?.cpus ?? 0))
+        ).clampedToHost()
+    }
+
+    /// `true` only for containers podm itself provisioned as builders. The
+    /// role label is the identity, NOT the name: an ordinary container that
+    /// happens to be named `buildkit` must never be treated as a builder by
+    /// the sizing or lifecycle paths.
+    static func isPodmBuilder(_ container: ContainerSnapshot) -> Bool {
+        container.configuration.labels[ResourceLabelKeys.role] == ResourceRoleValues.builder
+    }
+
+    /// The resources a builder snapshot effectively has. A pre-existing
+    /// builder that reports unset/zero fields counts as the historical
+    /// default (2 vCPU / 2048 MiB) so it isn't needlessly recreated.
+    static func effectiveResources(of container: ContainerSnapshot) -> BuilderResourceRequest {
+        let resources = container.configuration.resources
+        let cpus = resources.cpus > 0 ? Int64(resources.cpus) : BuilderResourceKnobs.defaultCPUs
+        let memory =
+            resources.memoryInBytes > 0
+            ? Int64(resources.memoryInBytes) : BuilderResourceKnobs.defaultMemoryInBytes
+        return BuilderResourceRequest(memoryInBytes: memory, cpus: cpus)
+    }
+
+    /// `resources` is the sizing decision already made for this caller — the
+    /// `.unknown` recovery path recreates at it, so recovery can't silently
+    /// drop a validated per-build ask down to the configured floor.
+    private func ensureRunning(
+        _ container: ContainerSnapshot, qemu: Bool, resources: BuilderResourceRequest, logger: Logger?
+    ) async throws -> ContainerSnapshot {
         let containerID = resolvedContainerId(qemu: qemu)
         guard container.status == .running else {
             switch container.status {
@@ -312,7 +490,7 @@ struct ClientBuilderService: ClientBuilderProtocol {
             case .unknown:
                 logger?.warning("Builder container has unknown state, recreating it")
                 try? await containerClient.withClient { try await $0.delete(id: container.id) }
-                return try await createAndStartBuilder(qemu: qemu, logger: logger)
+                return try await createAndStartBuilder(qemu: qemu, resources: resources, logger: logger)
             @unknown default:
                 throw ContainerizationError(.invalidState, message: "BuildKit container '\(containerID)' is in an unsupported state")
             }
@@ -328,7 +506,9 @@ struct ClientBuilderService: ClientBuilderProtocol {
         qemu ? "\(builderContainerId)-qemu" : builderContainerId
     }
 
-    private func createAndStartBuilder(qemu: Bool, logger: Logger?) async throws -> ContainerSnapshot {
+    private func createAndStartBuilder(
+        qemu: Bool, resources: BuilderResourceRequest, logger: Logger?
+    ) async throws -> ContainerSnapshot {
         let containerID = resolvedContainerId(qemu: qemu)
         let exportsMount = appSupportURL.appendingPathComponent("builder")
         if !FileManager.default.fileExists(atPath: exportsMount.path) {
@@ -358,8 +538,7 @@ struct ClientBuilderService: ClientBuilderProtocol {
             imageEnv: imageConfig?.env,
             useRosetta: useRosetta,
             qemu: qemu,
-            builderCPUs: builderCPUs,
-            builderMemory: builderMemory,
+            resources: resources,
             exportsMountPath: exportsMount.path,
             networkId: defaultNetwork.id,
             nameserver: nameserver
@@ -380,8 +559,7 @@ struct ClientBuilderService: ClientBuilderProtocol {
         imageEnv: [String]?,
         useRosetta: Bool,
         qemu: Bool,
-        builderCPUs: Int64,
-        builderMemory: String,
+        resources: BuilderResourceRequest,
         exportsMountPath: String,
         networkId: String,
         nameserver: String
@@ -402,7 +580,8 @@ struct ClientBuilderService: ClientBuilderProtocol {
         )
 
         var config = ContainerConfiguration(id: builderContainerId, image: imageDescription, process: processConfig)
-        config.resources = try Parser.resources(cpus: builderCPUs, memory: builderMemory, defaultCPUs: BuildConfig.defaultCPUs, defaultMemory: BuildConfig.defaultMemory)
+        config.resources.cpus = Int(clamping: resources.cpus)
+        config.resources.memoryInBytes = UInt64(clamping: resources.memoryInBytes)
         config.labels = [ResourceLabelKeys.role: ResourceRoleValues.builder]
         config.mounts = [
             Filesystem.tmpfs(destination: "/run", options: []),

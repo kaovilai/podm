@@ -196,6 +196,8 @@ docker context use podm
 | `PODM_DNS_PORT` | `2054` | Host-side port of podm's embedded DNS resolver |
 | `PODM_DNS_UPSTREAM` | `1.1.1.1:53` | Upstream resolver for names the embedded DNS server cannot answer locally: IPv4 literal with optional `:port` (default `1.1.1.1:53`); `--dns-upstream` flag wins, invalid env warns and keeps the default |
 | `PODM_CLEAN_VOLUMES` | enabled | Set `false` to opt out of removing `/lost+found` from named-volume EXT4 images (it breaks Postgres `initdb`; per-volume opt-out label: `podm.clean-volumes=false`) |
+| `PODM_BUILDER_CPUS` / `PODM_BUILDER_MEMORY` | `2` / `2048MB` | vCPUs and memory for the Rosetta (native + amd64-via-Rosetta) builder VM. Memory accepts bytes or `k`/`m`/`g` suffixes. Read at daemon start; takes effect when the builder is next created or recreated |
+| `PODM_QEMU_BUILDER_CPUS` / `PODM_QEMU_BUILDER_MEMORY` | `2` / `2048MB` | Same, for the QEMU (emulated-arch: s390x, ppc64le, …) builder VM — emulated builds are CPU-hungry, so big multi-arch projects usually want this higher |
 | `CONTAINER_HOST` / `DOCKER_HOST` | set by shim | Point the real CLIs at `unix://$HOME/.podm/container.sock` — normally you never set these yourself |
 
 ### Volume sync modes
@@ -240,6 +242,38 @@ How it works:
   concurrently, and merging the halves into a single image index.
 
 Details and examples: [docs/multi-arch.md](docs/multi-arch.md).
+
+### What stays resident after a build
+
+Builder VMs are **not** torn down when the build finishes — they keep running so
+the next build reuses the warm BuildKit cache instead of paying a cold start
+(image fetch + VM boot + BuildKit init, minutes on first run). That means:
+
+- Each running builder holds its configured size in RAM — 2 vCPU / 2048 MB per
+  flavor by default (`PODM_BUILDER_*` / `PODM_QEMU_BUILDER_*` above), more if
+  you sized it up. How many builders are resident depends on what your builds
+  used: an arm64/amd64 build leaves the Rosetta builder, an emulated-arch
+  build leaves the QEMU builder, a mixed-platform build leaves **both** — and
+  builders started by earlier builds stay resident too, regardless of what
+  the latest build used.
+- The daemon itself won't idle-exit while a builder runs: podmd's idle exit
+  (`PODM_IDLE_EXIT_SECS`, default 90 s under launchd) counts running
+  containers, and builders are containers. That's deliberate — a stopped
+  daemon would just be woken again by the next build anyway.
+
+To reclaim the RAM, stop the builder(s) — they are ordinary containers:
+
+```bash
+docker stop buildkit        # the Rosetta (native + amd64) builder
+docker stop buildkit-qemu   # only exists if you built emulated arches
+```
+
+Stopping is **cache-preserving**: the builder's disk (with the BuildKit cache)
+survives a stop, and the next build starts the same VM again — you pay the boot,
+not the cache rebuild. Only a *replacement* (recreating the builder to size it
+up, or deleting the container) resets the cache. Once no builder runs and no
+other activity is in flight, podmd itself exits per `PODM_IDLE_EXIT_SECS` and
+consumes zero RAM until the next client call wakes it.
 
 ## How it works
 

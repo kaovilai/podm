@@ -237,7 +237,10 @@ extension BuildRoute {
             let target = query.target!
             let platformQueryValues = BuildRoute.parseAllPlatformQueryValues(from: req.url.query)
             let platformString = platformQueryValues.isEmpty ? query.platform! : platformQueryValues.joined(separator: ",")
-            let memory = query.memory ?? 2_048_000_000  // 2GB default
+            // Explicit resource ask (nil when the user passed no resource flags):
+            // sizes a newly-created builder VM, escalates a smaller running one.
+            let resourceRequest = BuilderResourceRequest.fromQuery(
+                memory: query.memory, cpuperiod: query.cpuperiod, cpuquota: query.cpuquota)
             let manifestName = query.manifest?.isEmpty == false ? query.manifest : nil
 
             // Parse the platform parameter early so we can select the right builder mode
@@ -272,11 +275,11 @@ extension BuildRoute {
             do {
                 if needsRosettaBuilder {
                     try await builderClient.ensureReachable(
-                        timeout: .seconds(3), retryInterval: .milliseconds(250), qemu: false, logger: req.logger)
+                        timeout: .seconds(3), retryInterval: .milliseconds(250), qemu: false, requested: resourceRequest, logger: req.logger)
                 }
                 if needsQEMU {
                     try await builderClient.ensureReachable(
-                        timeout: .seconds(3), retryInterval: .milliseconds(250), qemu: true, logger: req.logger)
+                        timeout: .seconds(3), retryInterval: .milliseconds(250), qemu: true, requested: resourceRequest, logger: req.logger)
                 }
             } catch {
                 throw Abort(.serviceUnavailable, reason: "BuildKit builder is not running or reachable: \(error.localizedDescription)")
@@ -403,7 +406,7 @@ extension BuildRoute {
                             pull: pull,
                             target: target,
                             platforms: parsedPlatforms,
-                            memory: memory,
+                            resourceRequest: resourceRequest,
                             quiet: quiet,
                             builderClient: builderClient,
                             systemConfig: systemConfig,
@@ -482,7 +485,7 @@ extension BuildRoute {
         pull: Bool,
         target: String,
         platforms: [Platform],
-        memory: Int,
+        resourceRequest: BuilderResourceRequest,
         quiet: Bool,
         builderClient: ClientBuilderProtocol,
         systemConfig: ContainerSystemConfig,
@@ -593,7 +596,7 @@ extension BuildRoute {
             let result = try await runSingleBuild(
                 dockerfile: dockerfile, dockerfileData: dockerfileData, contextDir: contextDir,
                 buildArgs: buildArgs, labels: labels, noCache: noCache, pull: pull, target: target,
-                platforms: platforms, qemu: !qemuPlatforms.isEmpty,
+                platforms: platforms, resourceRequest: resourceRequest, qemu: !qemuPlatforms.isEmpty,
                 tags: allTags.isEmpty ? [imageName] : allTags, quiet: quiet,
                 builderExportPath: builderExportPath, buildIDSuffix: "single",
                 builderClient: builderClient, systemConfig: systemConfig,
@@ -621,7 +624,7 @@ extension BuildRoute {
             async let rosettaResult = runSingleBuild(
                 dockerfile: dockerfile, dockerfileData: dockerfileData, contextDir: contextDir,
                 buildArgs: buildArgs, labels: labels, noCache: noCache, pull: pull, target: target,
-                platforms: rosettaPlatforms, qemu: false, tags: [rosettaTag], quiet: quiet,
+                platforms: rosettaPlatforms, resourceRequest: resourceRequest, qemu: false, tags: [rosettaTag], quiet: quiet,
                 builderExportPath: builderExportPath, buildIDSuffix: "rosetta",
                 builderClient: builderClient, systemConfig: systemConfig,
                 sendStreamMessage: sendStreamMessage, logger: logger
@@ -629,7 +632,7 @@ extension BuildRoute {
             async let qemuResult = runSingleBuild(
                 dockerfile: dockerfile, dockerfileData: dockerfileData, contextDir: contextDir,
                 buildArgs: buildArgs, labels: labels, noCache: noCache, pull: pull, target: target,
-                platforms: qemuPlatforms, qemu: true, tags: [qemuTag], quiet: quiet,
+                platforms: qemuPlatforms, resourceRequest: resourceRequest, qemu: true, tags: [qemuTag], quiet: quiet,
                 builderExportPath: builderExportPath, buildIDSuffix: "qemu",
                 builderClient: builderClient, systemConfig: systemConfig,
                 sendStreamMessage: sendStreamMessage, logger: logger
@@ -758,6 +761,7 @@ extension BuildRoute {
         pull: Bool,
         target: String,
         platforms: [Platform],
+        resourceRequest: BuilderResourceRequest,
         qemu: Bool,
         tags: [String],
         quiet: Bool,
@@ -775,6 +779,7 @@ extension BuildRoute {
             timeout: timeout,
             retryInterval: .seconds(1),
             qemu: qemu,
+            requested: resourceRequest,
             logger: logger
         )
         sendStreamMessage(" ---> Successfully connected to builder")

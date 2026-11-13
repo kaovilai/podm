@@ -1,3 +1,4 @@
+import ContainerResource
 import Foundation
 import Testing
 
@@ -89,6 +90,55 @@ struct LabelNormalizationTests {
     func originallyEmptyKeyDropped() {
         // "" normalizes to "" — the guard must fire even when normalizedKey == key
         #expect(LabelNormalization.sanitize(["": "value"]).isEmpty)
+    }
+
+    @Test("The system resource-role label is reserved — builder identity is unforgeable")
+    func systemRoleLabelReserved() {
+        // ClientBuilderService gates stop/delete/resize on the role label; if
+        // a user container could carry it, a container named after a builder
+        // would be deleted by the resize path. It must be rejected at create.
+        #expect(
+            LabelNormalization.containsReservedKey(
+                [ResourceLabelKeys.role: "builder"]) == true)
+        #expect(
+            LabelNormalization.containsReservedKey(
+                [ResourceLabelKeys.plugin: "x"]) == true)
+        #expect(
+            LabelNormalization.firstReservedKey(in: [
+                ResourceLabelKeys.role: "builder"
+            ]) == ResourceLabelKeys.role)
+    }
+
+    @Test("Reserved keys are detected through their NORMALIZED forms too")
+    func normalizedReservedDetected() {
+        // sanitize() lowercases keys and trims stray separators, so case
+        // variants and trailing-separator variants of a reserved key land on
+        // the container AS the reserved key itself — the exact-match guard
+        // must catch what storage would produce.
+        #expect(
+            LabelNormalization.containsReservedKey(
+                ["COM.APPLE.CONTAINER.RESOURCE.ROLE": "builder"]) == true)
+        #expect(
+            LabelNormalization.containsReservedKey(
+                ["com.apple.container.resource.role.": "builder"]) == true)
+        // Case variant of the mapping key, PRESERVING its hyphen placement —
+        // dots never become hyphens, so PODM.LABEL.ORIGINAL.KEYS would be a
+        // different key entirely.
+        #expect(
+            LabelNormalization.containsReservedKey(
+                ["PODM.LABEL-ORIGINAL-KEYS": "x"]) == true)
+        #expect(
+            LabelNormalization.containsReservedKey(
+                ["PODM.LABEL.ORIGINAL.KEYS": "x"]) == false)
+        // Underscores become HYPHENS, not dots — the underscore form is a
+        // genuinely different key, not a forgery vector. Pinned so the
+        // normalization contract stays explicit.
+        #expect(
+            LabelNormalization.containsReservedKey(
+                ["com_apple_container_resource_role": "builder"]) == false)
+        #expect(
+            LabelNormalization.containsReservedKey(
+                ["Com.Example.Own": "x"]) == false)
     }
 
     @Test("Reserved mapping key in input is detected by containsReservedKey")
