@@ -313,25 +313,34 @@ struct ClientBuilderService: ClientBuilderProtocol {
         return try await containerClient.withClient { try await $0.dial(id: container.id, port: builderPort) }
     }
 
-    /// Serializes builder lookup/replace decisions per process: a ONE-SLOT
-    /// `VMLifecycleAdmission`, deliberately NOT a bare actor — actor methods
-    /// are reentrant across await points, so an actor method that awaits a
-    /// closure does not exclude other callers while that closure runs.
-    /// Concurrent resizing calls would then read the same stale snapshot and
-    /// delete each other's fresh VM (each seeing the other's replacement as
-    /// an undersized leftover). The admission's continuation-based slot is
-    /// held for the whole closure — lookup, replacement, and startup all
-    /// happen under it.
-    private let replacementSerializer = VMLifecycleAdmission(limit: 1)
+    /// Serializes builder lookup/replace decisions PER FLAVOR: a one-slot
+    /// `VMLifecycleAdmission` each, deliberately NOT a bare actor — actor
+    /// methods are reentrant across await points, so an actor method that
+    /// awaits a closure does not exclude other callers while that closure
+    /// runs. Concurrent resizing calls on the same flavor would then read
+    /// the same stale snapshot and delete each other's fresh VM (each seeing
+    /// the other's replacement as an undersized leftover). The admission's
+    /// continuation-based slot is held for the whole closure — lookup,
+    /// replacement, and startup all happen under it.
+    ///
+    /// One slot PER FLAVOR, not one shared: a QEMU cold start (image fetch,
+    /// VM create, BuildKit boot — minutes on first run) must not block a
+    /// Rosetta build whose builder is already running, an unbounded wait
+    /// that connect/ensureReachable only start counting after it. Two
+    /// flavors booting concurrently is the PRE-PR behavior (split-build
+    /// cold-starts both at once) and within `VMLifecycleAdmission.shared`'s
+    /// own tolerance (limit >= 2 concurrent VM transitions).
+    private let rosettaReplacementSerializer = VMLifecycleAdmission(limit: 1)
+    private let qemuReplacementSerializer = VMLifecycleAdmission(limit: 1)
 
     private func runningBuilderContainer(
         qemu: Bool, requested: BuilderResourceRequest? = nil, logger: Logger?
     ) async throws -> ContainerSnapshot {
         let containerID = resolvedContainerId(qemu: qemu)
-        // Everything inside the slot is a quick get/create/replace decision —
-        // never a reachability wait — so holding it can't stall the other
-        // flavor's cold start for long.
-        return try await replacementSerializer.withSlot { [self] in
+        // Per-flavor slot: same-flavor lookups/replacements stay atomic, the
+        // other flavor never waits on this one's cold start.
+        let serializer = qemu ? qemuReplacementSerializer : rosettaReplacementSerializer
+        return try await serializer.withSlot { [self] in
             let container: ContainerSnapshot
             do {
                 container = try await containerClient.withClient { try await $0.get(id: containerID) }
