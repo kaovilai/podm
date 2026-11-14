@@ -317,7 +317,7 @@ extension ContainerAttachRoute {
 
         // Clear every alias (native AND the Docker hex id): a stale hex-id
         // code from a previous run would otherwise be reported by /wait.
-        await ContainerExitCodeStore.shared.removeAll(
+        let bootGeneration = await ContainerExitCodeStore.shared.beginBoot(
             nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
 
         let process: ClientProcess
@@ -335,7 +335,7 @@ extension ContainerAttachRoute {
             process = try await ContainerClient().bootstrap(id: container.id, stdio: pipes.stdioArray)
         } catch {
             pipes.closeAll()
-            await ContainerExitCodeStore.shared.set(id: container.id, code: -1)
+            await ContainerExitCodeStore.shared.set(id: container.id, code: -1, generation: bootGeneration)
             throw Abort(.internalServerError, reason: "Failed to bootstrap container: \(error.localizedDescription)")
         }
 
@@ -350,7 +350,7 @@ extension ContainerAttachRoute {
         } catch {
             if !isBenignStartRace(error) {
                 pipes.closeAfterHandoff()
-                await ContainerExitCodeStore.shared.set(id: container.id, code: -1)
+                await ContainerExitCodeStore.shared.set(id: container.id, code: -1, generation: bootGeneration)
                 throw Abort(.internalServerError, reason: "Failed to start container: \(error.localizedDescription)")
             }
             startedByThisCall = false
@@ -417,8 +417,8 @@ extension ContainerAttachRoute {
                             fallbackImage: container.configuration.image.reference,
                             fallbackLabels: LabelNormalization.restore(container.configuration.labels),
                             dnsServer: req.application.storage[PodmDNSServerKey.self],
-                            broadcaster: req.application.storage[EventBroadcasterKey.self]
-                        )
+                            broadcaster: req.application.storage[EventBroadcasterKey.self],
+                            bootGeneration: bootGeneration)
                     }
 
                     // Stdout reader
@@ -486,8 +486,8 @@ extension ContainerAttachRoute {
                             fallbackImage: container.configuration.image.reference,
                             fallbackLabels: LabelNormalization.restore(container.configuration.labels),
                             dnsServer: req.application.storage[PodmDNSServerKey.self],
-                            broadcaster: req.application.storage[EventBroadcasterKey.self]
-                        )
+                            broadcaster: req.application.storage[EventBroadcasterKey.self],
+                            bootGeneration: bootGeneration)
                     }
 
                     // Stdout reader
@@ -592,7 +592,7 @@ extension ContainerAttachRoute {
         // /wait can't return a stale status or poll forever).
         // Clear every alias (native AND the Docker hex id): a stale hex-id
         // code from a previous run would otherwise be reported by /wait.
-        await ContainerExitCodeStore.shared.removeAll(
+        let bootGeneration = await ContainerExitCodeStore.shared.beginBoot(
             nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
 
         let process: ClientProcess
@@ -613,7 +613,7 @@ extension ContainerAttachRoute {
             if isBenignStartRace(error) {
                 throw Abort(.conflict, reason: "Container is already starting")
             }
-            await ContainerExitCodeStore.shared.set(id: container.id, code: -1)
+            await ContainerExitCodeStore.shared.set(id: container.id, code: -1, generation: bootGeneration)
             throw Abort(.internalServerError, reason: "Failed to bootstrap container: \(error.localizedDescription)")
         }
 
@@ -624,7 +624,7 @@ extension ContainerAttachRoute {
             if isBenignStartRace(error) {
                 throw Abort(.conflict, reason: "Container is already starting")
             }
-            await ContainerExitCodeStore.shared.set(id: container.id, code: -1)
+            await ContainerExitCodeStore.shared.set(id: container.id, code: -1, generation: bootGeneration)
             throw Abort(.internalServerError, reason: "Failed to start main process: \(error.localizedDescription)")
         }
 
@@ -671,8 +671,8 @@ extension ContainerAttachRoute {
                             fallbackImage: container.configuration.image.reference,
                             fallbackLabels: LabelNormalization.restore(container.configuration.labels),
                             dnsServer: req.application.storage[PodmDNSServerKey.self],
-                            broadcaster: req.application.storage[EventBroadcasterKey.self]
-                        )
+                            broadcaster: req.application.storage[EventBroadcasterKey.self],
+                            bootGeneration: bootGeneration)
                     }
 
                     if let stdoutHandle = pipes.stdout?.read {
@@ -920,8 +920,8 @@ extension ContainerAttachRoute {
                         fallbackImage: container.configuration.image.reference,
                         fallbackLabels: LabelNormalization.restore(container.configuration.labels),
                         dnsServer: req.application.storage[PodmDNSServerKey.self],
-                        broadcaster: req.application.storage[EventBroadcasterKey.self]
-                    )
+                        broadcaster: req.application.storage[EventBroadcasterKey.self],
+                        bootGeneration: bootGeneration)
 
                     // DockerTCPHandler owns pipes.stdin!.write after setStdinWriter(); it closes
                     // it via writeQueue on channelInactive / inputClosed. Closing it here too

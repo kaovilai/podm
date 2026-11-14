@@ -96,7 +96,7 @@ extension ContainerAttachWSRoute {
 
         // Clear every alias (native AND the Docker hex id): a stale hex-id
         // code from a previous run would otherwise be reported by /wait.
-        await ContainerExitCodeStore.shared.removeAll(
+        let bootGeneration = await ContainerExitCodeStore.shared.beginBoot(
             nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
 
         let process: ClientProcess
@@ -124,8 +124,8 @@ extension ContainerAttachWSRoute {
             process = try await ContainerClient().bootstrap(id: container.id, stdio: pipes.stdioArray)
         } catch {
             pipes.closeAll()
-            await ContainerExitCodeStore.shared.set(id: container.id, code: -1)
-            await ContainerExitCodeStore.shared.set(id: hexId, code: -1)
+            await ContainerExitCodeStore.shared.set(id: container.id, code: -1, generation: bootGeneration)
+            await ContainerExitCodeStore.shared.set(id: hexId, code: -1, generation: bootGeneration)
             try? await ws.close(code: .unexpectedServerError)
             return
         }
@@ -141,8 +141,8 @@ extension ContainerAttachWSRoute {
         } catch {
             if !isBenignStartRace(error) {
                 pipes.closeAfterHandoff()
-                await ContainerExitCodeStore.shared.set(id: container.id, code: -1)
-                await ContainerExitCodeStore.shared.set(id: hexId, code: -1)
+                await ContainerExitCodeStore.shared.set(id: container.id, code: -1, generation: bootGeneration)
+                await ContainerExitCodeStore.shared.set(id: hexId, code: -1, generation: bootGeneration)
                 try? await ws.close(code: .unexpectedServerError)
                 return
             }
@@ -189,8 +189,8 @@ extension ContainerAttachWSRoute {
                     fallbackImage: container.configuration.image.reference,
                     fallbackLabels: LabelNormalization.restore(container.configuration.labels),
                     dnsServer: req.application.storage[PodmDNSServerKey.self],
-                    broadcaster: broadcaster
-                )
+                    broadcaster: broadcaster,
+                    bootGeneration: bootGeneration)
 
                 try? await ws.close()
             }

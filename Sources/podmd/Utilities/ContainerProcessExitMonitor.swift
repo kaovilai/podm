@@ -22,7 +22,8 @@ enum ContainerProcessExitMonitor {
         dnsServer: PodmDNSServer?,
         broadcaster: EventBroadcaster?,
         outputFlushGraceNs: UInt64 = ContainerProcessExitMonitor.outputFlushGraceNs,
-        exitCodeRetryDelayNs: UInt64 = 100_000_000
+        exitCodeRetryDelayNs: UInt64 = 100_000_000,
+        bootGeneration: UInt64? = nil
     ) async -> Int32 {
         let code = await ContainerExitCodeStore.resolveExitCode(retryDelayNs: exitCodeRetryDelayNs, wait: wait)
         await ProcessRegistry.shared.remove(id: nativeId)
@@ -30,8 +31,8 @@ enum ContainerProcessExitMonitor {
         // Sleep before recording the code: lets this attachment's own output flush before
         // any die observer wakes and races ahead.
         try? await Task.sleep(nanoseconds: outputFlushGraceNs)
-        await ContainerExitCodeStore.shared.set(id: nativeId, code: code)
-        await ContainerExitCodeStore.shared.set(id: hexId, code: code)
+        await ContainerExitCodeStore.shared.set(id: nativeId, code: code, generation: bootGeneration)
+        await ContainerExitCodeStore.shared.set(id: hexId, code: code, generation: bootGeneration)
 
         // --rm: Apple Container reaps the container itself, so DELETE never arrives to
         // fire ContainerDeleteRoute's cleanup. consumeAutoRemove both gates on --rm and

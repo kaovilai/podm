@@ -28,7 +28,12 @@ actor ContainerExitCodeStore {
     /// returned 255 instead of 3 roughly two runs in three. A real code is
     /// authoritative once recorded; the sentinel may only fill in when no real
     /// code exists yet, and a later real code may still replace it.
-    func set(id: String, code: Int32) {
+    func set(id: String, code: Int32, generation: UInt64? = nil) {
+        // An observer records the boot generation it was armed for: one from a
+        // previous run that completes after a restart must not plant its code
+        // ahead of the new run's — set() rejects every later real code, so the
+        // stale write would pin the old status for the whole new boot.
+        if let generation, let current = generations[id], current != generation { return }
         if let existing = codes[id] {
             let existingIsReal = existing != Self.waitFailureSentinel
             let incomingIsReal = code != Self.waitFailureSentinel
@@ -60,6 +65,24 @@ actor ContainerExitCodeStore {
     func removeAll(nativeId: String, hexId: String) {
         remove(id: nativeId)
         remove(id: hexId)
+    }
+
+    /// The CURRENT boot of a container. Observers capture the token at boot and
+    /// present it when recording; a token no longer current means the observer
+    /// belongs to a run that has since been replaced.
+    private var generations: [String: UInt64] = [:]
+    private var nextGeneration: UInt64 = 0
+
+    /// Starts a new boot: clears every alias (see `removeAll`) and returns the
+    /// generation token this boot's observers must pass to `set`.
+    func beginBoot(nativeId: String, hexId: String) -> UInt64 {
+        nextGeneration &+= 1
+        for id in [nativeId, hexId] {
+            codes.removeValue(forKey: id)
+            exitDates.removeValue(forKey: id)
+            generations[id] = nextGeneration
+        }
+        return nextGeneration
     }
 
     func remove(id: String) {
@@ -511,7 +534,7 @@ struct ClientContainerService: ClientContainerProtocol {
             // Clear the code from EVERY alias this container can be waited on
             // by (see removeAll): a stale hex-id code from a previous run would
             // otherwise be reported by /wait.
-            await ContainerExitCodeStore.shared.removeAll(
+            let bootGeneration = await ContainerExitCodeStore.shared.beginBoot(
                 nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
             try await process.start()
             // Wait for the init process in the background so we can capture its
@@ -522,7 +545,7 @@ struct ClientContainerService: ClientContainerProtocol {
                 let code = await ContainerExitCodeStore.resolveExitCode(logger: exitLogger) {
                     try await process.wait()
                 }
-                await ContainerExitCodeStore.shared.set(id: containerId, code: code)
+                await ContainerExitCodeStore.shared.set(id: containerId, code: code, generation: bootGeneration)
             }
             return true
         } catch {

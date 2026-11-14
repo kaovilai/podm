@@ -202,3 +202,50 @@ struct ExitCodeStoreResolvedCodeTests {
         #expect(await store.get(id: "hex-1") == 0)
     }
 }
+
+/// A boot resets the store, but an observer from the PREVIOUS run can still be
+/// in flight (the start route's detached waiter, an attach monitor). With
+/// "a real code is authoritative once recorded", that late write would pin the
+/// old status for the whole new boot. Observers therefore present the boot
+/// generation they were armed for.
+@Suite("ContainerExitCodeStore — boot generations")
+struct ExitCodeStoreBootGenerationTests {
+
+    @Test("an observer armed for a replaced boot cannot record its code")
+    func staleObserverRejected() async {
+        let nativeId = "gen-native-\(UUID().uuidString)"
+        let hexId = "gen-hex-\(UUID().uuidString)"
+        let first = await ContainerExitCodeStore.shared.beginBoot(nativeId: nativeId, hexId: hexId)
+        let second = await ContainerExitCodeStore.shared.beginBoot(nativeId: nativeId, hexId: hexId)
+        #expect(first != second)
+        defer { Task { await ContainerExitCodeStore.shared.removeAll(nativeId: nativeId, hexId: hexId) } }
+
+        // The previous run's observer finishes late with that run's status.
+        await ContainerExitCodeStore.shared.set(id: nativeId, code: 7, generation: first)
+        await ContainerExitCodeStore.shared.set(id: hexId, code: 7, generation: first)
+        #expect(await ContainerExitCodeStore.shared.get(id: nativeId) == nil)
+        #expect(await ContainerExitCodeStore.shared.get(id: hexId) == nil)
+
+        // The current run's real code is still accepted.
+        await ContainerExitCodeStore.shared.set(id: nativeId, code: 0, generation: second)
+        await ContainerExitCodeStore.shared.set(id: hexId, code: 0, generation: second)
+        #expect(await ContainerExitCodeStore.shared.get(id: nativeId) == 0)
+        #expect(await ContainerExitCodeStore.shared.get(id: hexId) == 0)
+    }
+
+    @Test("a sentinel from a replaced boot cannot block the new run either")
+    func staleSentinelRejected() async {
+        let nativeId = "gen-sentinel-\(UUID().uuidString)"
+        let hexId = "gen-sentinel-hex-\(UUID().uuidString)"
+        let first = await ContainerExitCodeStore.shared.beginBoot(nativeId: nativeId, hexId: hexId)
+        let second = await ContainerExitCodeStore.shared.beginBoot(nativeId: nativeId, hexId: hexId)
+        defer { Task { await ContainerExitCodeStore.shared.removeAll(nativeId: nativeId, hexId: hexId) } }
+
+        await ContainerExitCodeStore.shared.set(
+            id: nativeId, code: ContainerExitCodeStore.waitFailureSentinel, generation: first)
+        #expect(await ContainerExitCodeStore.shared.get(id: nativeId) == nil)
+
+        await ContainerExitCodeStore.shared.set(id: nativeId, code: 3, generation: second)
+        #expect(await ContainerExitCodeStore.shared.get(id: nativeId) == 3)
+    }
+}
