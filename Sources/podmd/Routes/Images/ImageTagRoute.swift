@@ -45,6 +45,10 @@ extension ImageTagRoute {
 
         do {
             _ = try await sourceImage.tag(new: targetReference)
+            // A tag is the same image — the new reference keeps the variant it
+            // was pulled or built for, or `docker run <tag>` would silently fall
+            // back to the host platform.
+            await ImagePlatformStore.shared.copy(from: sourceImage.reference, to: targetReference)
             if let broadcaster = req.application.storage[EventBroadcasterKey.self] {
                 // moby's tag event uses the image digest as Actor.ID and the new
                 // reference as the `name` attribute (no `image`/`from` for image events).

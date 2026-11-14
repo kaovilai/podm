@@ -48,6 +48,7 @@ enum RouteRegistry {
         let containerClient = ClientContainerService()
         await RestartPolicyOverrideStore.shared.configure(storageDirectory: appleContainerAppSupportUrl)
         await ContainerNameOverrideStore.shared.configure(storageDirectory: appleContainerAppSupportUrl)
+        await ImagePlatformStore.shared.configure(storageDirectory: appleContainerAppSupportUrl)
         let imageClient = ClientImageService(containerSystemConfig: systemConfig)
         let healthCheckClient = ClientHealthCheckService()
         let networkClient = ClientNetworkService()

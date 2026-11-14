@@ -13,20 +13,9 @@ struct LibpodImagePullRoute: RouteCollection {
             guard let reference = req.query["reference"] as String?, !reference.isEmpty else {
                 throw Abort(.badRequest, reason: "Missing reference query parameter")
             }
-            let platformString: String? = req.query["platform"]
-
             let (image, tag) = parseReference(reference)
 
-            let platform: Platform
-            if let platformString, !platformString.isEmpty {
-                do {
-                    platform = try platformOrThrow(platformString)
-                } catch {
-                    throw Abort(.badRequest, reason: "Failed to parse platform '\(platformString)': \(error.localizedDescription)")
-                }
-            } else {
-                platform = currentPlatform()
-            }
+            let platform = try LibpodImagePullRoute.platform(from: req)
 
             let response = Response()
             response.headers.add(name: .contentType, value: "application/json")
@@ -71,6 +60,48 @@ struct LibpodImagePullRoute: RouteCollection {
                 }
             })
             return response
+        }
+    }
+
+    /// Resolves the platform a pull asks for.
+    ///
+    /// podman does NOT send a `platform` query parameter: `podman pull --platform
+    /// linux/amd64` arrives as separate `os`/`arch`/`variant` parameters. Reading
+    /// only `platform` fell back to the host platform for every `--platform` ask —
+    /// `podman pull --platform linux/amd64` fetched the arm64 image, and
+    /// `podman run --platform linux/amd64|linux/s390x` silently ran arm64 (the run
+    /// only pulls with the platform the pull was given). `platform` stays first:
+    /// other libpod clients (compose) do send the combined form.
+    static func platform(from req: Request) throws -> Platform {
+        if let platformString: String = req.query["platform"], !platformString.isEmpty {
+            do {
+                return try platformOrThrow(platformString)
+            } catch {
+                throw Abort(
+                    .badRequest, reason: "Failed to parse platform '\(platformString)': \(error.localizedDescription)")
+            }
+        }
+
+        let os: String? = req.query["os"]
+        let arch: String? = req.query["arch"]
+        let variant: String? = req.query["variant"]
+        let requestedOS = os.flatMap { $0.isEmpty ? nil : $0 }
+        let requestedArch = arch.flatMap { $0.isEmpty ? nil : $0 }
+        let requestedVariant = variant.flatMap { $0.isEmpty ? nil : $0 }
+        // Nothing platform-shaped asked for — the host's platform. A variant
+        // alone IS an ask (it is validated against the host's os/arch rather
+        // than silently discarded).
+        guard requestedOS != nil || requestedArch != nil || requestedVariant != nil else { return currentPlatform() }
+
+        let host = currentPlatform()
+        let resolvedOS = requestedOS ?? host.os
+        let resolvedArch = requestedArch ?? host.architecture
+        let resolvedVariant = requestedVariant
+        let spec = resolvedVariant.map { "\(resolvedOS)/\(resolvedArch)/\($0)" } ?? "\(resolvedOS)/\(resolvedArch)"
+        do {
+            return try Platform(from: spec)
+        } catch {
+            throw Abort(.badRequest, reason: "Failed to parse platform '\(spec)': \(error.localizedDescription)")
         }
     }
 
