@@ -56,16 +56,21 @@ struct AutoRemovedContainersTests {
         #expect(await tombs.exitCode(for: String(Self.hex.prefix(6))) == nil)
     }
 
+    /// The deadline is ten minutes: the old busy-spinning (uncancelled) wait
+    /// ran out the whole deadline, so a correct implementation is told apart
+    /// by returning far sooner. The bound is generous on purpose — a stalled
+    /// CI runner can pause this process for many seconds, and the regression
+    /// this guards is a spin that lasts ten MINUTES.
     @Test("a cancelled wait stops polling instead of spinning to the deadline")
     func cancelledWaitStops() async {
-        let tombs = AutoRemovedContainers(ttl: .seconds(5), defaultWait: .seconds(30))
+        let tombs = AutoRemovedContainers(ttl: .seconds(600), defaultWait: .seconds(600))
         let started = ContinuousClock.Instant.now
         let task = Task { await tombs.waitForExitCode(for: "never") }
         try? await Task.sleep(for: .milliseconds(120))
         task.cancel()
         let code = await task.value
         #expect(code == nil)
-        #expect(ContinuousClock.Instant.now - started < .seconds(5))
+        #expect(ContinuousClock.Instant.now - started < .seconds(120))
     }
 
     @Test("a tombstone stops answering once its TTL lapses")
@@ -79,7 +84,9 @@ struct AutoRemovedContainersTests {
 
     @Test("waitForExitCode covers a tombstone written just after the call")
     func waitCoversLateWrite() async {
-        let tombs = AutoRemovedContainers(ttl: .seconds(5), defaultWait: .seconds(2))
+        // Long deadlines: a stalled CI runner can pause this process for many
+        // seconds, and the wait must not expire before the record lands.
+        let tombs = AutoRemovedContainers(ttl: .seconds(600), defaultWait: .seconds(60))
         // The exit observer records the code a moment after the process
         // exits; the CLI's /wait can land in that window. Order-independent by
         // construction: the waiter is already polling when the record lands,
@@ -100,7 +107,10 @@ struct AutoRemovedContainersTests {
 
     @Test("the /wait route answers the recorded exit code instead of 404")
     func waitRouteAnswersTombstone() async throws {
-        let tombs = AutoRemovedContainers(ttl: .seconds(5), defaultWait: .milliseconds(200))
+        // A long TTL: a stalled runner must not expire the record between the
+        // setup and the request (the production TTL is 120s; this is a
+        // deliberate margin for CI scheduling pauses).
+        let tombs = AutoRemovedContainers(ttl: .seconds(600), defaultWait: .milliseconds(200))
         await tombs.record(hexId: "gone", code: 42)
 
         try await withApp(configure: { _ in }) { app in
@@ -123,7 +133,7 @@ struct AutoRemovedContainersTests {
 
     @Test("the /start route treats a tombstoned --rm run as already completed")
     func startRouteAnswersTombstone() async throws {
-        let tombs = AutoRemovedContainers(ttl: .seconds(5), defaultWait: .milliseconds(200))
+        let tombs = AutoRemovedContainers(ttl: .seconds(600), defaultWait: .milliseconds(200))
         await tombs.record(hexId: "gone", code: 0)
 
         try await withApp(configure: { _ in }) { app in
@@ -144,7 +154,7 @@ struct AutoRemovedContainersTests {
 
     @Test("the libpod /wait route answers the recorded exit code as a bare integer")
     func libpodWaitRouteAnswersTombstone() async throws {
-        let tombs = AutoRemovedContainers(ttl: .seconds(5), defaultWait: .milliseconds(200))
+        let tombs = AutoRemovedContainers(ttl: .seconds(600), defaultWait: .milliseconds(200))
         await tombs.record(hexId: "gone", code: 3)
 
         try await withApp(configure: { _ in }) { app in
