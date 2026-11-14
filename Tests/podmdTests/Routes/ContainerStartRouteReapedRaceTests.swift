@@ -45,6 +45,28 @@ struct ContainerStartRouteReapedRaceTests {
         }
     }
 
+    @Test("a /start by NAME finds the tombstone through its resolved snapshot")
+    func nameRequestResolvesTombstoneKey() async throws {
+        let nativeId = "reaped-rm-by-name"
+        let snapshot = try makeContainerSnapshot(
+            nativeId: nativeId, networks: [], labels: [:], status: .stopped)
+        let hexId = DockerContainerID.hexId(for: snapshot)
+
+        let autoRemoved = AutoRemovedContainers(ttl: .seconds(600), defaultWait: .seconds(60))
+        await autoRemoved.record(hexId: hexId, code: 3)
+
+        try await withStartRouteApp(
+            client: ReapedDuringStartClientMock(snapshot: snapshot),
+            autoRemoved: autoRemoved
+        ) { app in
+            // Tombstones hold only instance-unique hex ids; a name-keyed request
+            // must still answer from the instance it resolved.
+            try await app.testing().test(.POST, "/v1.51/containers/\(nativeId)/start") { res async in
+                #expect(res.status == .noContent)
+            }
+        }
+    }
+
     @Test("start on a container reaped mid-flight answers 404, never 500, without a tombstone")
     func reapedContainerWithoutTombstoneReturns404() async throws {
         let nativeId = "reaped-rm-without-tombstone"

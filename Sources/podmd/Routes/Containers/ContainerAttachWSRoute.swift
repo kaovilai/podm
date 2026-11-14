@@ -65,10 +65,7 @@ extension ContainerAttachWSRoute {
         container: ContainerSnapshot,
         query: ContainerAttachWSQuery
     ) async {
-        // Canonical 64-hex id — the request path may carry a reusable name or
-        // short id, and a name-keyed exit record/tombstone would survive a
-        // later container reusing the name (see ContainerAttachRoute).
-        let hexId = DockerContainerID.hexId(for: container)
+        let hexId = ContainerAttachRoute.exitRecordId(for: container)
         let stdin = query.stdin ?? false
         let stdout = query.stdout ?? true
         let stderr = query.stderr ?? true
@@ -95,7 +92,11 @@ extension ContainerAttachWSRoute {
             try? pipes.stdin?.write.close()
         }
 
-        await ContainerExitCodeStore.shared.remove(id: container.id)
+        // Every alias: the exit monitor records under the native AND the
+        // canonical hex id, so clearing only the native id leaves the previous
+        // run's code answering `/wait <hex id>`.
+        await ContainerExitCodeStore.shared.removeAll(
+            nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
 
         let process: ClientProcess
         do {

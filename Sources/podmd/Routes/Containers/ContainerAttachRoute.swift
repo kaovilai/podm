@@ -279,6 +279,13 @@ extension ContainerAttachRoute {
 
     // Output-only attach for stopped containers (docker run without -i, issue #220).
     // Uses pipes instead of log-file polling to eliminate the race for fast-exiting containers.
+    /// The id the exit monitor records exit codes and the `--rm` tombstone
+    /// under: the canonical 64-hex id of the RESOLVED snapshot, never the
+    /// request path's value (which may be a reusable name or a truncated id).
+    static func exitRecordId(for container: ContainerSnapshot) -> String {
+        DockerContainerID.hexId(for: container)
+    }
+
     private static func attachStoppedOutputOnly(
         req: Request,
         client: ClientContainerProtocol,
@@ -288,11 +295,7 @@ extension ContainerAttachRoute {
         isUpgrade: Bool,
         hasConnectionUpgrade: Bool
     ) async throws -> Response {
-        // The canonical 64-hex id — never the request path's value, which may be
-        // a reusable name or short id: the monitor records exit codes and the
-        // `--rm` tombstone under this id, and a name-keyed tombstone would
-        // survive a later container reusing the name.
-        let hexId = DockerContainerID.hexId(for: container)
+        let hexId = ContainerAttachRoute.exitRecordId(for: container)
         let attachStdout = query.stdout ?? true
         let stderrOnly = (query.stderr ?? false) && !(query.stdout ?? false)
 
@@ -314,7 +317,11 @@ extension ContainerAttachRoute {
         // our write end immediately so the container's stdin sees EOF.
         try? pipes.stdin?.write.close()
 
-        await ContainerExitCodeStore.shared.remove(id: container.id)
+        // Every alias: the exit monitor records under the native AND the
+        // canonical hex id, so clearing only the native id leaves the previous
+        // run's code answering `/wait <hex id>`.
+        await ContainerExitCodeStore.shared.removeAll(
+            nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
 
         let process: ClientProcess
         do {
@@ -564,9 +571,7 @@ extension ContainerAttachRoute {
         shouldUpgrade: Bool,
         isTTY: Bool
     ) async throws -> Response {
-        // Canonical 64-hex id (the request path may carry a name or short id —
-        // see attachStoppedOutputOnly).
-        let hexId = DockerContainerID.hexId(for: container)
+        let hexId = ContainerAttachRoute.exitRecordId(for: container)
 
         let attachStdout = query.stdout ?? true
         let attachStderr = query.stderr ?? !isTTY
@@ -586,7 +591,11 @@ extension ContainerAttachRoute {
         // as soon as ContainerExitCodeStore is non-nil, so clear any stale code
         // before starting and record a synthetic one if bootstrap/start fails (so
         // /wait can't return a stale status or poll forever).
-        await ContainerExitCodeStore.shared.remove(id: container.id)
+        // Every alias: the exit monitor records under the native AND the
+        // canonical hex id, so clearing only the native id leaves the previous
+        // run's code answering `/wait <hex id>`.
+        await ContainerExitCodeStore.shared.removeAll(
+            nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
 
         let process: ClientProcess
         do {

@@ -100,7 +100,11 @@ extension ContainerStartRoute {
                 // completed — the same no-op success as the missing-snapshot
                 // path above, not a 500 the CLI reports as exit 125.
                 if let containerError = error as? ClientContainerError, case .notFound = containerError {
-                    if await autoRemoved.waitForExitCode(for: id) != nil {
+                    // Tombstones are keyed by the instance-unique 64-hex id only
+                    // (native ids are reusable names). A /start by NAME must
+                    // resolve through the snapshot it already holds.
+                    let tombstoneKey = DockerContainerID.hexId(for: preStartSnapshot)
+                    if await autoRemoved.waitForExitCode(for: tombstoneKey) != nil {
                         return .noContent
                     }
                     throw Abort(.notFound, reason: "No such container: \(id)")
