@@ -208,7 +208,16 @@ extension BuildRoute {
         try writeHandle.write(contentsOf: terminator)
     }
 
-    static func handler(client: ClientContainerProtocol, builderClient: ClientBuilderProtocol, systemConfig: ContainerSystemConfig, manifestClient: ClientManifestServiceProtocol)
+    /// - Parameter sendsAuxRecord: whether the response may carry Docker's
+    ///   `{"aux":{"ID":…}}` record (docker's CLI reads `--iidfile` only from
+    ///   it). podman's build client REJECTS any record that has neither
+    ///   `stream` nor `error` ("failed to parse build results stream,
+    ///   unexpected input"), so the libpod dialect must not emit one — it
+    ///   takes the image ID from the bare-ID `stream` line instead.
+    static func handler(
+        client: ClientContainerProtocol, builderClient: ClientBuilderProtocol, systemConfig: ContainerSystemConfig,
+        manifestClient: ClientManifestServiceProtocol, sendsAuxRecord: Bool = true
+    )
         -> @Sendable (Request) async throws -> Response
     {
         { req in
@@ -435,6 +444,7 @@ extension BuildRoute {
                             systemConfig: systemConfig,
                             manifestClient: manifestClient,
                             manifestName: manifestName,
+                            sendsAuxRecord: sendsAuxRecord,
                             writer: writer,
                             logger: req.logger
                         )
@@ -526,6 +536,7 @@ extension BuildRoute {
         systemConfig: ContainerSystemConfig,
         manifestClient: ClientManifestServiceProtocol,
         manifestName: String?,
+        sendsAuxRecord: Bool,
         writer: BodyStreamWriter,
         logger: Logger
     ) async throws {
@@ -756,10 +767,13 @@ extension BuildRoute {
             ? String(recordedImageID.dropFirst("sha256:".count)) : recordedImageID
 
         // The docker CLI's classic builder captures the image ID for
-        // --iidfile ONLY from the aux message (issue #53); podman clients
-        // ignore unknown message types. Sent UNGATED — quiet mode must
-        // still carry it.
-        sendAuxImageID(recordedImageID)
+        // --iidfile ONLY from the aux message (issue #53); podman's client
+        // instead treats a record with neither `stream` nor `error` as a
+        // stream-parse failure, so it is docker-dialect only. UNGATED by
+        // quiet mode — docker's quiet build still needs it.
+        if sendsAuxRecord {
+            sendAuxImageID(recordedImageID)
+        }
 
         // Real podman clients (pkg/bindings/images/build.go) only treat a clean
         // stream EOF as success if they've already seen a "stream" line whose

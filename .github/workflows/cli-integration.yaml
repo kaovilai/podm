@@ -316,8 +316,16 @@ jobs:
           RUN echo "built by podman CLI" > /built.txt
           CMD ["cat", "/built.txt"]
           EOF
+          # A successful build must also SUCCEED for the client: podman decodes
+          # the response as BuildResponse records and rejects any record with
+          # neither stream nor error, so a Docker-only aux record made every
+          # successful podman build fail at the parse step while docker's
+          # stayed green.
           sudo -E podman build -t cli-int-podman-build /tmp/testbuild-podman
           sudo -E podman image ls | grep 'cli-int-podman-build'
+          OUT=$(sudo -E podman run --rm cli-int-podman-build)
+          echo "$OUT"
+          [[ "$OUT" == *"built by podman CLI"* ]] || { echo "podman run of built image failed"; exit 1; }
       - name: podman build -f (absolute dockerfile wire format)
         if: inputs.enable-vm-steps == true
         run: |
