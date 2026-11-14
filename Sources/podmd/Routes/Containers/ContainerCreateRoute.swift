@@ -163,6 +163,10 @@ extension ContainerCreateRoute {
             // Validate the requested platform only if provided
             var requestedPlatform = try Platform(from: containerPlatform)
 
+            if let platformError = ContainerCreateRoute.validateRunnablePlatform(requestedPlatform) {
+                throw Abort(.badRequest, reason: platformError)
+            }
+
             // Check if image exists locally
             do {
                 _ = try await ClientImage.get(reference: body.Image, containerSystemConfig: systemConfig)
@@ -731,7 +735,8 @@ extension ContainerCreateRoute {
                 await broadcaster.broadcast(ContainerCreateRoute.makeCreateEvent(for: container))
             }
             // Docker Engine API: POST /containers/create returns 201 Created.
-            let createResponse = RESTContainerCreate(Id: hexId, Warnings: [])
+            let createResponse = RESTContainerCreate(
+                Id: hexId, Warnings: ContainerCreateRoute.cpuWarnings(hostConfig: body.HostConfig))
             let httpResponse = try await createResponse.encodeResponse(for: req)
             httpResponse.status = .created
             return httpResponse
@@ -927,6 +932,48 @@ extension ContainerCreateRoute {
             return "invalid CPU shares (\(cpuShares)): value must be a positive integer"
         }
         return nil
+    }
+
+    /// Rejects a platform this host cannot EXECUTE, before any image work.
+    ///
+    /// Apple's VM runs the host architecture natively and (on arm64 hosts)
+    /// amd64 through Rosetta; every other architecture is build-only. Without
+    /// this check `docker run --platform linux/s390x` was accepted and the
+    /// container ran the ARM64 image — silently the wrong architecture — while
+    /// `podman run --platform linux/s390x` pulled the s390x layers and then sat
+    /// for minutes before an opaque failure.
+    ///
+    /// Pure so the rule is asserted in unit tests without Apple APIs.
+    static func validateRunnablePlatform(_ platform: Platform) -> String? {
+        let host = Platform.current
+        guard platform.os == host.os else {
+            return "cannot run \(platform.os)/\(platform.architecture) containers: this host runs \(host.os) containers"
+        }
+        if platform.architecture == host.architecture { return nil }
+        // Rosetta translates amd64 user space on Apple Silicon.
+        if host.architecture == "arm64" && platform.architecture == "amd64" { return nil }
+        let target = "\(platform.os)/\(platform.architecture)"
+        return "cannot run \(target) containers on this \(host.os)/\(host.architecture) host: Apple's VM executes "
+            + "\(host.architecture) natively and amd64 via Rosetta; other architectures are build-only "
+            + "(use `docker build --platform \(target)` or pull and inspect the image instead)"
+    }
+
+    /// Warnings the create response carries to the client (docker prints them).
+    ///
+    /// `--cpus` is a fractional CFS quota in Docker; a podm container's VM is
+    /// provisioned whole vCPUs instead, so any fraction is rounded to a vCPU
+    /// count. Saying so beats silently running with a different limit: `--cpus
+    /// 0.5` became 1 vCPU and `--cpus 1.5` became 1 vCPU with nothing said.
+    static func cpuWarnings(hostConfig: HostConfig?) -> [String] {
+        guard let nanoCpus = hostConfig?.NanoCpus, nanoCpus > 0 else { return [] }
+        let granted = vCpus(fromNanoCpus: nanoCpus)
+        let requested = Double(nanoCpus) / 1_000_000_000
+        guard abs(Double(granted) - requested) > 0.000_001 else { return [] }
+        let requestedText = requested == requested.rounded() ? "\(Int(requested))" : "\(requested)"
+        return [
+            "--cpus \(requestedText) is not supported: a container's VM is provisioned whole vCPUs, so it gets "
+                + "\(granted) vCPU(s) instead. Use --cpus with a whole number to make the limit exact."
+        ]
     }
 
     /// Docker's `--cpus` (NanoCpus, billionths of a CPU) is a fractional CFS quota; Apple's
