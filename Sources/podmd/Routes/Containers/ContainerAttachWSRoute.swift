@@ -158,10 +158,14 @@ extension ContainerAttachWSRoute {
         // boot's token and have its real code rejected); an untokened write is
         // subject only to set()'s precedence, and both observers of the same
         // init process resolve the same exit code.
+        // See ContainerAttachRoute: the boot's own startedDate identifies it for
+        // every observer, so a losing attach never has to read the winner's
+        // generation and a straggler from an older boot is rejected.
+        let attachBootStartedAt = (try? await client.getContainer(id: container.id))?.startedDate
         let bootGeneration: UInt64? =
             if startedByThisCall {
                 await ContainerExitCodeStore.shared.beginBoot(
-                    nativeId: container.id, hexId: hexId)
+                    nativeId: container.id, hexId: hexId, bootDate: attachBootStartedAt)
             } else {
                 nil
             }
@@ -173,7 +177,6 @@ extension ContainerAttachWSRoute {
         // attachStoppedOutputOnly for why the later no-op /start cannot be
         // the one to do it, and for why the arm carries the boot identity
         // fetched at arm time).
-        let attachBootStartedAt = (try? await client.getContainer(id: container.id))?.startedDate
         await ContainerLogFollowerRegistry.shared.arm(
             nativeId: container.id, client: client, logger: req.logger, freshBoot: startedByThisCall,
             bootStartedAt: attachBootStartedAt)
@@ -207,7 +210,7 @@ extension ContainerAttachWSRoute {
                     fallbackLabels: LabelNormalization.restore(container.configuration.labels),
                     dnsServer: req.application.storage[PodmDNSServerKey.self],
                     broadcaster: broadcaster,
-                    bootGeneration: bootGeneration)
+                    bootGeneration: bootGeneration, bootDate: attachBootStartedAt)
 
                 try? await ws.close()
             }

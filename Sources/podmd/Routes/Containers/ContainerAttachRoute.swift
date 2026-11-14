@@ -370,10 +370,15 @@ extension ContainerAttachRoute {
         // boot's token and have its real code rejected); an untokened write is
         // subject only to set()'s precedence, and both observers of the same
         // init process resolve the same exit code.
+        // The boot's own identity, fetched AFTER the start: a losing attach
+        // observes the same startedDate as the winner (so it can record without
+        // ever reading the winner's generation) while a straggler from an older
+        // boot carries an older date and is rejected.
+        let attachBootStartedAt = (try? await client.getContainer(id: container.id))?.startedDate
         let bootGeneration: UInt64? =
             if startedByThisCall {
                 await ContainerExitCodeStore.shared.beginBoot(
-                    nativeId: container.id, hexId: hexId)
+                    nativeId: container.id, hexId: hexId, bootDate: attachBootStartedAt)
             } else {
                 nil
             }
@@ -400,7 +405,6 @@ extension ContainerAttachRoute {
         // one (a made-up identity would falsely prove a reboot on the next
         // resume that learns Apple's real date); the /start that follows
         // adopts the identity into the journal then.
-        let attachBootStartedAt = (try? await client.getContainer(id: container.id))?.startedDate
         await ContainerLogFollowerRegistry.shared.arm(
             nativeId: container.id, client: client, logger: req.logger, freshBoot: startedByThisCall,
             bootStartedAt: attachBootStartedAt)
@@ -440,7 +444,7 @@ extension ContainerAttachRoute {
                             fallbackLabels: LabelNormalization.restore(container.configuration.labels),
                             dnsServer: req.application.storage[PodmDNSServerKey.self],
                             broadcaster: req.application.storage[EventBroadcasterKey.self],
-                            bootGeneration: bootGeneration)
+                            bootGeneration: bootGeneration, bootDate: attachBootStartedAt)
                     }
 
                     // Stdout reader
@@ -509,7 +513,7 @@ extension ContainerAttachRoute {
                             fallbackLabels: LabelNormalization.restore(container.configuration.labels),
                             dnsServer: req.application.storage[PodmDNSServerKey.self],
                             broadcaster: req.application.storage[EventBroadcasterKey.self],
-                            bootGeneration: bootGeneration)
+                            bootGeneration: bootGeneration, bootDate: attachBootStartedAt)
                     }
 
                     // Stdout reader
@@ -651,9 +655,11 @@ extension ContainerAttachRoute {
         }
 
         // This request performed the boot (a benign race above threw a
-        // conflict, so there is no losing path here): allocate its generation.
+        // conflict, so there is no losing path here): publish its generation
+        // and the boot's own identity.
+        let attachBootStartedAt = (try? await client.getContainer(id: container.id))?.startedDate
         let bootGeneration = await ContainerExitCodeStore.shared.beginBoot(
-            nativeId: container.id, hexId: hexId)
+            nativeId: container.id, hexId: hexId, bootDate: attachBootStartedAt)
 
         await ProcessRegistry.shared.set(id: container.id, process: process)
 
@@ -661,7 +667,6 @@ extension ContainerAttachRoute {
         // fresh log-journal boot NOW (see attachStoppedOutputOnly for why the
         // later no-op /start cannot be the one to do it, and for why the arm
         // carries the boot identity fetched at arm time).
-        let attachBootStartedAt = (try? await client.getContainer(id: container.id))?.startedDate
         await ContainerLogFollowerRegistry.shared.arm(
             nativeId: container.id, client: client, logger: req.logger, freshBoot: true,
             bootStartedAt: attachBootStartedAt)
@@ -699,7 +704,7 @@ extension ContainerAttachRoute {
                             fallbackLabels: LabelNormalization.restore(container.configuration.labels),
                             dnsServer: req.application.storage[PodmDNSServerKey.self],
                             broadcaster: req.application.storage[EventBroadcasterKey.self],
-                            bootGeneration: bootGeneration)
+                            bootGeneration: bootGeneration, bootDate: attachBootStartedAt)
                     }
 
                     if let stdoutHandle = pipes.stdout?.read {
@@ -948,7 +953,7 @@ extension ContainerAttachRoute {
                         fallbackLabels: LabelNormalization.restore(container.configuration.labels),
                         dnsServer: req.application.storage[PodmDNSServerKey.self],
                         broadcaster: req.application.storage[EventBroadcasterKey.self],
-                        bootGeneration: bootGeneration)
+                        bootGeneration: bootGeneration, bootDate: attachBootStartedAt)
 
                     // DockerTCPHandler owns pipes.stdin!.write after setStdinWriter(); it closes
                     // it via writeQueue on channelInactive / inputClosed. Closing it here too

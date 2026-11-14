@@ -333,3 +333,45 @@ struct ExitCodeStoreAliasClearTests {
         #expect(await ContainerExitCodeStore.shared.get(id: hexId) == nil)
     }
 }
+
+/// A losing observer cannot know the winner's generation token (reading it
+/// would race its publication), so boots are ALSO identified by the
+/// container's own start date: every observer of one boot sees the same
+/// `startedDate`, while a straggler from an earlier boot carries an older one.
+@Suite("ContainerExitCodeStore — boot identity by start date")
+struct ExitCodeStoreBootDateTests {
+
+    private func tempIds() -> (String, String) {
+        ("date-native-\(UUID().uuidString)", "date-hex-\(UUID().uuidString)")
+    }
+
+    @Test("an untokened loser sharing the current boot's start date is accepted")
+    func sameBootAccepted() async {
+        let (nativeId, hexId) = tempIds()
+        let bootDate = Date(timeIntervalSince1970: 1_000)
+        defer { Task { await ContainerExitCodeStore.shared.removeAll(nativeId: nativeId, hexId: hexId) } }
+        await ContainerExitCodeStore.shared.beginBoot(nativeId: nativeId, hexId: hexId, bootDate: bootDate)
+
+        await ContainerExitCodeStore.shared.set(id: nativeId, code: 5, bootDate: bootDate)
+        #expect(await ContainerExitCodeStore.shared.get(id: nativeId) == 5)
+    }
+
+    @Test("a straggler from an earlier boot is rejected without any token")
+    func olderBootRejected() async {
+        let (nativeId, hexId) = tempIds()
+        let firstBoot = Date(timeIntervalSince1970: 1_000)
+        let secondBoot = Date(timeIntervalSince1970: 2_000)
+        defer { Task { await ContainerExitCodeStore.shared.removeAll(nativeId: nativeId, hexId: hexId) } }
+
+        await ContainerExitCodeStore.shared.beginBoot(nativeId: nativeId, hexId: hexId, bootDate: firstBoot)
+        await ContainerExitCodeStore.shared.beginBoot(nativeId: nativeId, hexId: hexId, bootDate: secondBoot)
+
+        // The previous run's monitor completes late, untokened.
+        await ContainerExitCodeStore.shared.set(id: nativeId, code: 7, bootDate: firstBoot)
+        #expect(await ContainerExitCodeStore.shared.get(id: nativeId) == nil)
+
+        // The current boot's own observer still records.
+        await ContainerExitCodeStore.shared.set(id: nativeId, code: 0, bootDate: secondBoot)
+        #expect(await ContainerExitCodeStore.shared.get(id: nativeId) == 0)
+    }
+}
