@@ -248,9 +248,21 @@ extension ImageInspectRoute {
                 }
             }
 
+            // No explicit platform ask? Report the variant the image was PULLED
+            // for, so `docker image inspect` after `docker pull --platform …`
+            // states the architecture the user asked for instead of a
+            // host-platform sibling from the same OCI index.
+            let pulledPlatform: Platform? =
+                if requestedPlatform == nil {
+                    await ImagePlatformStore.shared.platform(forDigest: image.digest)
+                } else {
+                    nil
+                }
             let selectedVariant =
                 if let requestedPlatform {
                     variants.first(where: { $0.platform == requestedPlatform })
+                } else if let pulledPlatform {
+                    variants.first(where: { $0.platform == pulledPlatform })
                 } else {
                     prioritizeVariants(variants).first
                 }

@@ -354,6 +354,11 @@ struct ClientImageService: ClientImageProtocol {
                         }
                     )
                     logger.info("Successfully pulled image \(reference) for platform \(platform.description)")
+                    // Remember which variant this image now holds: the store
+                    // keeps the whole OCI index, and container create must
+                    // resolve the variant the user pulled rather than silently
+                    // unpacking a host-platform sibling from the same index.
+                    await ImagePlatformStore.shared.record(digest: image.digest, platform: platform)
                     continuation.yield(.message("Image digest: \(image.digest)"))
                     continuation.yield(.message(ClientImageService.pulledStatusMessage(for: reference)))
                     continuation.finish()
@@ -376,6 +381,7 @@ struct ClientImageService: ClientImageProtocol {
                             )
                             try await fallbackImage.unpack(platform: amd64, progressUpdate: nil)
                             logger.info("Successfully pulled \(reference) for amd64 (Rosetta)")
+                            await ImagePlatformStore.shared.record(digest: fallbackImage.digest, platform: amd64)
                             continuation.yield(.message("Image digest: \(fallbackImage.digest)"))
                             continuation.yield(.message(ClientImageService.pulledStatusMessage(for: reference)))
                             continuation.finish()

@@ -165,7 +165,11 @@ extension ContainerCreateRoute {
 
             // Check if image exists locally
             do {
-                _ = try await ClientImage.get(reference: body.Image, containerSystemConfig: systemConfig)
+                let localImage = try await ClientImage.get(reference: body.Image, containerSystemConfig: systemConfig)
+                requestedPlatform = ContainerCreateRoute.effectivePlatform(
+                    explicitQueryValue: query.platform,
+                    hostDefault: requestedPlatform,
+                    pulledForImage: await ImagePlatformStore.shared.platform(forDigest: localImage.digest))
             } catch {
                 throw ContainerCreateRoute.imageExistenceError(error, image: body.Image)
             }
@@ -759,6 +763,27 @@ extension ContainerCreateRoute {
 
     /// Maps an error from the pre-flight image existence check to a client-facing error.
     ///
+    /// Which platform the create runs the image for.
+    ///
+    /// An explicit `--platform` always wins (it is already parsed into
+    /// `hostDefault`). Otherwise the variant the image was actually PULLED for
+    /// wins over the host default: Apple's image store keeps the whole OCI
+    /// index under a reference and resolves any variant on demand, so
+    /// defaulting to the host platform silently unpacks a host-platform
+    /// sibling of a deliberately pulled cross-platform image — the run then
+    /// executes the wrong architecture. Docker runs the image it pulled.
+    ///
+    /// Extracted as a pure function so the override rule is asserted in unit
+    /// tests without driving Apple Container APIs.
+    static func effectivePlatform(
+        explicitQueryValue: String?,
+        hostDefault: Platform,
+        pulledForImage: Platform?
+    ) -> Platform {
+        if let explicitQueryValue, !explicitQueryValue.isEmpty { return hostDefault }
+        return pulledForImage ?? hostDefault
+    }
+
     /// A genuine not-found is reported with Docker's `No such image: <ref>` phrasing,
     /// which is load-bearing: docker-py raises `ImageNotFound` off that exact text.
     /// Any other error — most notably a transient `ContainerizationError(.interrupted,
