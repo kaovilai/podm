@@ -14,12 +14,20 @@ public enum ContainerWaitCondition: String, CaseIterable, Codable, Sendable {
 
 struct ContainerWaitRoute: RouteCollection {
     let client: ClientContainerProtocol
+    /// `--rm` tombstones — injectable so route tests can bound the tombstone
+    /// wait without touching the process-wide singleton.
+    var autoRemoved: AutoRemovedContainers = .shared
 
     func boot(routes: RoutesBuilder) throws {
-        try routes.registerVersionedRoute(.POST, pattern: "/containers/{id}/wait", use: ContainerWaitRoute.handler(client: client))
+        try routes.registerVersionedRoute(
+            .POST, pattern: "/containers/{id}/wait",
+            use: ContainerWaitRoute.handler(client: client, autoRemoved: autoRemoved))
     }
 
-    static func handler(client: ClientContainerProtocol) -> @Sendable (Request) async throws -> Response {
+    static func handler(
+        client: ClientContainerProtocol,
+        autoRemoved: AutoRemovedContainers = .shared
+    ) -> @Sendable (Request) async throws -> Response {
         { req in
             guard let containerId = req.parameters.get("id") else {
                 throw Abort(.badRequest, reason: "Missing container ID")
@@ -38,6 +46,17 @@ struct ContainerWaitRoute: RouteCollection {
             // would make "no such container" indistinguishable from a clean exit.
             do {
                 guard try await client.getContainer(id: containerId) != nil else {
+                    // `docker run --rm` on a fast-exiting command: Apple
+                    // Container reaps the container at exit, and the CLI's
+                    // /wait can land after it is gone. It is not a missing
+                    // container to the client — the run happened. Answer with
+                    // the exit code podm recorded at exit, else 404.
+                    if let code = await autoRemoved.waitForExitCode(for: containerId) {
+                        let wait = RESTContainerWait(statusCode: Int64(code))
+                        var headers = HTTPHeaders()
+                        headers.add(name: .contentType, value: "application/json")
+                        return Response(status: .ok, headers: headers, body: .init(data: try JSONEncoder().encode(wait)))
+                    }
                     throw Abort(.notFound, reason: "No such container: \(containerId)")
                 }
             } catch ClientContainerError.ambiguousId(let reference, let matches) {
