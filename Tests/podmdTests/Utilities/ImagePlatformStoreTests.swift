@@ -131,3 +131,54 @@ struct ContainerCreateEffectivePlatformTests {
         #expect(resolved.architecture == "arm64")
     }
 }
+
+/// A built image keeps the loader's VERBATIM tag as its stored reference
+/// (`demo:latest`) while the build records its variant under the normalized
+/// form (`docker.io/library/demo:latest`) — an exact removal with the stored
+/// spelling missed and a later image reusing the name inherited the variant.
+@Suite("ImagePlatformStore — removing by a stored-spelling reference")
+struct ImagePlatformStoreRemoveMatchingTests {
+
+    private func makeStore(
+        directory: URL,
+        normalize: @escaping @Sendable (String) -> String? = { $0 }
+    ) async -> ImagePlatformStore {
+        let store = ImagePlatformStore()
+        await store.configure(storageDirectory: directory, normalizeReference: normalize)
+        return store
+    }
+
+    private func tempDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("podm-image-platforms-rm-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    @Test("a verbatim spelling removes the record written under the normalized key")
+    func removesThroughNormalization() async throws {
+        let store = await makeStore(
+            directory: try tempDir(), normalize: { _ in "docker.io/library/demo:latest" })
+        await store.record(reference: "docker.io/library/demo:latest", platform: try Platform(from: "linux/amd64"))
+        await store.remove(matching: "demo:latest")
+        #expect(await store.platform(forReference: "docker.io/library/demo:latest") == nil)
+    }
+
+    @Test("an exact key is removed without consulting the normalizer")
+    func exactKeyRemoved() async throws {
+        // Normalizer that would NOT map the key: the exact match must win.
+        let store = await makeStore(directory: try tempDir(), normalize: { _ in "elsewhere:latest" })
+        await store.record(reference: "docker.io/library/keep:latest", platform: try Platform(from: "linux/amd64"))
+        await store.remove(matching: "docker.io/library/keep:latest")
+        #expect(await store.platform(forReference: "docker.io/library/keep:latest") == nil)
+    }
+
+    @Test("a dangling reference that cannot be normalized changes nothing")
+    func danglingReferenceSkipped() async throws {
+        // A dangling reference cannot be normalized at all.
+        let store = await makeStore(directory: try tempDir(), normalize: { _ in nil })
+        await store.record(reference: "docker.io/library/demo:latest", platform: try Platform(from: "linux/amd64"))
+        await store.remove(matching: "<none>")
+        #expect(await store.platform(forReference: "docker.io/library/demo:latest")?.architecture == "amd64")
+    }
+}

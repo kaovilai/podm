@@ -36,11 +36,16 @@ actor ImagePlatformStore {
 
     private var platforms: [String: Record] = [:]
     private var fileURL: URL?
+    /// Same normalization the recording side uses (it needs the daemon's
+    /// system config, which the delete route does not carry) — captured at
+    /// configure time so `remove(matching:)` can find the key.
+    private var normalizeReference: (@Sendable (String) -> String?)?
     private let log = Logger(label: "podm.image-platforms")
 
-    func configure(storageDirectory: URL) {
+    func configure(storageDirectory: URL, normalizeReference: (@Sendable (String) -> String?)? = nil) {
         let url = storageDirectory.appendingPathComponent("podm-image-platforms.json")
         fileURL = url
+        self.normalizeReference = normalizeReference
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         do {
             platforms = try JSONDecoder().decode([String: Record].self, from: Data(contentsOf: url))
@@ -79,6 +84,25 @@ actor ImagePlatformStore {
     func remove(reference: String) {
         guard platforms.removeValue(forKey: reference) != nil else { return }
         persist()
+    }
+
+    /// Removes the variant recorded for a reference the caller only has in its
+    /// STORED spelling.
+    ///
+    /// A built image keeps the loader's verbatim tag (`demo:latest`) as its
+    /// stored reference, while the build recorded its variant under the
+    /// normalized form (`docker.io/library/demo:latest`) — an exact removal with
+    /// the stored spelling would miss, leaving a stale variant that a later
+    /// `docker load` of the same name would inherit. Tries the exact key first,
+    /// then the configured normalization. Dangling references (`<none>`,
+    /// `untagged@…`) never match a record and are simply skipped.
+    func remove(matching reference: String) {
+        if platforms.removeValue(forKey: reference) != nil {
+            persist()
+            return
+        }
+        guard let normalized = normalizeReference?(reference) else { return }
+        remove(reference: normalized)
     }
 
     private func persist() {
