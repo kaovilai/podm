@@ -114,7 +114,9 @@ struct LibpodImagePullRoute: RouteCollection {
             throw Abort(.badRequest, reason: "Failed to parse platform '\(spec)': \(error.localizedDescription)")
         }
         if let resolvedVariant {
-            guard resolvedVariant.range(of: "^[a-z0-9]+$", options: .regularExpression) != nil else {
+            // OCI variants may carry a dot (`v8.1` is an image-spec 1.1.1
+            // arm64 variant), which an alphanumeric-only rule would reject.
+            guard resolvedVariant.range(of: "^[a-z0-9][a-z0-9.]*$", options: .regularExpression) != nil else {
                 throw Abort(.badRequest, reason: "Failed to parse platform '\(spec)': invalid platform variant")
             }
         }

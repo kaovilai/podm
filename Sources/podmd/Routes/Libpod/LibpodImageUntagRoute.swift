@@ -128,6 +128,10 @@ struct LibpodImageUntagRoute: RouteCollection {
             if !allReferences.isEmpty {
                 try await store.ensureDanglingReference(
                     reference: resolved.reference, digest: resolved.digest, systemConfig: systemConfig)
+                // The surviving digest reference inherits the selection, or a
+                // later create/run by digest falls back to the host platform.
+                await ImagePlatformStore.shared.copy(
+                    matching: resolved.reference, digest: resolved.digest, to: resolved.digest)
             }
             for reference in allReferences {
                 // Fixed instant BEFORE deleting: a concurrent pull that recreates
@@ -164,6 +168,10 @@ struct LibpodImageUntagRoute: RouteCollection {
         if allReferences.count == 1 {
             try await store.ensureDanglingReference(
                 reference: resolved.reference, digest: resolved.digest, systemConfig: systemConfig)
+            // The surviving digest reference inherits the selection (see the
+            // all-names branch above).
+            await ImagePlatformStore.shared.copy(
+                matching: stored, digest: resolved.digest, to: resolved.digest)
         }
         let deletionStartedAt: ContinuousClock.Instant = .now
         try await store.delete(reference: stored)

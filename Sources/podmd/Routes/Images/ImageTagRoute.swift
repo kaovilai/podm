@@ -43,16 +43,20 @@ extension ImageTagRoute {
             throw Abort(.notFound, reason: "No such image: \(sourceImageName)")
         }
 
+        // Capture the source's selection BEFORE tagging: the tag suspends, and
+        // a concurrent pull of the same name could change the record read after
+        // it — the destination would then lose the selection it now holds.
+        // `digest:` rejects a record for content the image no longer has.
+        let selection = await ImagePlatformStore.shared.captureSelection(
+            matching: sourceImage.reference, digest: sourceImage.descriptor.digest)
+
         do {
             _ = try await sourceImage.tag(new: targetReference)
             // A tag is the same image — the new reference keeps the variant it
             // was pulled or built for, or `docker run <tag>` would silently fall
-            // back to the host platform.
-            // `matching:` resolves a built image's verbatim short tag; a source
-            // with no record copies its absence (clearing any stale record the
-            // destination held from a previous image).
-            await ImagePlatformStore.shared.copy(
-                matching: sourceImage.reference, digest: sourceImage.descriptor.digest, to: targetReference)
+            // back to the host platform. A source with no selection copies its
+            // ABSENCE (clearing any stale record the destination held).
+            await ImagePlatformStore.shared.copy(selection: selection, to: targetReference)
             if let broadcaster = req.application.storage[EventBroadcasterKey.self] {
                 // moby's tag event uses the image digest as Actor.ID and the new
                 // reference as the `name` attribute (no `image`/`from` for image events).

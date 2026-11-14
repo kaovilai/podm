@@ -346,3 +346,48 @@ struct ImagePlatformStoreDeletionCutoffTests {
         #expect(await reloaded.platform(forReference: ref) == nil)
     }
 }
+
+/// Tagging captures the source selection BEFORE the tag suspends, so a pull
+/// that lands in that window cannot change what the destination inherits.
+@Suite("ImagePlatformStore — captured selections")
+struct ImagePlatformStoreCapturedSelectionTests {
+
+    private func makeStore(directory: URL) async -> ImagePlatformStore {
+        let store = ImagePlatformStore()
+        await store.configure(storageDirectory: directory)
+        return store
+    }
+
+    private func tempDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("podm-image-platforms-capture-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    @Test("a capture taken before a concurrent re-record still applies the original selection")
+    func captureIsAPointInTime() async throws {
+        let store = await makeStore(directory: try tempDir())
+        let source = "docker.io/library/demo:latest"
+        let amd64 = Platform(arch: "amd64", os: "linux", variant: nil)
+        let arm64 = Platform(arch: "arm64", os: "linux", variant: nil)
+        await store.record(reference: source, platform: amd64, digest: "sha256:aaa")
+
+        // The tag route captures now; a pull of the same name lands afterwards.
+        let captured = await store.captureSelection(matching: source, digest: "sha256:aaa")
+        await store.record(reference: source, platform: arm64, digest: "sha256:bbb")
+
+        await store.copy(selection: captured, to: "docker.io/library/tag:latest")
+        #expect(await store.platform(forReference: "docker.io/library/tag:latest")?.architecture == "amd64")
+    }
+
+    @Test("a capture of an unrecorded source copies its absence")
+    func captureOfNothingClears() async throws {
+        let store = await makeStore(directory: try tempDir())
+        let dest = "docker.io/library/target:latest"
+        await store.record(reference: dest, platform: Platform(arch: "amd64", os: "linux", variant: nil))
+        let captured = await store.captureSelection(matching: "docker.io/library/none:latest", digest: nil)
+        await store.copy(selection: captured, to: dest)
+        #expect(await store.platform(forReference: dest) == nil)
+    }
+}

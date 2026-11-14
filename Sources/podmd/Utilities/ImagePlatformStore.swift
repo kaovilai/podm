@@ -131,8 +131,20 @@ actor ImagePlatformStore {
     /// must clear that record, or later creates would request a variant the
     /// tag no longer has.
     func copy(matching source: String, digest: String? = nil, to destination: String) {
-        let record = matchingRecord(source).flatMap { digestMatches($0, digest: digest) ? $0 : nil }
-        copy(resolved: record, to: destination)
+        copy(resolved: captureSelection(matching: source, digest: digest), to: destination)
+    }
+
+    /// The digest-validated record for `reference` (any spelling), captured by
+    /// the caller BEFORE it suspends on an image operation: a concurrent pull
+    /// of the same name could otherwise change what the copy applies.
+    func captureSelection(matching reference: String, digest: String?) -> Record? {
+        matchingRecord(reference).flatMap { digestMatches($0, digest: digest) ? $0 : nil }
+    }
+
+    /// Applies a `captureSelection(matching:digest:)` result (nil copies the
+    /// absence — see `copy(matching:digest:to:)`).
+    func copy(selection: Record?, to destination: String) {
+        copy(resolved: selection, to: destination)
     }
 
     private func copy(resolved record: Record?, to destination: String) {
