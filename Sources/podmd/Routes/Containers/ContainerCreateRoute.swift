@@ -163,10 +163,6 @@ extension ContainerCreateRoute {
             // Validate the requested platform only if provided
             var requestedPlatform = try Platform(from: containerPlatform)
 
-            if let platformError = ContainerCreateRoute.validateRunnablePlatform(requestedPlatform) {
-                throw Abort(.badRequest, reason: platformError)
-            }
-
             // Check if image exists locally
             do {
                 let localImage = try await ClientImage.get(reference: body.Image, containerSystemConfig: systemConfig)
@@ -186,6 +182,12 @@ extension ContainerCreateRoute {
                     explicitQueryValue: query.platform,
                     hostDefault: requestedPlatform,
                     pulledForImage: pulledForImage)
+                // Validate AFTER the recorded selection is applied: an image
+                // pulled for an unrunnable platform must answer the same 400 a
+                // --platform ask does, not proceed to fetch/prepare it.
+                if let platformError = ContainerCreateRoute.validateRunnablePlatform(requestedPlatform) {
+                    throw Abort(.badRequest, reason: platformError)
+                }
             } catch {
                 throw ContainerCreateRoute.imageExistenceError(error, image: body.Image)
             }

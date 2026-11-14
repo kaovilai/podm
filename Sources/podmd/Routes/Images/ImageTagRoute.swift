@@ -47,8 +47,12 @@ extension ImageTagRoute {
         // a concurrent pull of the same name could change the record read after
         // it — the destination would then lose the selection it now holds.
         // `digest:` rejects a record for content the image no longer has.
+        let sourceDigest = sourceImage.descriptor.digest
         let selection = await ImagePlatformStore.shared.captureSelection(
-            matching: sourceImage.reference, digest: sourceImage.descriptor.digest)
+            matching: sourceImage.reference, digest: sourceDigest)
+        // A pull of the DESTINATION landing while we tag has its own selection;
+        // it is newer than this operation and must win.
+        let destinationCutoff = await ImagePlatformStore.shared.recordedInstant(matching: targetReference)
 
         do {
             _ = try await sourceImage.tag(new: targetReference)
@@ -56,7 +60,17 @@ extension ImageTagRoute {
             // was pulled or built for, or `docker run <tag>` would silently fall
             // back to the host platform. A source with no selection copies its
             // ABSENCE (clearing any stale record the destination held).
-            await ImagePlatformStore.shared.copy(selection: selection, to: targetReference)
+            //
+            // `tag(new:)` sends the source REFERENCE, so a concurrent pull of
+            // that name may have tagged different content: only apply the
+            // captured selection when the destination really holds the digest
+            // we captured.
+            let tagged = try? await ClientImage.get(reference: targetReference, containerSystemConfig: systemConfig)
+            let taggedMatches = tagged.map { $0.digest == sourceDigest } ?? false
+            await ImagePlatformStore.shared.copy(
+                selection: taggedMatches ? selection : nil,
+                to: targetReference,
+                recordedBefore: destinationCutoff)
             if let broadcaster = req.application.storage[EventBroadcasterKey.self] {
                 // moby's tag event uses the image digest as Actor.ID and the new
                 // reference as the `name` attribute (no `image`/`from` for image events).

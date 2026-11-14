@@ -391,3 +391,54 @@ struct ImagePlatformStoreCapturedSelectionTests {
         #expect(await store.platform(forReference: dest) == nil)
     }
 }
+
+/// A tag/untag operation suspends between reading the source selection and
+/// applying it to the destination. A pull of the DESTINATION landing in that
+/// window recorded its own, newer selection — which must win.
+@Suite("ImagePlatformStore — destination cutoff on applied selections")
+struct ImagePlatformStoreDestinationCutoffTests {
+
+    private func makeStore(directory: URL) async -> ImagePlatformStore {
+        let store = ImagePlatformStore()
+        await store.configure(storageDirectory: directory)
+        return store
+    }
+
+    private func tempDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("podm-image-platforms-destcut-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    @Test("an applied selection keeps a destination record written after the cutoff")
+    func newerDestinationWins() async throws {
+        let store = await makeStore(directory: try tempDir())
+        let dest = "docker.io/library/tag:latest"
+        let amd64 = Platform(arch: "amd64", os: "linux", variant: nil)
+        let arm64 = Platform(arch: "arm64", os: "linux", variant: nil)
+
+        let cutoff = ContinuousClock.Instant.now
+        // A pull of the destination records its variant while the tag suspends.
+        await store.record(reference: dest, platform: arm64)
+
+        await store.copy(selection: nil, to: dest, recordedBefore: cutoff)
+        #expect(
+            await store.platform(forReference: dest)?.architecture == "arm64",
+            "the concurrent pull's newer selection must survive the tag's absence copy")
+    }
+
+    @Test("without a newer record the applied selection lands")
+    func selectionApplies() async throws {
+        let store = await makeStore(directory: try tempDir())
+        let source = "docker.io/library/src:latest"
+        let dest = "docker.io/library/dst:latest"
+        let amd64 = Platform(arch: "amd64", os: "linux", variant: nil)
+        await store.record(reference: source, platform: amd64)
+
+        let cutoff = ContinuousClock.Instant.now
+        let selection = await store.captureSelection(matching: source, digest: nil)
+        await store.copy(selection: selection, to: dest, recordedBefore: cutoff)
+        #expect(await store.platform(forReference: dest)?.architecture == "amd64")
+    }
+}

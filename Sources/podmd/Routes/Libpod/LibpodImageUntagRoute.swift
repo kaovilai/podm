@@ -126,12 +126,21 @@ struct LibpodImageUntagRoute: RouteCollection {
         // from default image listings while remaining in storage until pruned.
         guard let target = untagTargets.first else {
             if !allReferences.isEmpty {
+                // Capture BEFORE preserving the image: the helper tags through a
+                // mutable source name, so a concurrent pull could change what it
+                // tags (and the record the copy would read afterwards).
+                let selection = await ImagePlatformStore.shared.captureSelection(
+                    matching: resolved.reference, digest: resolved.digest)
                 try await store.ensureDanglingReference(
                     reference: resolved.reference, digest: resolved.digest, systemConfig: systemConfig)
                 // The surviving digest reference inherits the selection, or a
-                // later create/run by digest falls back to the host platform.
+                // later create/run by digest falls back to the host platform —
+                // but only when it really holds this digest.
+                let preserved = try? await ClientImage.get(
+                    reference: resolved.digest, containerSystemConfig: systemConfig)
+                let preservedMatches = preserved.map { $0.digest == resolved.digest } ?? false
                 await ImagePlatformStore.shared.copy(
-                    matching: resolved.reference, digest: resolved.digest, to: resolved.digest)
+                    selection: preservedMatches ? selection : nil, to: resolved.digest)
             }
             for reference in allReferences {
                 // Fixed instant BEFORE deleting: a concurrent pull that recreates
@@ -166,12 +175,16 @@ struct LibpodImageUntagRoute: RouteCollection {
         }
 
         if allReferences.count == 1 {
+            // Capture before preserving — see the all-names branch above.
+            let selection = await ImagePlatformStore.shared.captureSelection(
+                matching: stored, digest: resolved.digest)
             try await store.ensureDanglingReference(
                 reference: resolved.reference, digest: resolved.digest, systemConfig: systemConfig)
-            // The surviving digest reference inherits the selection (see the
-            // all-names branch above).
+            let preserved = try? await ClientImage.get(
+                reference: resolved.digest, containerSystemConfig: systemConfig)
+            let preservedMatches = preserved.map { $0.digest == resolved.digest } ?? false
             await ImagePlatformStore.shared.copy(
-                matching: stored, digest: resolved.digest, to: resolved.digest)
+                selection: preservedMatches ? selection : nil, to: resolved.digest)
         }
         let deletionStartedAt: ContinuousClock.Instant = .now
         try await store.delete(reference: stored)

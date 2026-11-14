@@ -143,7 +143,14 @@ actor ImagePlatformStore {
 
     /// Applies a `captureSelection(matching:digest:)` result (nil copies the
     /// absence — see `copy(matching:digest:to:)`).
-    func copy(selection: Record?, to destination: String) {
+    ///
+    /// `recordedBefore` guards a destination a concurrent pull may have
+    /// re-recorded while the caller was tagging: a record newer than the cutoff
+    /// wins, exactly as in `remove(matching:recordedBefore:)`.
+    func copy(selection: Record?, to destination: String, recordedBefore cutoff: ContinuousClock.Instant? = nil) {
+        if let cutoff, let recordedAt = platforms[destination]?.recordedAt, recordedAt > cutoff {
+            return
+        }
         copy(resolved: selection, to: destination)
     }
 
