@@ -276,7 +276,17 @@ struct ClientImageService: ClientImageProtocol {
         } catch {
             throw ClientImageError.notFound(id: id)
         }
+        // Snapshot when this reference was last recorded BEFORE deleting: the
+        // delete suspends (blob cleanup, remaining-reference lookup) and a pull
+        // arriving in that window may recreate the reference and record its own
+        // variant, which must survive this cleanup.
+        let recordedBefore = await ImagePlatformStore.shared.recordedInstant(matching: normalizedRef)
         try await imageStore.delete(reference: normalizedRef)
+        // Every deletion path (docker/podman image rm, image prune, libpod
+        // delete) funnels through here — cleaning up only in ImageDeleteRoute
+        // left pruned and libpod-deleted references holding a stale variant
+        // that a later image reusing the name would inherit.
+        await ImagePlatformStore.shared.remove(matching: normalizedRef, recordedBefore: recordedBefore)
 
         // Free orphaned blobs — mirrors Apple Container's own `container image rm`.
         // Use try? so a GC failure does not fail the delete: the tag is already gone
@@ -358,7 +368,8 @@ struct ClientImageService: ClientImageProtocol {
                     // keeps the whole OCI index, and container create must
                     // resolve the variant the user pulled rather than silently
                     // unpacking a host-platform sibling from the same index.
-                    await ImagePlatformStore.shared.record(reference: reference, platform: platform)
+                    await ImagePlatformStore.shared.record(
+                        reference: reference, platform: platform, digest: image.digest)
                     continuation.yield(.message("Image digest: \(image.digest)"))
                     continuation.yield(.message(ClientImageService.pulledStatusMessage(for: reference)))
                     continuation.finish()
@@ -381,7 +392,8 @@ struct ClientImageService: ClientImageProtocol {
                             )
                             try await fallbackImage.unpack(platform: amd64, progressUpdate: nil)
                             logger.info("Successfully pulled \(reference) for amd64 (Rosetta)")
-                            await ImagePlatformStore.shared.record(reference: reference, platform: amd64)
+                            await ImagePlatformStore.shared.record(
+                                reference: reference, platform: amd64, digest: fallbackImage.digest)
                             continuation.yield(.message("Image digest: \(fallbackImage.digest)"))
                             continuation.yield(.message(ClientImageService.pulledStatusMessage(for: reference)))
                             continuation.finish()

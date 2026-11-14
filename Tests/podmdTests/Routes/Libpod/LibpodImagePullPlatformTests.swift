@@ -76,6 +76,29 @@ struct LibpodImagePullPlatformTests {
         #expect(platform.architecture == "amd64")
     }
 
+    @Test("a valid three-component platform reaches the pull (linux/amd64/v3)")
+    func amd64V3Accepted() async throws {
+        // `Platform(from: "linux/amd64/v3")` rejects this — its amd64 branch
+        // only accepts v1 — but amd64/v3 is a valid OCI platform the registry
+        // serves. Parsing components must not inherit that restriction.
+        let client = RecordingPullClient()
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+            try app.register(collection: LibpodImagePullRoute(client: client))
+
+            try await app.testing().test(
+                .POST, "/v1.51/libpod/images/pull?reference=alpine&os=linux&arch=amd64&variant=v3"
+            ) { res async in
+                #expect(res.status == .ok)
+            }
+        }
+        let platform = try #require(await client.lastPlatform)
+        #expect(platform.architecture == "amd64")
+        #expect(platform.variant == "v3")
+    }
+
     @Test("no platform at all pulls the host platform")
     func defaultsToHost() async throws {
         let client = RecordingPullClient()

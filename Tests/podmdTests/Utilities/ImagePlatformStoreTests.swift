@@ -182,3 +182,112 @@ struct ImagePlatformStoreRemoveMatchingTests {
         #expect(await store.platform(forReference: "docker.io/library/demo:latest")?.architecture == "amd64")
     }
 }
+
+/// The reference alone is mutable: `docker load`/`import`/`commit` can put
+/// different content under an existing name, a tag can replace a reference
+/// whose record it should not inherit, and a deletion suspends long enough for
+/// a pull to land. These pin the store's answers to each.
+@Suite("ImagePlatformStore — content replacement, absence copy, deletion race")
+struct ImagePlatformStoreContentLifecycleTests {
+
+    private func makeStore(
+        directory: URL,
+        normalize: @escaping @Sendable (String) -> String? = { $0 }
+    ) async -> ImagePlatformStore {
+        let store = ImagePlatformStore()
+        await store.configure(storageDirectory: directory, normalizeReference: normalize)
+        return store
+    }
+
+    private func tempDir(permissions: Int16? = nil) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("podm-image-platforms-content-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if let permissions {
+            try FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: dir.path)
+        }
+        return dir
+    }
+
+    private let amd64 = Platform(arch: "amd64", os: "linux", variant: nil)
+    private let arm64 = Platform(arch: "arm64", os: "linux", variant: nil)
+
+    @Test("a digest mismatch means the reference holds different content now")
+    func digestMismatchIsNoRecord() async throws {
+        let store = await makeStore(directory: try tempDir())
+        await store.record(reference: "docker.io/library/demo:latest", platform: amd64, digest: "sha256:aaa")
+
+        #expect(await store.platform(matching: "docker.io/library/demo:latest", digest: "sha256:aaa")?.architecture == "amd64")
+        #expect(
+            await store.platform(matching: "docker.io/library/demo:latest", digest: "sha256:bbb") == nil,
+            "an image loaded/imported under the same name must not inherit the old variant")
+        #expect(
+            await store.platform(matching: "docker.io/library/demo:latest") != nil,
+            "a caller without a digest cannot validate and still sees the record")
+    }
+
+    @Test("a record persisted before digests were stored is accepted unvalidated")
+    func preUpgradeRecordAccepted() async throws {
+        let store = await makeStore(directory: try tempDir())
+        await store.record(reference: "docker.io/library/legacy:latest", platform: amd64)
+        #expect(await store.platform(matching: "docker.io/library/legacy:latest", digest: "sha256:whatever")?.architecture == "amd64")
+    }
+
+    @Test("matching reads resolve a verbatim stored tag through the normalizer")
+    func matchingResolvesStoredSpelling() async throws {
+        let store = await makeStore(
+            directory: try tempDir(), normalize: { _ in "docker.io/library/demo:latest" })
+        await store.record(reference: "docker.io/library/demo:latest", platform: amd64)
+        #expect(await store.platform(matching: "demo:latest")?.architecture == "amd64")
+    }
+
+    @Test("tagging an image with no record clears the destination's stale variant")
+    func copyAbsenceClearsDestination() async throws {
+        let store = await makeStore(directory: try tempDir())
+        await store.record(reference: "docker.io/library/target:latest", platform: amd64)
+        // Tagging an unrecorded (loaded) image over the reference must copy the
+        // ABSENCE, or later creates request a variant the tag no longer has.
+        await store.copy(matching: "docker.io/library/loaded:latest", to: "docker.io/library/target:latest")
+        #expect(await store.platform(forReference: "docker.io/library/target:latest") == nil)
+    }
+
+    @Test("copy resolves a verbatim source spelling")
+    func copyResolvesSourceSpelling() async throws {
+        let store = await makeStore(
+            directory: try tempDir(), normalize: { _ in "docker.io/library/demo:latest" })
+        await store.record(reference: "docker.io/library/demo:latest", platform: amd64)
+        await store.copy(matching: "demo:latest", to: "docker.io/library/copy:latest")
+        #expect(await store.platform(forReference: "docker.io/library/copy:latest")?.architecture == "amd64")
+    }
+
+    @Test("a record written after the deletion snapshot survives the cleanup")
+    func removalKeepsNewerRecord() async throws {
+        let store = await makeStore(directory: try tempDir())
+        await store.record(reference: "docker.io/library/alpine:latest", platform: amd64)
+        let cutoff = try #require(await store.recordedInstant(matching: "docker.io/library/alpine:latest"))
+
+        // A pull lands while the delete is suspended and records its own choice.
+        await store.record(reference: "docker.io/library/alpine:latest", platform: arm64)
+        await store.remove(matching: "docker.io/library/alpine:latest", recordedBefore: cutoff)
+
+        #expect(
+            await store.platform(forReference: "docker.io/library/alpine:latest")?.architecture == "arm64",
+            "the concurrent pull's selection must not be discarded")
+    }
+
+    @Test("a failed persist is retried by the next identical record")
+    func persistFailureIsRetried() async throws {
+        let dir = try tempDir(permissions: 0o500)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path) }
+        let store = await makeStore(directory: dir)
+        let file = dir.appendingPathComponent("podm-image-platforms.json")
+
+        await store.record(reference: "docker.io/library/retry:latest", platform: amd64)
+        #expect(!FileManager.default.fileExists(atPath: file.path), "the write must have failed")
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        // The SAME record again: the equality guard must not skip the retry.
+        await store.record(reference: "docker.io/library/retry:latest", platform: amd64)
+        #expect(FileManager.default.fileExists(atPath: file.path), "an unchanged record must still retry a failed write")
+    }
+}

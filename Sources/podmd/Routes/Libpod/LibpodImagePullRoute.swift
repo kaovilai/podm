@@ -97,12 +97,23 @@ struct LibpodImagePullRoute: RouteCollection {
         let resolvedOS = requestedOS ?? host.os
         let resolvedArch = requestedArch ?? host.architecture
         let resolvedVariant = requestedVariant
+        // Built from components, not by round-tripping through
+        // "os/arch/variant": ContainerizationOCI's textual parser rejects valid
+        // OCI platform variants (e.g. linux/amd64/v3), turning a platform the
+        // registry serves into a 400 before the pull is even attempted. Each
+        // component is validated on its own instead, which keeps that rejection
+        // for genuinely unparseable input without inheriting the parser's
+        // restriction on variants.
         let spec = resolvedVariant.map { "\(resolvedOS)/\(resolvedArch)/\($0)" } ?? "\(resolvedOS)/\(resolvedArch)"
-        do {
-            return try Platform(from: spec)
-        } catch {
-            throw Abort(.badRequest, reason: "Failed to parse platform '\(spec)': \(error.localizedDescription)")
+        func isComponent(_ value: String) -> Bool {
+            value.range(of: "^[a-z0-9]+$", options: .regularExpression) != nil
         }
+        guard isComponent(resolvedOS), isComponent(resolvedArch),
+            resolvedVariant.map(isComponent) ?? true
+        else {
+            throw Abort(.badRequest, reason: "Failed to parse platform '\(spec)': invalid platform component")
+        }
+        return Platform(arch: resolvedArch, os: resolvedOS, variant: resolvedVariant)
     }
 
     private static func parseReference(_ reference: String) -> (image: String, tag: String) {

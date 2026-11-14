@@ -131,6 +131,10 @@ struct LibpodImageUntagRoute: RouteCollection {
             }
             for reference in allReferences {
                 try await store.delete(reference: reference)
+                // The name is gone — forget the variant it held, so an image
+                // reusing the name cannot inherit it (same cleanup the shared
+                // delete path performs for `image rm`/`image prune`).
+                await ImagePlatformStore.shared.remove(matching: reference)
                 await broadcastUntag(req: req, digest: resolved.digest, reference: reference)
             }
             return Response(status: .created)
@@ -159,6 +163,7 @@ struct LibpodImageUntagRoute: RouteCollection {
                 reference: resolved.reference, digest: resolved.digest, systemConfig: systemConfig)
         }
         try await store.delete(reference: stored)
+        await ImagePlatformStore.shared.remove(matching: stored)
         await broadcastUntag(req: req, digest: resolved.digest, reference: stored)
         return Response(status: .created)
     }

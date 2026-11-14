@@ -254,7 +254,12 @@ extension ImageInspectRoute {
             // host-platform sibling from the same OCI index.
             let pulledPlatform: Platform? =
                 if requestedPlatform == nil {
-                    await ImagePlatformStore.shared.platform(forReference: image.reference)
+                    // `matching:` handles a built image's verbatim short tag
+                    // (`demo:latest`) against the normalized key the build
+                    // recorded; `digest:` rejects a record written for
+                    // different content now stored under the same name.
+                    await ImagePlatformStore.shared.platform(
+                        matching: image.reference, digest: image.descriptor.digest)
                 } else {
                     nil
                 }
