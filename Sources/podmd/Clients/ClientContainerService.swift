@@ -53,6 +53,15 @@ actor ContainerExitCodeStore {
         exitDates[id]
     }
 
+    /// Clears a container's exit code under every alias it may be waited on by.
+    /// A boot must clear BOTH the native id and the Docker hex id: clearing only
+    /// the native id left a previous run's hex-id code in place, and with the
+    /// "never downgrade a real code" rule the next run reported that stale code.
+    func removeAll(nativeId: String, hexId: String) {
+        remove(id: nativeId)
+        remove(id: hexId)
+    }
+
     func remove(id: String) {
         codes.removeValue(forKey: id)
         exitDates.removeValue(forKey: id)
@@ -82,7 +91,14 @@ actor ContainerExitCodeStore {
         guard first == Self.waitFailureSentinel else { return first }
         let deadline = ContinuousClock.Instant.now + sentinelGrace
         while ContinuousClock.Instant.now < deadline {
-            try? await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+            } catch {
+                // Cancelled (the wait route's task group cancels its losing
+                // task): answer with what is known rather than spinning out
+                // the rest of the grace period.
+                return codes[id]
+            }
             if let current = codes[id], current != Self.waitFailureSentinel { return current }
         }
         return codes[id]
@@ -492,7 +508,11 @@ struct ClientContainerService: ClientContainerProtocol {
             // Clear any exit code recorded by a previous run of this container so
             // /wait blocks for the new init process rather than immediately
             // returning the stale code (e.g. after a restart).
-            await ContainerExitCodeStore.shared.remove(id: container.id)
+            // Clear the code from EVERY alias this container can be waited on
+            // by (see removeAll): a stale hex-id code from a previous run would
+            // otherwise be reported by /wait.
+            await ContainerExitCodeStore.shared.removeAll(
+                nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
             try await process.start()
             // Wait for the init process in the background so we can capture its
             // real exit code without blocking the /start response.
