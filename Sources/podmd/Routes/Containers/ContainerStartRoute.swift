@@ -6,8 +6,13 @@ import Vapor
 
 struct ContainerStartRoute: RouteCollection {
     let client: ClientContainerProtocol
+    /// `--rm` tombstones — injectable so route tests can bound the tombstone
+    /// wait without touching the process-wide singleton.
+    var autoRemoved: AutoRemovedContainers = .shared
     func boot(routes: RoutesBuilder) throws {
-        try routes.registerVersionedRoute(.POST, pattern: "/containers/{id}/start", use: ContainerStartRoute.handler(client: client))
+        try routes.registerVersionedRoute(
+            .POST, pattern: "/containers/{id}/start",
+            use: ContainerStartRoute.handler(client: client, autoRemoved: autoRemoved))
     }
 }
 
@@ -17,7 +22,10 @@ struct ContainerStartQuery: Content {
 }
 
 extension ContainerStartRoute {
-    static func handler(client: ClientContainerProtocol) -> @Sendable (Request) async throws -> HTTPStatus {
+    static func handler(
+        client: ClientContainerProtocol,
+        autoRemoved: AutoRemovedContainers = .shared
+    ) -> @Sendable (Request) async throws -> HTTPStatus {
         { req in
 
             guard let id = req.parameters.get("id") else {
@@ -37,15 +45,29 @@ extension ContainerStartRoute {
                 throw Abort(.badRequest, reason: "ambiguous container reference \(reference): matches \(matchList)")
             }
 
+            // `docker run --rm` sends /start and /wait after attaching, while
+            // the attached container may already have exited and been reaped
+            // by Apple Container. A tombstoned exit means the run this /start
+            // belongs to already completed — a no-op success, not a 404 that
+            // would fail the whole `docker run` with exit 125.
+            guard let preStartSnapshot else {
+                if await autoRemoved.waitForExitCode(for: id) != nil {
+                    return .noContent
+                }
+                // Answer the real 404 here, not inside the start do/catch
+                // below: that block converts every non-"already running"
+                // error into a 500, so a missing container surfaced as
+                // "Failed to start container: Abort.404: No such container".
+                throw Abort(.notFound, reason: "No such container: \(id)")
+            }
+
             // Whether this request actually transitioned the container to
             // running (a stopped container being started) — drives the log
             // journal's fresh-boot reset below.
             var startedByThisCall = false
 
             do {
-                guard let container = preStartSnapshot else {
-                    throw Abort(.notFound, reason: "No such container: \(id)")
-                }
+                let container = preStartSnapshot
 
                 await ContainerRestartState.shared.reset(id: container.id)
 
@@ -92,22 +114,23 @@ extension ContainerStartRoute {
                 logger: req.logger
             )
 
+            // The post-start re-fetch is the fresher view; the pre-start
+            // snapshot is authoritative when it fails, and it is never nil by
+            // this point (the guard above answered a missing container).
             let metadataSnapshot = startedSnapshot ?? preStartSnapshot
             // Derive the canonical 64-char Docker ID once here so the cache and all
             // lifecycle events use the same stable id the create event returned.
-            let eventId = metadataSnapshot.map { DockerContainerID.hexId(for: $0) } ?? id
-            if let snap = metadataSnapshot {
-                // Store under canonical hexId so later lookups by the Docker hex ID always
-                // hit, regardless of whether /start was called by name or short ID.
-                let containerIP = ContainerStartRoute.dnsAttachmentIP(in: startedSnapshot)
-                await ContainerInfoCache.shared.set(
-                    hexId: eventId,
-                    nativeId: snap.id,
-                    image: snap.configuration.image.reference,
-                    labels: LabelNormalization.restore(snap.configuration.labels),
-                    ip: containerIP
-                )
-            }
+            let eventId = DockerContainerID.hexId(for: metadataSnapshot)
+            // Store under canonical hexId so later lookups by the Docker hex ID always
+            // hit, regardless of whether /start was called by name or short ID.
+            let containerIP = ContainerStartRoute.dnsAttachmentIP(in: startedSnapshot)
+            await ContainerInfoCache.shared.set(
+                hexId: eventId,
+                nativeId: metadataSnapshot.id,
+                image: metadataSnapshot.configuration.image.reference,
+                labels: LabelNormalization.restore(metadataSnapshot.configuration.labels),
+                ip: containerIP
+            )
 
             guard let broadcaster = req.application.storage[EventBroadcasterKey.self] else {
                 return .noContent
@@ -116,9 +139,7 @@ extension ContainerStartRoute {
             // moby logs per-volume "mount" events while setting up the container's mounts,
             // before the "start" event (daemon/volumes_unix.go). Same pragmatism as the
             // ungated "start" below: a redundant /start re-emits them.
-            if let snap = metadataSnapshot {
-                await VolumeMountEvents.broadcastMounts(for: snap, containerId: eventId, broadcaster: broadcaster)
-            }
+            await VolumeMountEvents.broadcastMounts(for: metadataSnapshot, containerId: eventId, broadcaster: broadcaster)
 
             // Emit "start" on every successful /start. We intentionally do NOT gate this on
             // "did this call transition the container to running": for a foreground `docker run`,
@@ -130,15 +151,16 @@ extension ContainerStartRoute {
                 id: eventId,
                 type: "container",
                 status: "start",
-                image: metadataSnapshot?.configuration.image.reference ?? "",
-                name: metadataSnapshot?.id ?? id,
-                labels: LabelNormalization.restore(metadataSnapshot?.configuration.labels ?? [:])
+                image: metadataSnapshot.configuration.image.reference,
+                name: metadataSnapshot.id,
+                labels: LabelNormalization.restore(metadataSnapshot.configuration.labels)
             )
             await broadcaster.broadcast(event)
 
             // Observe the container process exit to fire the "die" event.
             // Runs as a detached background task — the start route returns immediately.
-            if let snap = metadataSnapshot {
+            do {
+                let snap = metadataSnapshot
                 let restartPolicy = RestartPolicyManager.decode(from: snap.configuration.labels)
                 let generation = await ContainerRestartState.shared.currentGeneration(id: snap.id)
                 await ContainerStartRoute.armRestartObserver(
