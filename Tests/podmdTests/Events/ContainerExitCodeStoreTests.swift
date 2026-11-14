@@ -74,3 +74,55 @@ struct ResolveExitCodeTests {
         #expect(calls == 4)
     }
 }
+
+/// A foreground `docker run` has two exit observers (the start route's
+/// background waiter and the attach route's monitor). When one observer's
+/// `wait()` failed after its retries it recorded `waitFailureSentinel` — and
+/// that sentinel OVERWROTE the real code the other observer had just recorded,
+/// so `docker run alpine sh -c 'exit 3'` returned 255 roughly two runs in
+/// three.
+@Suite("ContainerExitCodeStore — the failure sentinel never clobbers a real code")
+struct ExitCodeStoreSentinelPrecedenceTests {
+
+    private let id = "exit-code-store-test-ctr"
+
+    @Test("a real code is not replaced by the sentinel")
+    func sentinelDoesNotClobber() async {
+        let store = ContainerExitCodeStore()
+        await store.set(id: id, code: 3)
+        await store.set(id: id, code: ContainerExitCodeStore.waitFailureSentinel)
+        #expect(await store.get(id: id) == 3)
+    }
+
+    @Test("a real code is not replaced by a second, different real code")
+    func firstRealCodeWins() async {
+        let store = ContainerExitCodeStore()
+        await store.set(id: id, code: 3)
+        await store.set(id: id, code: 7)
+        #expect(await store.get(id: id) == 3)
+    }
+
+    @Test("the sentinel may still fill in when no real code exists")
+    func sentinelFillsIn() async {
+        let store = ContainerExitCodeStore()
+        await store.set(id: id, code: ContainerExitCodeStore.waitFailureSentinel)
+        #expect(await store.get(id: id) == ContainerExitCodeStore.waitFailureSentinel)
+    }
+
+    @Test("a real code that arrives after the sentinel replaces it")
+    func realCodeUpgradesSentinel() async {
+        let store = ContainerExitCodeStore()
+        await store.set(id: id, code: ContainerExitCodeStore.waitFailureSentinel)
+        await store.set(id: id, code: 3)
+        #expect(await store.get(id: id) == 3)
+    }
+
+    @Test("a restart's remove() clears the code so the next run records fresh")
+    func removeAllowsFreshCode() async {
+        let store = ContainerExitCodeStore()
+        await store.set(id: id, code: 3)
+        await store.remove(id: id)
+        await store.set(id: id, code: 0)
+        #expect(await store.get(id: id) == 0)
+    }
+}

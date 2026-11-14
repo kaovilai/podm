@@ -94,7 +94,10 @@ struct ContainerWaitRoute: RouteCollection {
                                 let pollIntervalNs: UInt64 = 100_000_000
                                 let maxPolls = Int(30_000_000_000 / pollIntervalNs)
                                 for _ in 0..<maxPolls {
-                                    if let code = await ContainerExitCodeStore.shared.get(id: containerId) {
+                                    // `resolvedCode` holds back the wait-failure
+                                    // sentinel while the other exit observer may
+                                    // still record the real code.
+                                    if let code = await ContainerExitCodeStore.shared.resolvedCode(id: containerId) {
                                         return RESTContainerWait(statusCode: Int64(code))
                                     }
                                     try? await Task.sleep(nanoseconds: pollIntervalNs)

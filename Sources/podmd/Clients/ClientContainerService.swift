@@ -17,7 +17,23 @@ actor ContainerExitCodeStore {
     private var exitDates: [String: Date] = [:]
     private var waiters: [String: [CheckedContinuation<Int32, Never>]] = [:]
 
+    /// Records a container's exit code, never downgrading one already known.
+    ///
+    /// A foreground `docker run` has TWO observers waiting on the same init
+    /// process (the start route's background waiter and the attach route's
+    /// monitor). Apple's XPC tolerates the duplicate wait unevenly: when one
+    /// observer's `wait()` fails after its retries it records the failure
+    /// sentinel — and that sentinel used to OVERWRITE the real code the other
+    /// observer had already recorded, so `docker run alpine sh -c 'exit 3'`
+    /// returned 255 instead of 3 roughly two runs in three. A real code is
+    /// authoritative once recorded; the sentinel may only fill in when no real
+    /// code exists yet, and a later real code may still replace it.
     func set(id: String, code: Int32) {
+        if let existing = codes[id] {
+            let existingIsReal = existing != Self.waitFailureSentinel
+            let incomingIsReal = code != Self.waitFailureSentinel
+            if existingIsReal || !incomingIsReal { return }
+        }
         codes[id] = code
         exitDates[id] = Date()
         // Resume anyone awaiting this container's exit code (e.g. the die-event observer),
@@ -51,6 +67,25 @@ actor ContainerExitCodeStore {
         return await withCheckedContinuation { continuation in
             waiters[id, default: []].append(continuation)
         }
+    }
+
+    /// The exit code to report, holding back the failure sentinel briefly so a
+    /// concurrent observer's real code can replace it.
+    ///
+    /// A foreground run has two observers on the same init process; one can
+    /// record the sentinel while the other is still resolving the real code a
+    /// few milliseconds later. Returning the sentinel at once made
+    /// `docker run … sh -c 'exit 3'` report 255 for most runs, so a sentinel is
+    /// answered only after `sentinelGrace` passes with no real code.
+    func resolvedCode(id: String, sentinelGrace: Duration = .seconds(1)) async -> Int32? {
+        guard let first = codes[id] else { return nil }
+        guard first == Self.waitFailureSentinel else { return first }
+        let deadline = ContinuousClock.Instant.now + sentinelGrace
+        while ContinuousClock.Instant.now < deadline {
+            try? await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+            if let current = codes[id], current != Self.waitFailureSentinel { return current }
+        }
+        return codes[id]
     }
 
     /// Sentinel recorded when the init process's exit code could not be obtained after retries.
@@ -700,7 +735,7 @@ struct ClientContainerService: ClientContainerProtocol {
             }
         }
 
-        let code = await ContainerExitCodeStore.shared.get(id: id) ?? 0
+        let code = await ContainerExitCodeStore.shared.resolvedCode(id: id) ?? 0
         return RESTContainerWait(statusCode: Int64(code))
     }
 
