@@ -94,9 +94,10 @@ extension ContainerAttachWSRoute {
             try? pipes.stdin?.write.close()
         }
 
-        // Clear every alias (native AND the Docker hex id): a stale hex-id
-        // code from a previous run would otherwise be reported by /wait.
-        let bootGeneration = await ContainerExitCodeStore.shared.beginBoot(
+        // Clear every alias (native AND the Docker hex id) before booting: a
+        // stale hex-id code from a previous run would otherwise be reported by
+        // /wait. The boot generation is allocated only after the start below.
+        await ContainerExitCodeStore.shared.removeAll(
             nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
 
         let process: ClientProcess
@@ -124,8 +125,8 @@ extension ContainerAttachWSRoute {
             process = try await ContainerClient().bootstrap(id: container.id, stdio: pipes.stdioArray)
         } catch {
             pipes.closeAll()
-            await ContainerExitCodeStore.shared.set(id: container.id, code: -1, generation: bootGeneration)
-            await ContainerExitCodeStore.shared.set(id: hexId, code: -1, generation: bootGeneration)
+            await ContainerExitCodeStore.shared.set(id: container.id, code: -1)
+            await ContainerExitCodeStore.shared.set(id: hexId, code: -1)
             try? await ws.close(code: .unexpectedServerError)
             return
         }
@@ -141,13 +142,24 @@ extension ContainerAttachWSRoute {
         } catch {
             if !isBenignStartRace(error) {
                 pipes.closeAfterHandoff()
-                await ContainerExitCodeStore.shared.set(id: container.id, code: -1, generation: bootGeneration)
-                await ContainerExitCodeStore.shared.set(id: hexId, code: -1, generation: bootGeneration)
+                await ContainerExitCodeStore.shared.set(id: container.id, code: -1)
+                await ContainerExitCodeStore.shared.set(id: hexId, code: -1)
                 try? await ws.close(code: .unexpectedServerError)
                 return
             }
             startedByThisCall = false
         }
+
+        // Allocate the boot generation only for the request that actually
+        // started the container (see ContainerAttachRoute): a losing attach
+        // must not invalidate the winner's token.
+        let bootGeneration: UInt64? =
+            if startedByThisCall {
+                await ContainerExitCodeStore.shared.beginBoot(
+                    nativeId: container.id, hexId: hexId)
+            } else {
+                await ContainerExitCodeStore.shared.currentGeneration(id: container.id)
+            }
 
         await ProcessRegistry.shared.set(id: container.id, process: process)
 

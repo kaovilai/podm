@@ -249,3 +249,25 @@ struct ExitCodeStoreBootGenerationTests {
         #expect(await ContainerExitCodeStore.shared.get(id: nativeId) == 3)
     }
 }
+
+/// Two attaches can race on the same stopped container. Only the request whose
+/// start actually won allocates a generation; the loser observes the winner's
+/// token (allocating one would invalidate the winner's, and its real exit code
+/// would then be rejected).
+@Suite("ContainerExitCodeStore — losing boot observes the winner")
+struct ExitCodeStoreLosingBootTests {
+
+    @Test("a loser reads the winner's generation and its writes are accepted")
+    func loserObservesWinnerToken() async {
+        let nativeId = "lose-native-\(UUID().uuidString)"
+        let hexId = "lose-hex-\(UUID().uuidString)"
+        defer { Task { await ContainerExitCodeStore.shared.removeAll(nativeId: nativeId, hexId: hexId) } }
+
+        let winner = await ContainerExitCodeStore.shared.beginBoot(nativeId: nativeId, hexId: hexId)
+        let observed = await ContainerExitCodeStore.shared.currentGeneration(id: nativeId)
+        #expect(observed == winner, "the loser must not allocate a new generation")
+
+        await ContainerExitCodeStore.shared.set(id: nativeId, code: 5, generation: observed)
+        #expect(await ContainerExitCodeStore.shared.get(id: nativeId) == 5)
+    }
+}

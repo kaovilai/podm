@@ -73,6 +73,14 @@ actor ContainerExitCodeStore {
     private var generations: [String: UInt64] = [:]
     private var nextGeneration: UInt64 = 0
 
+    /// The generation currently in force for `id`, if any boot has been
+    /// recorded. A request that lost a boot race observes this token instead
+    /// of allocating one: bumping for the loser would invalidate the winner's
+    /// token and its real exit code would then be rejected.
+    func currentGeneration(id: String) -> UInt64? {
+        generations[id]
+    }
+
     /// Starts a new boot: clears every alias (see `removeAll`) and returns the
     /// generation token this boot's observers must pass to `set`.
     func beginBoot(nativeId: String, hexId: String) -> UInt64 {

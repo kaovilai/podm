@@ -315,9 +315,11 @@ extension ContainerAttachRoute {
         // our write end immediately so the container's stdin sees EOF.
         try? pipes.stdin?.write.close()
 
-        // Clear every alias (native AND the Docker hex id): a stale hex-id
-        // code from a previous run would otherwise be reported by /wait.
-        let bootGeneration = await ContainerExitCodeStore.shared.beginBoot(
+        // Clear every alias (native AND the Docker hex id) before booting: a
+        // stale hex-id code from a previous run would otherwise be reported by
+        // /wait. The BOOT GENERATION is allocated only after the start below —
+        // see there.
+        await ContainerExitCodeStore.shared.removeAll(
             nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
 
         let process: ClientProcess
@@ -335,7 +337,7 @@ extension ContainerAttachRoute {
             process = try await ContainerClient().bootstrap(id: container.id, stdio: pipes.stdioArray)
         } catch {
             pipes.closeAll()
-            await ContainerExitCodeStore.shared.set(id: container.id, code: -1, generation: bootGeneration)
+            await ContainerExitCodeStore.shared.set(id: container.id, code: -1)
             throw Abort(.internalServerError, reason: "Failed to bootstrap container: \(error.localizedDescription)")
         }
 
@@ -350,11 +352,24 @@ extension ContainerAttachRoute {
         } catch {
             if !isBenignStartRace(error) {
                 pipes.closeAfterHandoff()
-                await ContainerExitCodeStore.shared.set(id: container.id, code: -1, generation: bootGeneration)
+                await ContainerExitCodeStore.shared.set(id: container.id, code: -1)
                 throw Abort(.internalServerError, reason: "Failed to start container: \(error.localizedDescription)")
             }
             startedByThisCall = false
         }
+
+        // Allocate the boot generation only for the request that actually
+        // started the container: two attaches racing on a stopped container
+        // both reach this point, and bumping for the loser would invalidate the
+        // winner's token so its real exit code would be rejected. The loser
+        // observes the winner's token instead.
+        let bootGeneration: UInt64? =
+            if startedByThisCall {
+                await ContainerExitCodeStore.shared.beginBoot(
+                    nativeId: container.id, hexId: hexId)
+            } else {
+                await ContainerExitCodeStore.shared.currentGeneration(id: container.id)
+            }
 
         await ProcessRegistry.shared.set(id: container.id, process: process)
 
@@ -590,9 +605,11 @@ extension ContainerAttachRoute {
         // as soon as ContainerExitCodeStore is non-nil, so clear any stale code
         // before starting and record a synthetic one if bootstrap/start fails (so
         // /wait can't return a stale status or poll forever).
-        // Clear every alias (native AND the Docker hex id): a stale hex-id
-        // code from a previous run would otherwise be reported by /wait.
-        let bootGeneration = await ContainerExitCodeStore.shared.beginBoot(
+        // Clear every alias (native AND the Docker hex id) before booting: a
+        // stale hex-id code from a previous run would otherwise be reported by
+        // /wait. The BOOT GENERATION is allocated only after the start below —
+        // see there.
+        await ContainerExitCodeStore.shared.removeAll(
             nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
 
         let process: ClientProcess
@@ -613,7 +630,7 @@ extension ContainerAttachRoute {
             if isBenignStartRace(error) {
                 throw Abort(.conflict, reason: "Container is already starting")
             }
-            await ContainerExitCodeStore.shared.set(id: container.id, code: -1, generation: bootGeneration)
+            await ContainerExitCodeStore.shared.set(id: container.id, code: -1)
             throw Abort(.internalServerError, reason: "Failed to bootstrap container: \(error.localizedDescription)")
         }
 
@@ -624,9 +641,14 @@ extension ContainerAttachRoute {
             if isBenignStartRace(error) {
                 throw Abort(.conflict, reason: "Container is already starting")
             }
-            await ContainerExitCodeStore.shared.set(id: container.id, code: -1, generation: bootGeneration)
+            await ContainerExitCodeStore.shared.set(id: container.id, code: -1)
             throw Abort(.internalServerError, reason: "Failed to start main process: \(error.localizedDescription)")
         }
+
+        // This request performed the boot (a benign race above threw a
+        // conflict, so there is no losing path here): allocate its generation.
+        let bootGeneration = await ContainerExitCodeStore.shared.beginBoot(
+            nativeId: container.id, hexId: hexId)
 
         await ProcessRegistry.shared.set(id: container.id, process: process)
 
