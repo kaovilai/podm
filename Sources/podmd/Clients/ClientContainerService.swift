@@ -42,6 +42,17 @@ actor ContainerExitCodeStore {
         exitDates.removeValue(forKey: id)
     }
 
+    /// Clears the code from EVERY alias a container can be waited on by.
+    ///
+    /// Exit records are written under the native id AND the canonical Docker
+    /// hex id, while a fresh boot knows both: clearing only the native id left
+    /// the previous run's code answering a `/wait <hex id>` until the new
+    /// process exited.
+    func removeAll(nativeId: String, hexId: String) {
+        remove(id: nativeId)
+        remove(id: hexId)
+    }
+
     /// Suspends until the exit code for `id` is recorded, returning the exact recorded value.
     /// If a code is already present it returns immediately. This avoids the grace-poll/`?? 0`
     /// race that `wait(condition:)` is subject to under load — the recorder calls `set(id:)`
@@ -456,8 +467,10 @@ struct ClientContainerService: ClientContainerProtocol {
             let process = try await containerClient.withClient { try await $0.bootstrap(id: container.id, stdio: stdio) }
             // Clear any exit code recorded by a previous run of this container so
             // /wait blocks for the new init process rather than immediately
-            // returning the stale code (e.g. after a restart).
-            await ContainerExitCodeStore.shared.remove(id: container.id)
+            // returning the stale code (e.g. after a restart). Every alias: the
+            // monitor records under the native AND the canonical hex id.
+            await ContainerExitCodeStore.shared.removeAll(
+                nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
             try await process.start()
             // Wait for the init process in the background so we can capture its
             // real exit code without blocking the /start response.

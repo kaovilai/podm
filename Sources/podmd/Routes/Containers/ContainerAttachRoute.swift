@@ -140,7 +140,6 @@ extension ContainerAttachRoute {
                 return try await attachStoppedOutputOnly(
                     req: req,
                     client: client,
-                    hexId: id,
                     container: container,
                     query: query,
                     isTTY: isTTY,
@@ -154,7 +153,6 @@ extension ContainerAttachRoute {
             return try await handleAttachWithStdin(
                 req: req,
                 client: client,
-                hexId: id,
                 container: container,
                 query: query,
                 isUpgrade: isUpgrade,
@@ -281,16 +279,23 @@ extension ContainerAttachRoute {
 
     // Output-only attach for stopped containers (docker run without -i, issue #220).
     // Uses pipes instead of log-file polling to eliminate the race for fast-exiting containers.
+    /// The id the exit monitor records exit codes and the `--rm` tombstone
+    /// under: the canonical 64-hex id of the RESOLVED snapshot, never the
+    /// request path's value (which may be a reusable name or a truncated id).
+    static func exitRecordId(for container: ContainerSnapshot) -> String {
+        DockerContainerID.hexId(for: container)
+    }
+
     private static func attachStoppedOutputOnly(
         req: Request,
         client: ClientContainerProtocol,
-        hexId: String,
         container: ContainerSnapshot,
         query: ContainerAttachQuery,
         isTTY: Bool,
         isUpgrade: Bool,
         hasConnectionUpgrade: Bool
     ) async throws -> Response {
+        let hexId = ContainerAttachRoute.exitRecordId(for: container)
         let attachStdout = query.stdout ?? true
         let stderrOnly = (query.stderr ?? false) && !(query.stdout ?? false)
 
@@ -312,7 +317,11 @@ extension ContainerAttachRoute {
         // our write end immediately so the container's stdin sees EOF.
         try? pipes.stdin?.write.close()
 
-        await ContainerExitCodeStore.shared.remove(id: container.id)
+        // Every alias: the exit monitor records under the native AND the
+        // canonical hex id, so clearing only the native id leaves the previous
+        // run's code answering `/wait <hex id>`.
+        await ContainerExitCodeStore.shared.removeAll(
+            nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
 
         let process: ClientProcess
         do {
@@ -520,7 +529,6 @@ extension ContainerAttachRoute {
     private static func handleAttachWithStdin(
         req: Request,
         client: ClientContainerProtocol,
-        hexId: String,
         container: ContainerSnapshot,
         query: ContainerAttachQuery,
         isUpgrade: Bool,
@@ -547,7 +555,6 @@ extension ContainerAttachRoute {
         return try await createContainerForAttachment(
             req: req,
             client: client,
-            hexId: hexId,
             container: currentContainer,
             query: query,
             shouldUpgrade: shouldUpgrade,
@@ -559,12 +566,12 @@ extension ContainerAttachRoute {
     private static func createContainerForAttachment(
         req: Request,
         client: ClientContainerProtocol,
-        hexId: String,
         container: ContainerSnapshot,
         query: ContainerAttachQuery,
         shouldUpgrade: Bool,
         isTTY: Bool
     ) async throws -> Response {
+        let hexId = ContainerAttachRoute.exitRecordId(for: container)
 
         let attachStdout = query.stdout ?? true
         let attachStderr = query.stderr ?? !isTTY
@@ -584,7 +591,11 @@ extension ContainerAttachRoute {
         // as soon as ContainerExitCodeStore is non-nil, so clear any stale code
         // before starting and record a synthetic one if bootstrap/start fails (so
         // /wait can't return a stale status or poll forever).
-        await ContainerExitCodeStore.shared.remove(id: container.id)
+        // Every alias: the exit monitor records under the native AND the
+        // canonical hex id, so clearing only the native id leaves the previous
+        // run's code answering `/wait <hex id>`.
+        await ContainerExitCodeStore.shared.removeAll(
+            nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
 
         let process: ClientProcess
         do {

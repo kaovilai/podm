@@ -47,8 +47,7 @@ extension ContainerAttachWSRoute {
                 }
                 Task {
                     if container.status == .stopped {
-                        await handleStopped(
-                            ws: ws, req: req, client: client, hexId: id, container: container, query: query)
+                        await handleStopped(ws: ws, req: req, client: client, container: container, query: query)
                     } else {
                         await handleRunning(ws: ws, req: req, container: container, query: query)
                     }
@@ -63,10 +62,10 @@ extension ContainerAttachWSRoute {
         ws: WebSocket,
         req: Request,
         client: ClientContainerProtocol,
-        hexId: String,
         container: ContainerSnapshot,
         query: ContainerAttachWSQuery
     ) async {
+        let hexId = ContainerAttachRoute.exitRecordId(for: container)
         let stdin = query.stdin ?? false
         let stdout = query.stdout ?? true
         let stderr = query.stderr ?? true
@@ -93,7 +92,11 @@ extension ContainerAttachWSRoute {
             try? pipes.stdin?.write.close()
         }
 
-        await ContainerExitCodeStore.shared.remove(id: container.id)
+        // Every alias: the exit monitor records under the native AND the
+        // canonical hex id, so clearing only the native id leaves the previous
+        // run's code answering `/wait <hex id>`.
+        await ContainerExitCodeStore.shared.removeAll(
+            nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
 
         let process: ClientProcess
         do {

@@ -85,3 +85,23 @@ private struct NullContainerMock: ClientContainerProtocol {
         deletedContainers: [String], spaceReclaimed: Int64
     ) { ([], 0) }
 }
+
+/// Exit records and `--rm` tombstones are keyed by the instance-unique 64-hex
+/// id. The attach routes derive it from the RESOLVED snapshot, so an attach by
+/// name (or by a truncated id) can never key a record with a reusable name.
+@Suite("ContainerAttachRoute — exit-record key")
+struct ContainerAttachRouteExitRecordKeyTests {
+
+    @Test("attaching by NAME keys the exit record by the canonical hex id")
+    func exitRecordIdIsCanonicalHex() throws {
+        let nativeId = "attach-by-name-ctr"
+        let snapshot = try makeContainerSnapshot(
+            nativeId: nativeId, networks: [], labels: [:], status: .stopped)
+        let id = ContainerAttachRoute.exitRecordId(for: snapshot)
+
+        #expect(id.count == 64)
+        #expect(id.allSatisfy { $0.isHexDigit })
+        #expect(id != nativeId, "the reusable name must never become an exit-record key")
+        #expect(id == DockerContainerID.hexId(for: snapshot))
+    }
+}
