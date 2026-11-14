@@ -140,7 +140,6 @@ extension ContainerAttachRoute {
                 return try await attachStoppedOutputOnly(
                     req: req,
                     client: client,
-                    hexId: id,
                     container: container,
                     query: query,
                     isTTY: isTTY,
@@ -154,7 +153,6 @@ extension ContainerAttachRoute {
             return try await handleAttachWithStdin(
                 req: req,
                 client: client,
-                hexId: id,
                 container: container,
                 query: query,
                 isUpgrade: isUpgrade,
@@ -284,13 +282,18 @@ extension ContainerAttachRoute {
     private static func attachStoppedOutputOnly(
         req: Request,
         client: ClientContainerProtocol,
-        hexId: String,
         container: ContainerSnapshot,
         query: ContainerAttachQuery,
         isTTY: Bool,
         isUpgrade: Bool,
         hasConnectionUpgrade: Bool
     ) async throws -> Response {
+        // The canonical 64-hex id — never the request path's value, which may be
+        // a reusable name or a truncated id: the exit monitor records exit codes
+        // and the `--rm` tombstone under this id, and a record keyed by a name
+        // or truncated id would both dodge the boot-time alias clear and survive
+        // into a later container reusing that name.
+        let hexId = DockerContainerID.hexId(for: container)
         let attachStdout = query.stdout ?? true
         let stderrOnly = (query.stderr ?? false) && !(query.stdout ?? false)
 
@@ -523,7 +526,6 @@ extension ContainerAttachRoute {
     private static func handleAttachWithStdin(
         req: Request,
         client: ClientContainerProtocol,
-        hexId: String,
         container: ContainerSnapshot,
         query: ContainerAttachQuery,
         isUpgrade: Bool,
@@ -550,7 +552,6 @@ extension ContainerAttachRoute {
         return try await createContainerForAttachment(
             req: req,
             client: client,
-            hexId: hexId,
             container: currentContainer,
             query: query,
             shouldUpgrade: shouldUpgrade,
@@ -562,12 +563,14 @@ extension ContainerAttachRoute {
     private static func createContainerForAttachment(
         req: Request,
         client: ClientContainerProtocol,
-        hexId: String,
         container: ContainerSnapshot,
         query: ContainerAttachQuery,
         shouldUpgrade: Bool,
         isTTY: Bool
     ) async throws -> Response {
+        // Canonical 64-hex id (the request path may carry a name or truncated
+        // id — see attachStoppedOutputOnly).
+        let hexId = DockerContainerID.hexId(for: container)
 
         let attachStdout = query.stdout ?? true
         let attachStderr = query.stderr ?? !isTTY
