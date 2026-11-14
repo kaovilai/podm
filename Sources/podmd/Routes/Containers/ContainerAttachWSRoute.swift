@@ -149,14 +149,21 @@ extension ContainerAttachWSRoute {
         }
 
         // Allocate the boot generation only for the request that actually
-        // started the container (see ContainerAttachRoute): a losing attach
-        // must not invalidate the winner's token.
+        // started the container: two attaches racing on a stopped container
+        // both reach this point, and bumping for the loser would invalidate the
+        // winner's token so its real exit code would be rejected.
+        //
+        // The loser passes NO token. Reading the current generation instead
+        // would race the winner's publication (it could capture the PREVIOUS
+        // boot's token and have its real code rejected); an untokened write is
+        // subject only to set()'s precedence, and both observers of the same
+        // init process resolve the same exit code.
         let bootGeneration: UInt64? =
             if startedByThisCall {
                 await ContainerExitCodeStore.shared.beginBoot(
                     nativeId: container.id, hexId: hexId)
             } else {
-                await ContainerExitCodeStore.shared.currentGeneration(id: container.id)
+                nil
             }
 
         await ProcessRegistry.shared.set(id: container.id, process: process)

@@ -117,9 +117,15 @@ actor ContainerExitCodeStore {
     /// few milliseconds later. Returning the sentinel at once made
     /// `docker run … sh -c 'exit 3'` report 255 for most runs, so a sentinel is
     /// answered only after `sentinelGrace` passes with no real code.
-    func resolvedCode(id: String, sentinelGrace: Duration = .seconds(1)) async -> Int32? {
+    func resolvedCode(
+        id: String,
+        sentinelGrace: Duration = .seconds(1),
+        onSentinelGrace: (@Sendable () -> Void)? = nil
+    ) async -> Int32? {
         guard let first = codes[id] else { return nil }
         guard first == Self.waitFailureSentinel else { return first }
+        let generationAtEntry = generations[id]
+        onSentinelGrace?()
         let deadline = ContinuousClock.Instant.now + sentinelGrace
         while ContinuousClock.Instant.now < deadline {
             do {
@@ -131,6 +137,11 @@ actor ContainerExitCodeStore {
                 return codes[id]
             }
             if let current = codes[id], current != Self.waitFailureSentinel { return current }
+            // A NEW boot reset every alias while we were waiting: this wait
+            // belongs to a run that is gone. Answer with what was observed
+            // (the sentinel), never nil — `ClientContainerService.wait` turns
+            // nil into a fabricated exit 0, or the replacement boot's code.
+            if generations[id] != generationAtEntry { return first }
         }
         return codes[id]
     }
@@ -536,15 +547,15 @@ struct ClientContainerService: ClientContainerProtocol {
 
         do {
             let process = try await containerClient.withClient { try await $0.bootstrap(id: container.id, stdio: stdio) }
-            // Clear any exit code recorded by a previous run of this container so
-            // /wait blocks for the new init process rather than immediately
-            // returning the stale code (e.g. after a restart).
-            // Clear the code from EVERY alias this container can be waited on
-            // by (see removeAll): a stale hex-id code from a previous run would
-            // otherwise be reported by /wait.
+            try await process.start()
+            // The start SUCCEEDED, so this call owns the boot: reset every alias
+            // a previous run could be waited on by and publish the generation
+            // now. Allocating before the start let a losing start (bootstrap or
+            // start throws "already booted") bump the generation of a
+            // concurrent attach's winning boot and invalidate its token — the
+            // winner's real exit code was then rejected.
             let bootGeneration = await ContainerExitCodeStore.shared.beginBoot(
                 nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
-            try await process.start()
             // Wait for the init process in the background so we can capture its
             // real exit code without blocking the /start response.
             let containerId = container.id

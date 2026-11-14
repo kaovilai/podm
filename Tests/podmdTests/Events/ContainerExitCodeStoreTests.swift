@@ -155,13 +155,45 @@ struct ExitCodeStoreResolvedCodeTests {
         let store = ContainerExitCodeStore()
         await store.set(id: id, code: ContainerExitCodeStore.waitFailureSentinel)
 
+        // The write is released by the resolver itself once it has chosen the
+        // sentinel-grace path — a fixed sleep would flake under scheduler
+        // delay and could pass without exercising that path at all.
+        let enteredGrace = AsyncStream<Void>.makeStream()
         let upgrade = Task {
-            try? await Task.sleep(nanoseconds: 120_000_000)
+            var iterator = enteredGrace.stream.makeAsyncIterator()
+            _ = await iterator.next()
             await store.set(id: id, code: 11)  // replaces the sentinel
         }
-        let code = await store.resolvedCode(id: id, sentinelGrace: .seconds(30))
+        let code = await store.resolvedCode(id: id, sentinelGrace: .seconds(30)) {
+            enteredGrace.continuation.yield()
+        }
         _ = await upgrade.value
         #expect(code == 11)
+    }
+
+    @Test("a new boot during the grace period answers the original observation, never nil")
+    func newBootDuringGraceKeepsObservation() async {
+        let store = ContainerExitCodeStore()
+        let nativeId = "grace-reboot-\(UUID().uuidString)"
+        let hexId = "grace-reboot-hex-\(UUID().uuidString)"
+        defer { Task { await store.removeAll(nativeId: nativeId, hexId: hexId) } }
+        await store.beginBoot(nativeId: nativeId, hexId: hexId)
+        await store.set(id: nativeId, code: ContainerExitCodeStore.waitFailureSentinel)
+
+        let enteredGrace = AsyncStream<Void>.makeStream()
+        let reboot = Task {
+            var iterator = enteredGrace.stream.makeAsyncIterator()
+            _ = await iterator.next()
+            // A restart resets every alias while the old wait is in its grace.
+            _ = await store.beginBoot(nativeId: nativeId, hexId: hexId)
+        }
+        let code = await store.resolvedCode(id: nativeId, sentinelGrace: .seconds(30)) {
+            enteredGrace.continuation.yield()
+        }
+        _ = await reboot.value
+        #expect(
+            code == ContainerExitCodeStore.waitFailureSentinel,
+            "a cleared record must not become a fabricated exit 0 or the next boot's code")
     }
 
     @Test("a lone sentinel is returned only after the grace period")
@@ -250,31 +282,41 @@ struct ExitCodeStoreBootGenerationTests {
     }
 }
 
-/// Two attaches can race on the same stopped container. Only the request whose
-/// start actually won allocates a generation; the loser observes the winner's
-/// token (allocating one would invalidate the winner's, and its real exit code
-/// would then be rejected).
-@Suite("ContainerExitCodeStore — losing boot observes the winner")
+/// Two attaches can race on the same stopped container. Only the winner
+/// allocates a generation; the loser passes NO token (reading the current
+/// generation would race the winner's publication and could capture the
+/// previous boot's token, having its real code rejected). An untokened write
+/// is subject only to set()'s precedence, and both observers of one init
+/// process resolve the same exit code.
+@Suite("ContainerExitCodeStore — a losing boot records without a token")
 struct ExitCodeStoreLosingBootTests {
 
-    @Test("a loser reads the winner's generation and its writes are accepted")
-    func loserObservesWinnerToken() async {
+    @Test("a loser's untokened write is accepted after the winner booted")
+    func loserWritesWithoutToken() async {
         let nativeId = "lose-native-\(UUID().uuidString)"
         let hexId = "lose-hex-\(UUID().uuidString)"
         defer { Task { await ContainerExitCodeStore.shared.removeAll(nativeId: nativeId, hexId: hexId) } }
 
-        let winner = await ContainerExitCodeStore.shared.beginBoot(nativeId: nativeId, hexId: hexId)
-        let observed = await ContainerExitCodeStore.shared.currentGeneration(id: nativeId)
-        #expect(observed == winner, "the loser must not allocate a new generation")
+        _ = await ContainerExitCodeStore.shared.beginBoot(nativeId: nativeId, hexId: hexId)
 
-        await ContainerExitCodeStore.shared.set(id: nativeId, code: 5, generation: observed)
+        // The losing attach's monitor records the same init process's code.
+        await ContainerExitCodeStore.shared.set(id: nativeId, code: 5)
         #expect(await ContainerExitCodeStore.shared.get(id: nativeId) == 5)
+    }
+
+    @Test("a stale token from the previous boot is still rejected")
+    func staleTokenStillRejected() async {
+        let nativeId = "lose-stale-\(UUID().uuidString)"
+        let hexId = "lose-stale-hex-\(UUID().uuidString)"
+        defer { Task { await ContainerExitCodeStore.shared.removeAll(nativeId: nativeId, hexId: hexId) } }
+
+        let first = await ContainerExitCodeStore.shared.beginBoot(nativeId: nativeId, hexId: hexId)
+        _ = await ContainerExitCodeStore.shared.beginBoot(nativeId: nativeId, hexId: hexId)
+        await ContainerExitCodeStore.shared.set(id: nativeId, code: 7, generation: first)
+        #expect(await ContainerExitCodeStore.shared.get(id: nativeId) == nil)
     }
 }
 
-/// A fresh boot must clear the code from EVERY alias the monitor writes:
-/// the native id AND the canonical Docker hex id. Clearing only the native id
-/// left the previous run's code answering `/wait <hex id>`.
 @Suite("ContainerExitCodeStore — alias clearing")
 struct ExitCodeStoreAliasClearTests {
 
