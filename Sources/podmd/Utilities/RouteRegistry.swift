@@ -216,7 +216,7 @@ enum RouteRegistry {
         // --- Podman libpod routes ---
         try app.register(collection: LibpodPingRoute(client: healthCheckClient))
         try app.register(collection: LibpodVersionRoute())
-        try app.register(collection: LibpodInfoRoute(containerClient: containerClient, imageClient: imageClient))
+        try app.register(collection: LibpodInfoRoute(containerClient: containerClient, imageClient: imageClient, volumeClient: volumeClient))
         try app.register(collection: LibpodContainerListRoute(client: containerClient))
         try app.register(collection: LibpodContainerCreateRoute(client: containerClient, systemConfig: systemConfig))
         try app.register(collection: LibpodContainerStartRoute(client: containerClient))
