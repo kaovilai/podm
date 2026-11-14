@@ -47,8 +47,7 @@ extension ContainerAttachWSRoute {
                 }
                 Task {
                     if container.status == .stopped {
-                        await handleStopped(
-                            ws: ws, req: req, client: client, hexId: id, container: container, query: query)
+                        await handleStopped(ws: ws, req: req, client: client, container: container, query: query)
                     } else {
                         await handleRunning(ws: ws, req: req, container: container, query: query)
                     }
@@ -63,10 +62,13 @@ extension ContainerAttachWSRoute {
         ws: WebSocket,
         req: Request,
         client: ClientContainerProtocol,
-        hexId: String,
         container: ContainerSnapshot,
         query: ContainerAttachWSQuery
     ) async {
+        // Canonical 64-hex id — the request path may carry a reusable name or
+        // short id, and a name-keyed exit record/tombstone would survive a
+        // later container reusing the name (see ContainerAttachRoute).
+        let hexId = DockerContainerID.hexId(for: container)
         let stdin = query.stdin ?? false
         let stdout = query.stdout ?? true
         let stderr = query.stderr ?? true

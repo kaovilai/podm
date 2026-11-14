@@ -93,6 +93,18 @@ extension ContainerStartRoute {
                 }
 
             } catch {
+                // The container can be reaped between the pre-start snapshot and
+                // start(): the `docker run --rm` attach path boots and the guest
+                // can exit and be reaped while this /start is still in flight. A
+                // tombstone means the run this /start belongs to already
+                // completed — the same no-op success as the missing-snapshot
+                // path above, not a 500 the CLI reports as exit 125.
+                if let containerError = error as? ClientContainerError, case .notFound = containerError {
+                    if await autoRemoved.waitForExitCode(for: id) != nil {
+                        return .noContent
+                    }
+                    throw Abort(.notFound, reason: "No such container: \(id)")
+                }
                 // Check if error indicates container is already running/bootstrapped
                 let errorMessage = error.localizedDescription
                 let isAlreadyRunning =
