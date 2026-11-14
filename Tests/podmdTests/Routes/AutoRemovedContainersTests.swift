@@ -80,13 +80,14 @@ struct AutoRemovedContainersTests {
     @Test("waitForExitCode covers a tombstone written just after the call")
     func waitCoversLateWrite() async {
         let tombs = AutoRemovedContainers(ttl: .seconds(5), defaultWait: .seconds(2))
-        // The exit observer records the code ~200ms after the process exits;
-        // the CLI's /wait can land in that window.
-        Task {
-            try? await Task.sleep(for: .milliseconds(120))
-            await tombs.record(hexId: "late", code: 7)
-        }
-        let code = await tombs.waitForExitCode(for: "late")
+        // The exit observer records the code a moment after the process
+        // exits; the CLI's /wait can land in that window. Order-independent by
+        // construction: the waiter is already polling when the record lands,
+        // and it would equally pass had the record landed first — no dependence
+        // on a background task being scheduled within the wait's deadline.
+        let waiter = Task { await tombs.waitForExitCode(for: "late") }
+        await tombs.record(hexId: "late", code: 7)
+        let code = await waiter.value
         #expect(code == 7)
     }
 
