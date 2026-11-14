@@ -762,6 +762,21 @@ extension BuildRoute {
 
         // Send success message in Docker API format (progress — suppressed
         // in quiet mode), one line per requested tag like the real daemons.
+        // Remember which variant each produced tag now holds. A single-platform
+        // build pins that platform; a multi-platform build leaves the tag
+        // unrecorded (container create then resolves the host platform, which is
+        // the sane default for an index) — also clearing any variant left over
+        // from an earlier pull of the same name.
+        for producedTag in (allTags.isEmpty ? [imageName] : allTags) {
+            guard let normalized = try? ClientImage.normalizeReference(producedTag, containerSystemConfig: systemConfig)
+            else { continue }
+            if platforms.count == 1, let built = platforms.first {
+                await ImagePlatformStore.shared.record(reference: normalized, platform: built)
+            } else {
+                await ImagePlatformStore.shared.remove(reference: normalized)
+            }
+        }
+
         sendStreamMessage("Successfully built \(imageName)")
         for tag in allTags {
             sendStreamMessage("Successfully tagged \(tag)")

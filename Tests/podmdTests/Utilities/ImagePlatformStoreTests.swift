@@ -25,50 +25,69 @@ struct ImagePlatformStoreTests {
         return dir
     }
 
-    @Test("records and returns the platform for a digest")
+    @Test("records and returns the platform for a normalized reference")
     func recordAndLookup() async throws {
         let store = await makeStore(directory: try tempDir())
-        let amd64 = try Platform(from: "linux/amd64")
-        await store.record(digest: "sha256:abc123", platform: amd64)
+        await store.record(reference: "docker.io/library/alpine:latest", platform: try Platform(from: "linux/amd64"))
 
-        let found = await store.platform(forDigest: "sha256:abc123")
+        let found = await store.platform(forReference: "docker.io/library/alpine:latest")
         #expect(found?.os == "linux")
         #expect(found?.architecture == "amd64")
-        #expect(await store.platform(forDigest: "sha256:def456") == nil)
+        #expect(await store.platform(forReference: "docker.io/library/other:latest") == nil)
     }
 
-    @Test("a digest with or without its algorithm prefix is the same key")
-    func digestNormalization() async throws {
-        let store = await makeStore(directory: try tempDir())
-        await store.record(digest: "sha256:abc123", platform: try Platform(from: "linux/s390x"))
-        #expect(await store.platform(forDigest: "abc123")?.architecture == "s390x")
-    }
-
-    @Test("a variant is preserved (linux/arm/v7)")
+    @Test("a variant survives the round trip, including three-component platforms")
     func variantPreserved() async throws {
         let store = await makeStore(directory: try tempDir())
-        await store.record(digest: "sha256:v7", platform: try Platform(from: "linux/arm/v7"))
-        let found = await store.platform(forDigest: "v7")
-        #expect(found?.architecture == "arm")
-        #expect(found?.variant == "v7")
+        // `Platform(from: "linux/amd64/v3")` rejects this textual form — the
+        // store must persist components, not a string it cannot parse back.
+        let v3 = Platform(arch: "amd64", os: "linux", variant: "v3")
+        await store.record(reference: "docker.io/library/tool:v3", platform: v3)
+        let found = await store.platform(forReference: "docker.io/library/tool:v3")
+        #expect(found?.architecture == "amd64")
+        #expect(found?.variant == "v3")
     }
 
-    @Test("the last pull of a digest wins")
+    @Test("the last pull of a reference wins")
     func lastPullWins() async throws {
         let store = await makeStore(directory: try tempDir())
-        await store.record(digest: "sha256:shared", platform: try Platform(from: "linux/amd64"))
-        await store.record(digest: "sha256:shared", platform: try Platform(from: "linux/arm64"))
-        #expect(await store.platform(forDigest: "shared")?.architecture == "arm64")
+        await store.record(reference: "docker.io/library/alpine:latest", platform: try Platform(from: "linux/amd64"))
+        await store.record(reference: "docker.io/library/alpine:latest", platform: try Platform(from: "linux/arm64"))
+        #expect(await store.platform(forReference: "docker.io/library/alpine:latest")?.architecture == "arm64")
+    }
+
+    @Test("tagging copies the variant to the new reference and leaves the source alone")
+    func tagCopiesVariant() async throws {
+        let store = await makeStore(directory: try tempDir())
+        await store.record(reference: "docker.io/library/alpine:latest", platform: try Platform(from: "linux/amd64"))
+        await store.copy(from: "docker.io/library/alpine:latest", to: "docker.io/library/local-amd64:latest")
+
+        #expect(await store.platform(forReference: "docker.io/library/local-amd64:latest")?.architecture == "amd64")
+        #expect(await store.platform(forReference: "docker.io/library/alpine:latest")?.architecture == "amd64")
+
+        // Re-pulling the SOURCE for another platform must not move the tag:
+        // the tag is its own identity, not the index digest it shares.
+        await store.record(reference: "docker.io/library/alpine:latest", platform: try Platform(from: "linux/arm64"))
+        #expect(await store.platform(forReference: "docker.io/library/local-amd64:latest")?.architecture == "amd64")
+        #expect(await store.platform(forReference: "docker.io/library/alpine:latest")?.architecture == "arm64")
+    }
+
+    @Test("removing a reference forgets it")
+    func removeForgets() async throws {
+        let store = await makeStore(directory: try tempDir())
+        await store.record(reference: "docker.io/library/alpine:latest", platform: try Platform(from: "linux/amd64"))
+        await store.remove(reference: "docker.io/library/alpine:latest")
+        #expect(await store.platform(forReference: "docker.io/library/alpine:latest") == nil)
     }
 
     @Test("records survive a daemon restart (persisted to disk)")
     func persistence() async throws {
         let directory = try tempDir()
         let first = await makeStore(directory: directory)
-        await first.record(digest: "sha256:persisted", platform: try Platform(from: "linux/amd64"))
+        await first.record(reference: "docker.io/library/persisted:latest", platform: try Platform(from: "linux/amd64"))
 
         let reloaded = await makeStore(directory: directory)
-        #expect(await reloaded.platform(forDigest: "persisted")?.architecture == "amd64")
+        #expect(await reloaded.platform(forReference: "docker.io/library/persisted:latest")?.architecture == "amd64")
     }
 }
 

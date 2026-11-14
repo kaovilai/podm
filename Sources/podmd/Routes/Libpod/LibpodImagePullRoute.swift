@@ -87,13 +87,16 @@ struct LibpodImagePullRoute: RouteCollection {
         let variant: String? = req.query["variant"]
         let requestedOS = os.flatMap { $0.isEmpty ? nil : $0 }
         let requestedArch = arch.flatMap { $0.isEmpty ? nil : $0 }
-        // Nothing platform-shaped asked for — the host's platform.
-        guard requestedOS != nil || requestedArch != nil else { return currentPlatform() }
+        let requestedVariant = variant.flatMap { $0.isEmpty ? nil : $0 }
+        // Nothing platform-shaped asked for — the host's platform. A variant
+        // alone IS an ask (it is validated against the host's os/arch rather
+        // than silently discarded).
+        guard requestedOS != nil || requestedArch != nil || requestedVariant != nil else { return currentPlatform() }
 
         let host = currentPlatform()
         let resolvedOS = requestedOS ?? host.os
         let resolvedArch = requestedArch ?? host.architecture
-        let resolvedVariant = variant.flatMap { $0.isEmpty ? nil : $0 }
+        let resolvedVariant = requestedVariant
         let spec = resolvedVariant.map { "\(resolvedOS)/\(resolvedArch)/\($0)" } ?? "\(resolvedOS)/\(resolvedArch)"
         do {
             return try Platform(from: spec)

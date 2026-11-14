@@ -166,10 +166,18 @@ extension ContainerCreateRoute {
             // Check if image exists locally
             do {
                 let localImage = try await ClientImage.get(reference: body.Image, containerSystemConfig: systemConfig)
+                // The store is keyed by NORMALIZED reference — the same identity
+                // the image resolution above used, whatever spelling the client
+                // sent.
+                let normalized = try? ClientImage.normalizeReference(body.Image, containerSystemConfig: systemConfig)
+                var pulledForImage: Platform?
+                if let normalized {
+                    pulledForImage = await ImagePlatformStore.shared.platform(forReference: normalized)
+                }
                 requestedPlatform = ContainerCreateRoute.effectivePlatform(
                     explicitQueryValue: query.platform,
                     hostDefault: requestedPlatform,
-                    pulledForImage: await ImagePlatformStore.shared.platform(forDigest: localImage.digest))
+                    pulledForImage: pulledForImage)
             } catch {
                 throw ContainerCreateRoute.imageExistenceError(error, image: body.Image)
             }

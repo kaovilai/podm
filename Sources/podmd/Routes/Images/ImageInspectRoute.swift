@@ -254,7 +254,7 @@ extension ImageInspectRoute {
             // host-platform sibling from the same OCI index.
             let pulledPlatform: Platform? =
                 if requestedPlatform == nil {
-                    await ImagePlatformStore.shared.platform(forDigest: image.digest)
+                    await ImagePlatformStore.shared.platform(forReference: image.reference)
                 } else {
                     nil
                 }

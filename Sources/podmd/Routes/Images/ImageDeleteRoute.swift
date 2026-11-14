@@ -33,6 +33,11 @@ extension ImageDeleteRoute {
                 }
             }
 
+            // The reference is gone — forget which variant it held, so an image
+            // that later reuses the name cannot inherit it. `untagged` is the
+            // store's normalized reference.
+            await ImagePlatformStore.shared.remove(reference: result.untagged)
+
             // Docker fires "untag" when a tag is removed, "delete" when the last
             // reference to a digest is removed and the image layers are freed.
             // Both carry the image digest as Actor.ID with the reference in `name`
