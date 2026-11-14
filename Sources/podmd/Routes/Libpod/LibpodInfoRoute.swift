@@ -117,7 +117,10 @@ struct LibpodInfoRoute: RouteCollection {
         let containerStore: ContainerStore
         let imageStore: ImageStore
         let volumeStore: VolumeStore
-        let graphDriver: GraphDriver
+        /// podman v6 `define.StoreInfo.GraphDriverName` is a STRING
+        /// (`json:"graphDriverName"`); a `graphDriver` object is silently
+        /// ignored by the client's decoder, leaving the reported driver empty.
+        let graphDriverName: String
     }
 
     struct ContainerStore: Content {
@@ -133,10 +136,6 @@ struct LibpodInfoRoute: RouteCollection {
 
     struct VolumeStore: Content {
         let number: Int
-    }
-
-    struct GraphDriver: Content {
-        let name: String
     }
 
     struct Plugins: Content {
@@ -198,7 +197,10 @@ struct LibpodInfoRoute: RouteCollection {
                     cpus: hostCPUCoreCount(),
                     databaseBackend: "apple-container",
                     distribution: DistributionInfo(distribution: "", version: ""),
-                    eventLogger: "journald",
+                    // podm has no persistent event backend to name: events come
+                    // from an in-memory ring that dies with the daemon, so
+                    // claiming "journald" (or any real logger) would be a lie.
+                    eventLogger: "",
                     hostname: hostName(),
                     idMappings: IDMappings(gidmap: [], uidmap: []),
                     kernel: (try? await getLinuxDefaultKernelName()) ?? "",
@@ -242,7 +244,7 @@ struct LibpodInfoRoute: RouteCollection {
                     ),
                     imageStore: ImageStore(number: images.count),
                     volumeStore: VolumeStore(number: volumes.count),
-                    graphDriver: GraphDriver(name: "apple-container")
+                    graphDriverName: "apple-container"
                 ),
                 registries: [:],
                 plugins: Plugins(volume: [], network: [], log: [], authorization: []),

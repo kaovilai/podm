@@ -50,10 +50,19 @@ struct LibpodInfoRouteTests {
                 let containerStore = try #require(store["containerStore"] as? [String: Any])
                 #expect(containerStore["number"] as? Int == 1)
                 #expect((store["imageStore"] as? [String: Any])?["number"] as? Int == 0)
+                // podman v6 define.StoreInfo.GraphDriverName is a STRING; a
+                // graphDriver OBJECT is silently ignored by its decoder.
+                #expect(store["graphDriverName"] as? String == "apple-container")
+                #expect(store["graphDriver"] == nil, "podman ignores a graphDriver object — serve graphDriverName")
 
                 let version = try #require(root["version"] as? [String: Any])
                 #expect(version["APIVersion"] as? String == "5.0.0")
                 #expect((version["OsArch"] as? String)?.hasPrefix("linux/") == true)
+                // define.Version.Built is an int64 unix timestamp; a string
+                // fails podman's unmarshal outright.
+                let built = try #require(version["Built"] as? NSNumber, "Built must be a JSON integer")
+                #expect(built.doubleValue == built.doubleValue.rounded(), "Built must be integral, not a timestamp string")
+                #expect(version["BuiltTime"] is String)
 
                 // registries/plugins exist as render-safe shapes.
                 #expect(root["registries"] as? [String: Any] != nil)
