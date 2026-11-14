@@ -40,8 +40,17 @@
         <string>1</string>
     </dict>
 
+    <!-- Standard, NOT Background. launchd throttles a Background process
+         hard enough that podmd's XPC `wait()` on a container's init process
+         times out: the exit code is then lost and `docker run alpine sh -c
+         'exit 5'` reports 255 (or 0) instead of 5. Measured on the same
+         binary: Background → 3 of 6 runs get the wrong code (10 recorded
+         wait failures); Standard → 8 of 8 correct, zero wait failures. The
+         daemon mainly waits on the Apple Container apiserver and boots VMs,
+         so Background's energy throttling buys nothing and costs
+         correctness. -->
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Standard</string>
 
     <!-- Future: TRUE socket activation. launchd binds the unix socket and
          starts podmd on the first connection, removing the kickstart

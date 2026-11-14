@@ -93,7 +93,10 @@ extension ContainerAttachWSRoute {
             try? pipes.stdin?.write.close()
         }
 
-        await ContainerExitCodeStore.shared.remove(id: container.id)
+        // Clear every alias (native AND the Docker hex id): a stale hex-id
+        // code from a previous run would otherwise be reported by /wait.
+        await ContainerExitCodeStore.shared.removeAll(
+            nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
 
         let process: ClientProcess
         do {

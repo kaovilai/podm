@@ -312,7 +312,10 @@ extension ContainerAttachRoute {
         // our write end immediately so the container's stdin sees EOF.
         try? pipes.stdin?.write.close()
 
-        await ContainerExitCodeStore.shared.remove(id: container.id)
+        // Clear every alias (native AND the Docker hex id): a stale hex-id
+        // code from a previous run would otherwise be reported by /wait.
+        await ContainerExitCodeStore.shared.removeAll(
+            nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
 
         let process: ClientProcess
         do {
@@ -584,7 +587,10 @@ extension ContainerAttachRoute {
         // as soon as ContainerExitCodeStore is non-nil, so clear any stale code
         // before starting and record a synthetic one if bootstrap/start fails (so
         // /wait can't return a stale status or poll forever).
-        await ContainerExitCodeStore.shared.remove(id: container.id)
+        // Clear every alias (native AND the Docker hex id): a stale hex-id
+        // code from a previous run would otherwise be reported by /wait.
+        await ContainerExitCodeStore.shared.removeAll(
+            nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
 
         let process: ClientProcess
         do {
