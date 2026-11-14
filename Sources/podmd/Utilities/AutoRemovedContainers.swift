@@ -47,21 +47,31 @@ actor AutoRemovedContainers {
         entries = entries.filter { now - $0.value.recordedAt < ttl }
     }
 
-    /// Records the exit of a `--rm` container under both ids it can be called
-    /// by (the Docker 64-hex id the CLI was handed at create, and Apple's
-    /// native id).
-    func record(hexId: String, nativeId: String, code: Int32) {
-        let now = ContinuousClock.Instant.now
+    /// Records the exit of a `--rm` container under the Docker 64-hex id the
+    /// CLI was handed at create.
+    ///
+    /// Deliberately NOT keyed by Apple's native id: native ids are reusable
+    /// NAMES (a create without `--name` passes the container name through), so
+    /// a tombstone under a name would answer for a later container reusing it.
+    /// The hex id embeds the creation date and is instance-unique.
+    func record(hexId: String, code: Int32) {
+        let now: ContinuousClock.Instant = .now
         prune(now: now)
-        let entry = Entry(code: code, recordedAt: now)
-        entries[hexId] = entry
-        entries[nativeId] = entry
+        entries[hexId] = Entry(code: code, recordedAt: now)
     }
 
     /// The recorded exit code, while the tombstone is still fresh.
+    ///
+    /// Accepts a hex-id prefix, matching how `/containers/{id}` resolution
+    /// treats ids elsewhere (a client may hand back a short id from `docker ps`).
+    /// An ambiguous prefix resolves to nothing, like the container routes.
     func exitCode(for id: String) -> Int32? {
         prune()
-        return entries[id]?.code
+        if let exact = entries[id] { return exact.code }
+        guard Self.isHexIdPrefix(id) else { return nil }
+        let matches = entries.filter { $0.key.hasPrefix(id) && Self.isHexId($0.key) }
+        guard matches.count == 1 else { return nil }
+        return matches.first?.value.code
     }
 
     /// The recorded exit code, waiting briefly for it to appear.
@@ -71,6 +81,10 @@ actor AutoRemovedContainers {
     /// been written yet — the observer records the code, then waits out the
     /// output-flush grace before the `--rm` cleanup funnel runs. Poll that
     /// short window instead of 404ing a run that is about to be accounted for.
+    ///
+    /// Stops as soon as the caller is cancelled (the client disconnected, the
+    /// server is shutting down): a cancelled `Task.sleep` returns immediately,
+    /// and continuing the loop would busy-spin until the deadline.
     func waitForExitCode(
         for id: String,
         timeout: Duration? = nil,
@@ -78,12 +92,23 @@ actor AutoRemovedContainers {
     ) async -> Int32? {
         let deadline = ContinuousClock.Instant.now + (timeout ?? defaultWait)
         while true {
-            if let code = exitCode(for: id) {
-                return code
+            if let code = exitCode(for: id) { return code }
+            guard !Task.isCancelled, ContinuousClock.Instant.now < deadline else { return nil }
+            do {
+                try await Task.sleep(for: pollInterval)
+            } catch {
+                // Cancelled — the caller will never answer; stop polling.
+                return nil
             }
-            guard ContinuousClock.Instant.now < deadline else { return nil }
-            try? await Task.sleep(for: pollInterval)
         }
+    }
+
+    private static func isHexId(_ value: String) -> Bool {
+        value.count == 64 && value.allSatisfy { $0.isHexDigit }
+    }
+
+    private static func isHexIdPrefix(_ value: String) -> Bool {
+        value.count >= 6 && value.allSatisfy { $0.isHexDigit }
     }
 
     /// Test/reset seam.

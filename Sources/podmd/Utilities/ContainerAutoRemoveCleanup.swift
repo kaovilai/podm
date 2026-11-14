@@ -30,9 +30,10 @@ enum ContainerAutoRemoveCleanup {
         // An unobserved exit (its wait never resolved) still leaves the
         // container gone; the sentinel keeps a late /wait from claiming the run
         // vanished, while the CLI reports the same failure code podm records.
+        // Keyed by the instance-unique hex id only — native ids are reusable
+        // names and a tombstone under one would answer for a later container.
         await AutoRemovedContainers.shared.record(
             hexId: hexId,
-            nativeId: nativeId,
             code: recordedCode ?? ContainerExitCodeStore.waitFailureSentinel
         )
 

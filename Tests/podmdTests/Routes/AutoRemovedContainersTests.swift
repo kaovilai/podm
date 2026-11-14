@@ -17,19 +17,59 @@ import VaporTesting
 @Suite("AutoRemovedContainers — late /start and /wait after a --rm reap")
 struct AutoRemovedContainersTests {
 
-    @Test("records the exit code under both the hex id and Apple's native id")
-    func recordsBothIds() async {
+    private static let hex = "a8aba6c3586df88fc1d344b741ddb464b13634efdb3c2114474066d469638160"
+
+    @Test("records the exit code under the instance-unique hex id")
+    func recordsHexId() async {
         let tombs = AutoRemovedContainers()
-        await tombs.record(hexId: "abc123", nativeId: "web-1", code: 42)
-        #expect(await tombs.exitCode(for: "abc123") == 42)
-        #expect(await tombs.exitCode(for: "web-1") == 42)
+        await tombs.record(hexId: Self.hex, code: 42)
+        #expect(await tombs.exitCode(for: Self.hex) == 42)
         #expect(await tombs.exitCode(for: "unknown") == nil)
+    }
+
+    @Test("a native NAME never resolves a tombstone — names are reused by later containers")
+    func nameDoesNotMatch() async {
+        let tombs = AutoRemovedContainers()
+        await tombs.record(hexId: Self.hex, code: 42)
+        // Apple's native ids double as container names; a tombstone keyed by
+        // one would answer for a newly created container reusing the name.
+        #expect(await tombs.exitCode(for: "web-1") == nil)
+    }
+
+    @Test("a hex-id prefix resolves, like container id resolution everywhere else")
+    func prefixResolves() async {
+        let tombs = AutoRemovedContainers()
+        await tombs.record(hexId: Self.hex, code: 9)
+        #expect(await tombs.exitCode(for: String(Self.hex.prefix(12))) == 9)
+        // Too short to be an id prefix.
+        #expect(await tombs.exitCode(for: String(Self.hex.prefix(3))) == nil)
+    }
+
+    @Test("an ambiguous prefix resolves nothing")
+    func ambiguousPrefix() async {
+        let tombs = AutoRemovedContainers()
+        await tombs.record(hexId: Self.hex, code: 9)
+        // A second instance sharing the same 6-char prefix.
+        await tombs.record(hexId: "a8aba6" + String(repeating: "f", count: 58), code: 11)
+        #expect(await tombs.exitCode(for: String(Self.hex.prefix(6))) == nil)
+    }
+
+    @Test("a cancelled wait stops polling instead of spinning to the deadline")
+    func cancelledWaitStops() async {
+        let tombs = AutoRemovedContainers(ttl: .seconds(5), defaultWait: .seconds(30))
+        let started = ContinuousClock.Instant.now
+        let task = Task { await tombs.waitForExitCode(for: "never") }
+        try? await Task.sleep(for: .milliseconds(120))
+        task.cancel()
+        let code = await task.value
+        #expect(code == nil)
+        #expect(ContinuousClock.Instant.now - started < .seconds(5))
     }
 
     @Test("a tombstone stops answering once its TTL lapses")
     func ttlExpiry() async {
         let tombs = AutoRemovedContainers(ttl: .milliseconds(80))
-        await tombs.record(hexId: "gone", nativeId: "gone-native", code: 0)
+        await tombs.record(hexId: "gone", code: 0)
         #expect(await tombs.exitCode(for: "gone") == 0)
         try? await Task.sleep(for: .milliseconds(150))
         #expect(await tombs.exitCode(for: "gone") == nil)
@@ -42,7 +82,7 @@ struct AutoRemovedContainersTests {
         // the CLI's /wait can land in that window.
         Task {
             try? await Task.sleep(for: .milliseconds(120))
-            await tombs.record(hexId: "late", nativeId: "late-native", code: 7)
+            await tombs.record(hexId: "late", code: 7)
         }
         let code = await tombs.waitForExitCode(for: "late")
         #expect(code == 7)
@@ -58,7 +98,7 @@ struct AutoRemovedContainersTests {
     @Test("the /wait route answers the recorded exit code instead of 404")
     func waitRouteAnswersTombstone() async throws {
         let tombs = AutoRemovedContainers(ttl: .seconds(5), defaultWait: .milliseconds(200))
-        await tombs.record(hexId: "gone", nativeId: "gone-native", code: 42)
+        await tombs.record(hexId: "gone", code: 42)
 
         try await withApp(configure: { _ in }) { app in
             let regexRouter = app.regexRouter(with: app.logger)
@@ -81,7 +121,7 @@ struct AutoRemovedContainersTests {
     @Test("the /start route treats a tombstoned --rm run as already completed")
     func startRouteAnswersTombstone() async throws {
         let tombs = AutoRemovedContainers(ttl: .seconds(5), defaultWait: .milliseconds(200))
-        await tombs.record(hexId: "gone", nativeId: "gone-native", code: 0)
+        await tombs.record(hexId: "gone", code: 0)
 
         try await withApp(configure: { _ in }) { app in
             let regexRouter = app.regexRouter(with: app.logger)
@@ -102,7 +142,7 @@ struct AutoRemovedContainersTests {
     @Test("the libpod /wait route answers the recorded exit code as a bare integer")
     func libpodWaitRouteAnswersTombstone() async throws {
         let tombs = AutoRemovedContainers(ttl: .seconds(5), defaultWait: .milliseconds(200))
-        await tombs.record(hexId: "gone", nativeId: "gone-native", code: 3)
+        await tombs.record(hexId: "gone", code: 3)
 
         try await withApp(configure: { _ in }) { app in
             let regexRouter = app.regexRouter(with: app.logger)
