@@ -17,6 +17,26 @@ enum ContainerAutoRemoveCleanup {
         let cached = await ContainerInfoCache.shared.get(id: hexId)
         let labels = cached?.labels ?? fallbackLabels
 
+        // Answer the CLI's late /start and /wait first: Apple Container reaps a
+        // --rm container the moment it exits, so those calls can land after the
+        // container is gone (see AutoRemovedContainers). The exit code was
+        // recorded at exit, before this cleanup runs.
+        let recordedCode: Int32?
+        if let hexCode = await ContainerExitCodeStore.shared.get(id: hexId) {
+            recordedCode = hexCode
+        } else {
+            recordedCode = await ContainerExitCodeStore.shared.get(id: nativeId)
+        }
+        // An unobserved exit (its wait never resolved) still leaves the
+        // container gone; the sentinel keeps a late /wait from claiming the run
+        // vanished, while the CLI reports the same failure code podm records.
+        // Keyed by the instance-unique hex id only — native ids are reusable
+        // names and a tombstone under one would answer for a later container.
+        await AutoRemovedContainers.shared.record(
+            hexId: hexId,
+            code: recordedCode ?? ContainerExitCodeStore.waitFailureSentinel
+        )
+
         if let dnsServer {
             ContainerAliasCleanup.unregisterAllAliases(
                 nativeId: nativeId,

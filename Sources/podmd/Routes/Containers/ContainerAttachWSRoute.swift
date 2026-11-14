@@ -47,8 +47,7 @@ extension ContainerAttachWSRoute {
                 }
                 Task {
                     if container.status == .stopped {
-                        await handleStopped(
-                            ws: ws, req: req, client: client, hexId: id, container: container, query: query)
+                        await handleStopped(ws: ws, req: req, client: client, container: container, query: query)
                     } else {
                         await handleRunning(ws: ws, req: req, container: container, query: query)
                     }
@@ -63,10 +62,10 @@ extension ContainerAttachWSRoute {
         ws: WebSocket,
         req: Request,
         client: ClientContainerProtocol,
-        hexId: String,
         container: ContainerSnapshot,
         query: ContainerAttachWSQuery
     ) async {
+        let hexId = ContainerAttachRoute.exitRecordId(for: container)
         let stdin = query.stdin ?? false
         let stdout = query.stdout ?? true
         let stderr = query.stderr ?? true
@@ -93,7 +92,11 @@ extension ContainerAttachWSRoute {
             try? pipes.stdin?.write.close()
         }
 
-        await ContainerExitCodeStore.shared.remove(id: container.id)
+        // Clear every alias (native AND the Docker hex id) before booting: a
+        // stale hex-id code from a previous run would otherwise be reported by
+        // /wait. The boot generation is allocated only after the start below.
+        await ContainerExitCodeStore.shared.removeAll(
+            nativeId: container.id, hexId: DockerContainerID.hexId(for: container))
 
         let process: ClientProcess
         do {
@@ -145,6 +148,28 @@ extension ContainerAttachWSRoute {
             startedByThisCall = false
         }
 
+        // Allocate the boot generation only for the request that actually
+        // started the container: two attaches racing on a stopped container
+        // both reach this point, and bumping for the loser would invalidate the
+        // winner's token so its real exit code would be rejected.
+        //
+        // The loser passes NO token. Reading the current generation instead
+        // would race the winner's publication (it could capture the PREVIOUS
+        // boot's token and have its real code rejected); an untokened write is
+        // subject only to set()'s precedence, and both observers of the same
+        // init process resolve the same exit code.
+        // See ContainerAttachRoute: the boot's own startedDate identifies it for
+        // every observer, so a losing attach never has to read the winner's
+        // generation and a straggler from an older boot is rejected.
+        let attachBootStartedAt = (try? await client.getContainer(id: container.id))?.startedDate
+        let bootGeneration: UInt64? =
+            if startedByThisCall {
+                await ContainerExitCodeStore.shared.beginBoot(
+                    nativeId: container.id, hexId: hexId, bootDate: attachBootStartedAt)
+            } else {
+                nil
+            }
+
         await ProcessRegistry.shared.set(id: container.id, process: process)
 
         // The bootstrap above performed this container's boot — register a
@@ -152,7 +177,6 @@ extension ContainerAttachWSRoute {
         // attachStoppedOutputOnly for why the later no-op /start cannot be
         // the one to do it, and for why the arm carries the boot identity
         // fetched at arm time).
-        let attachBootStartedAt = (try? await client.getContainer(id: container.id))?.startedDate
         await ContainerLogFollowerRegistry.shared.arm(
             nativeId: container.id, client: client, logger: req.logger, freshBoot: startedByThisCall,
             bootStartedAt: attachBootStartedAt)
@@ -185,8 +209,8 @@ extension ContainerAttachWSRoute {
                     fallbackImage: container.configuration.image.reference,
                     fallbackLabels: LabelNormalization.restore(container.configuration.labels),
                     dnsServer: req.application.storage[PodmDNSServerKey.self],
-                    broadcaster: broadcaster
-                )
+                    broadcaster: broadcaster,
+                    bootGeneration: bootGeneration, bootDate: attachBootStartedAt)
 
                 try? await ws.close()
             }

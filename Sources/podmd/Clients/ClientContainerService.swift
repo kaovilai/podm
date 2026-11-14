@@ -17,9 +17,41 @@ actor ContainerExitCodeStore {
     private var exitDates: [String: Date] = [:]
     private var waiters: [String: [CheckedContinuation<Int32, Never>]] = [:]
 
-    func set(id: String, code: Int32) {
+    /// Records a container's exit code, never downgrading one already known.
+    ///
+    /// A foreground `docker run` has TWO observers waiting on the same init
+    /// process (the start route's background waiter and the attach route's
+    /// monitor). Apple's XPC tolerates the duplicate wait unevenly: when one
+    /// observer's `wait()` fails after its retries it records the failure
+    /// sentinel — and that sentinel used to OVERWRITE the real code the other
+    /// observer had already recorded, so `docker run alpine sh -c 'exit 3'`
+    /// returned 255 instead of 3 roughly two runs in three. A real code is
+    /// authoritative once recorded; the sentinel may only fill in when no real
+    /// code exists yet, and a later real code may still replace it.
+    func set(id: String, code: Int32, generation: UInt64? = nil, bootDate: Date? = nil) {
+        // An observer records the boot generation it was armed for: one from a
+        // previous run that completes after a restart must not plant its code
+        // ahead of the new run's — set() rejects every later real code, so the
+        // stale write would pin the old status for the whole new boot.
+        if let generation, let current = generations[id], current != generation { return }
+        // Boots are ALSO identified by the container's own start date. A
+        // losing attach never learns the winner's generation (it has no way to
+        // read it without racing its publication), but it observes the same
+        // startedDate as the winner — while a straggler from an earlier boot
+        // carries an older one and is rejected here.
+        if let bootDate, let currentDate = bootDates[id], bootDate < currentDate { return }
+        if let existing = codes[id] {
+            let existingIsReal = existing != Self.waitFailureSentinel
+            let incomingIsReal = code != Self.waitFailureSentinel
+            if existingIsReal || !incomingIsReal { return }
+        }
         codes[id] = code
         exitDates[id] = Date()
+        if let bootDate {
+            codeBootDates[id] = bootDate
+        } else {
+            codeBootDates.removeValue(forKey: id)
+        }
         // Resume anyone awaiting this container's exit code (e.g. the die-event observer),
         // delivering the authoritative recorded value rather than a timed-poll fallback.
         if let pending = waiters.removeValue(forKey: id) {
@@ -37,9 +69,77 @@ actor ContainerExitCodeStore {
         exitDates[id]
     }
 
+    /// Clears a container's exit code under every alias it may be waited on by.
+    /// A boot must clear BOTH the native id and the Docker hex id: clearing only
+    /// the native id left a previous run's hex-id code in place, and with the
+    /// "never downgrade a real code" rule the next run reported that stale code.
+    func removeAll(nativeId: String, hexId: String) {
+        remove(id: nativeId)
+        remove(id: hexId)
+    }
+
+    /// The CURRENT boot of a container. Observers capture the token at boot and
+    /// present it when recording; a token no longer current means the observer
+    /// belongs to a run that has since been replaced.
+    private var generations: [String: UInt64] = [:]
+    private var bootDates: [String: Date] = [:]
+    /// The boot a recorded code belongs to, so a boot registration can tell a
+    /// code from an earlier run (clearable) from one this same boot already
+    /// recorded (must survive).
+    private var codeBootDates: [String: Date] = [:]
+    private var nextGeneration: UInt64 = 0
+
+    /// The generation currently in force for `id`, if any boot has been
+    /// recorded. A request that lost a boot race observes this token instead
+    /// of allocating one: bumping for the loser would invalidate the winner's
+    /// token and its real exit code would then be rejected.
+    func currentGeneration(id: String) -> UInt64? {
+        generations[id]
+    }
+
+    /// Starts a new boot: clears every alias (see `removeAll`) and returns the
+    /// generation token this boot's observers must pass to `set`.
+    /// - Returns: the generation, or nil when this registration is STALE — a
+    ///   newer boot is already registered (a delayed start finished after a
+    ///   restart). A stale registration must not disturb the newer boot: it
+    ///   neither clears that boot's result nor invalidates its observer.
+    func beginBoot(nativeId: String, hexId: String, bootDate: Date? = nil) -> UInt64? {
+        let ids = [nativeId, hexId]
+        if let bootDate {
+            for id in ids {
+                if let registered = bootDates[id], registered > bootDate { return nil }
+            }
+        }
+        nextGeneration &+= 1
+        for id in ids {
+            // Clear only what an EARLIER boot recorded: a concurrent observer
+            // of THIS boot may already have recorded the real exit code while
+            // this start was fetching its post-start snapshot, and throwing it
+            // away would leave /wait with nothing but a sentinel.
+            let recordedByThisBoot =
+                codeBootDates[id].map { recorded in
+                    bootDate.map { recorded >= $0 } ?? false
+                } ?? false
+            if !recordedByThisBoot {
+                codes.removeValue(forKey: id)
+                exitDates.removeValue(forKey: id)
+                codeBootDates.removeValue(forKey: id)
+            }
+            generations[id] = nextGeneration
+            if let bootDate {
+                bootDates[id] = bootDate
+            } else {
+                bootDates.removeValue(forKey: id)
+            }
+        }
+        return nextGeneration
+    }
+
     func remove(id: String) {
         codes.removeValue(forKey: id)
         exitDates.removeValue(forKey: id)
+        bootDates.removeValue(forKey: id)
+        codeBootDates.removeValue(forKey: id)
     }
 
     /// Suspends until the exit code for `id` is recorded, returning the exact recorded value.
@@ -51,6 +151,43 @@ actor ContainerExitCodeStore {
         return await withCheckedContinuation { continuation in
             waiters[id, default: []].append(continuation)
         }
+    }
+
+    /// The exit code to report, holding back the failure sentinel briefly so a
+    /// concurrent observer's real code can replace it.
+    ///
+    /// A foreground run has two observers on the same init process; one can
+    /// record the sentinel while the other is still resolving the real code a
+    /// few milliseconds later. Returning the sentinel at once made
+    /// `docker run … sh -c 'exit 3'` report 255 for most runs, so a sentinel is
+    /// answered only after `sentinelGrace` passes with no real code.
+    func resolvedCode(
+        id: String,
+        sentinelGrace: Duration = .seconds(1),
+        onSentinelGrace: (@Sendable () -> Void)? = nil
+    ) async -> Int32? {
+        guard let first = codes[id] else { return nil }
+        guard first == Self.waitFailureSentinel else { return first }
+        let generationAtEntry = generations[id]
+        onSentinelGrace?()
+        let deadline = ContinuousClock.Instant.now + sentinelGrace
+        while ContinuousClock.Instant.now < deadline {
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+            } catch {
+                // Cancelled (the wait route's task group cancels its losing
+                // task): answer with what is known rather than spinning out
+                // the rest of the grace period.
+                return codes[id]
+            }
+            if let current = codes[id], current != Self.waitFailureSentinel { return current }
+            // A NEW boot reset every alias while we were waiting: this wait
+            // belongs to a run that is gone. Answer with what was observed
+            // (the sentinel), never nil — `ClientContainerService.wait` turns
+            // nil into a fabricated exit 0, or the replacement boot's code.
+            if generations[id] != generationAtEntry { return first }
+        }
+        return codes[id]
     }
 
     /// Sentinel recorded when the init process's exit code could not be obtained after retries.
@@ -454,11 +591,17 @@ struct ClientContainerService: ClientContainerProtocol {
 
         do {
             let process = try await containerClient.withClient { try await $0.bootstrap(id: container.id, stdio: stdio) }
-            // Clear any exit code recorded by a previous run of this container so
-            // /wait blocks for the new init process rather than immediately
-            // returning the stale code (e.g. after a restart).
-            await ContainerExitCodeStore.shared.remove(id: container.id)
             try await process.start()
+            // The start SUCCEEDED, so this call owns the boot: reset every alias
+            // a previous run could be waited on by and publish the generation
+            // now. Allocating before the start let a losing start (bootstrap or
+            // start throws "already booted") bump the generation of a
+            // concurrent attach's winning boot and invalidate its token — the
+            // winner's real exit code was then rejected.
+            let bootStartedAt = (try? await getContainer(id: container.id))?.startedDate
+            let bootGeneration = await ContainerExitCodeStore.shared.beginBoot(
+                nativeId: container.id, hexId: DockerContainerID.hexId(for: container),
+                bootDate: bootStartedAt)
             // Wait for the init process in the background so we can capture its
             // real exit code without blocking the /start response.
             let containerId = container.id
@@ -467,7 +610,8 @@ struct ClientContainerService: ClientContainerProtocol {
                 let code = await ContainerExitCodeStore.resolveExitCode(logger: exitLogger) {
                     try await process.wait()
                 }
-                await ContainerExitCodeStore.shared.set(id: containerId, code: code)
+                await ContainerExitCodeStore.shared.set(
+                    id: containerId, code: code, generation: bootGeneration, bootDate: bootStartedAt)
             }
             return true
         } catch {
@@ -700,7 +844,7 @@ struct ClientContainerService: ClientContainerProtocol {
             }
         }
 
-        let code = await ContainerExitCodeStore.shared.get(id: id) ?? 0
+        let code = await ContainerExitCodeStore.shared.resolvedCode(id: id) ?? 0
         return RESTContainerWait(statusCode: Int64(code))
     }
 

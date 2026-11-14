@@ -14,12 +14,20 @@ public enum ContainerWaitCondition: String, CaseIterable, Codable, Sendable {
 
 struct ContainerWaitRoute: RouteCollection {
     let client: ClientContainerProtocol
+    /// `--rm` tombstones — injectable so route tests can bound the tombstone
+    /// wait without touching the process-wide singleton.
+    var autoRemoved: AutoRemovedContainers = .shared
 
     func boot(routes: RoutesBuilder) throws {
-        try routes.registerVersionedRoute(.POST, pattern: "/containers/{id}/wait", use: ContainerWaitRoute.handler(client: client))
+        try routes.registerVersionedRoute(
+            .POST, pattern: "/containers/{id}/wait",
+            use: ContainerWaitRoute.handler(client: client, autoRemoved: autoRemoved))
     }
 
-    static func handler(client: ClientContainerProtocol) -> @Sendable (Request) async throws -> Response {
+    static func handler(
+        client: ClientContainerProtocol,
+        autoRemoved: AutoRemovedContainers = .shared
+    ) -> @Sendable (Request) async throws -> Response {
         { req in
             guard let containerId = req.parameters.get("id") else {
                 throw Abort(.badRequest, reason: "Missing container ID")
@@ -36,10 +44,28 @@ struct ContainerWaitRoute: RouteCollection {
             // Preflight before flushing headers so a missing container returns a
             // real 404 instead of a streamed `200 {"StatusCode":0}` — the latter
             // would make "no such container" indistinguishable from a clean exit.
+            let nativeId: String
             do {
-                guard try await client.getContainer(id: containerId) != nil else {
+                guard let container = try await client.getContainer(id: containerId) else {
+                    // `docker run --rm` on a fast-exiting command: Apple
+                    // Container reaps the container at exit, and the CLI's
+                    // /wait can land after it is gone. It is not a missing
+                    // container to the client — the run happened. Answer with
+                    // the exit code podm recorded at exit, else 404.
+                    if let code = await autoRemoved.waitForExitCode(for: containerId) {
+                        let wait = RESTContainerWait(statusCode: Int64(code))
+                        var headers = HTTPHeaders()
+                        headers.add(name: .contentType, value: "application/json")
+                        return Response(status: .ok, headers: headers, body: .init(data: try JSONEncoder().encode(wait)))
+                    }
                     throw Abort(.notFound, reason: "No such container: \(containerId)")
                 }
+                // Exit codes and health state are keyed by the container's NATIVE
+                // id (the exit monitor also writes its canonical hex id, which is
+                // exactly `DockerContainerID.hexId(for:)` — never the request's
+                // reference). A /wait by a truncated id or a name must resolve to
+                // it, or the poller below would never see the recorded code.
+                nativeId = container.id
             } catch ClientContainerError.ambiguousId(let reference, let matches) {
                 let matchList = matches.joined(separator: ", ")
                 throw Abort(.badRequest, reason: "ambiguous container reference \(reference): matches \(matchList)")
@@ -60,7 +86,7 @@ struct ContainerWaitRoute: RouteCollection {
                         var statusCode: Int64 = 0
                         if let manager = req.application.storage[HealthCheckManagerKey.self] {
                             while true {
-                                let health = await manager.currentHealth(for: containerId)
+                                let health = await manager.currentHealth(for: nativeId)
                                 if health?.Status == "healthy" { break }
                                 if health == nil {
                                     statusCode = 1
@@ -69,7 +95,7 @@ struct ContainerWaitRoute: RouteCollection {
                                 guard let container = try? await client.getContainer(id: containerId),
                                     container.status == .running
                                 else {
-                                    let code = await ContainerExitCodeStore.shared.get(id: containerId) ?? 1
+                                    let code = await ContainerExitCodeStore.shared.get(id: nativeId) ?? 1
                                     statusCode = Int64(code)
                                     break
                                 }
@@ -94,7 +120,10 @@ struct ContainerWaitRoute: RouteCollection {
                                 let pollIntervalNs: UInt64 = 100_000_000
                                 let maxPolls = Int(30_000_000_000 / pollIntervalNs)
                                 for _ in 0..<maxPolls {
-                                    if let code = await ContainerExitCodeStore.shared.get(id: containerId) {
+                                    // `resolvedCode` holds back the wait-failure
+                                    // sentinel while the other exit observer may
+                                    // still record the real code.
+                                    if let code = await ContainerExitCodeStore.shared.resolvedCode(id: nativeId) {
                                         return RESTContainerWait(statusCode: Int64(code))
                                     }
                                     try? await Task.sleep(nanoseconds: pollIntervalNs)
