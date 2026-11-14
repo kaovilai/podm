@@ -766,34 +766,70 @@ extension BuildRoute {
             recordedImageID.hasPrefix("sha256:")
             ? String(recordedImageID.dropFirst("sha256:".count)) : recordedImageID
 
-        // The docker CLI's classic builder captures the image ID for
-        // --iidfile ONLY from the aux message (issue #53); podman's client
-        // instead treats a record with neither `stream` nor `error` as a
-        // stream-parse failure, so it is docker-dialect only. UNGATED by
-        // quiet mode — docker's quiet build still needs it.
-        if sendsAuxRecord {
-            sendAuxImageID(recordedImageID)
-        }
-
-        // Real podman clients (pkg/bindings/images/build.go) only treat a clean
-        // stream EOF as success if they've already seen a "stream" line whose
-        // content starts with 12+ raw hex chars (`iidRegex`) — otherwise EOF is
-        // reported as `Error: decoding stream: EOF` even though the build (and
-        // this response) genuinely succeeded. Real buildah/podman builds emit
-        // the bare image ID as its own stream line for exactly this reason;
-        // mirror that here so the client recognizes success. Written directly
-        // (not via sendStreamMessage) so quiet mode cannot suppress it: in
-        // quiet mode this line IS the contracted output.
-        writer.write(.buffer(ByteBuffer(string: "{\"stream\":\"" + bareID + "\\n\"}\n")))
-
-        // Send success message in Docker API format (progress — suppressed
-        // in quiet mode), one line per requested tag like the real daemons.
-        sendStreamMessage("Successfully built \(imageName)")
-        for tag in allTags {
-            sendStreamMessage("Successfully tagged \(tag)")
+        for line in Self.completionRecords(
+            recordedImageID: recordedImageID,
+            imageName: imageName,
+            tags: allTags,
+            quiet: quiet,
+            sendsAuxRecord: sendsAuxRecord
+        ) {
+            _ = writer.write(.buffer(ByteBuffer(string: line)))
         }
 
         _ = writer.write(.end)
+    }
+
+    /// The completion records a successful build writes, in order, each already
+    /// newline-terminated.
+    ///
+    /// Two clients read this stream differently, and the difference is
+    /// load-bearing in both directions:
+    /// - docker's classic builder takes the image ID for `--iidfile` ONLY from
+    ///   the `{"aux":{"ID":…}}` record (issue #53), and accepts it even in
+    ///   quiet mode;
+    /// - podman's build client (pkg/bindings/images/build.go) errors with
+    ///   "failed to parse build results stream, unexpected input" on ANY
+    ///   record that has neither `stream` nor `error` — so the aux record must
+    ///   not be sent to it — and only treats a clean EOF as success once it
+    ///   has seen a `stream` line whose content starts with 12+ raw hex chars
+    ///   (`iidRegex`), which is why the bare image ID line is never suppressed.
+    ///
+    /// Extracted as a pure function so the dialect shapes are asserted without
+    /// a builder VM.
+    static func completionRecords(
+        recordedImageID: String,
+        imageName: String,
+        tags: [String],
+        quiet: Bool,
+        sendsAuxRecord: Bool
+    ) -> [String] {
+        let digestID = recordedImageID.hasPrefix("sha256:") ? recordedImageID : "sha256:" + recordedImageID
+        let bareID =
+            recordedImageID.hasPrefix("sha256:")
+            ? String(recordedImageID.dropFirst("sha256:".count)) : recordedImageID
+
+        var records: [String] = []
+        if sendsAuxRecord {
+            records.append(jsonLine(["aux": ["ID": digestID]]))
+        }
+        // Never suppressed: in quiet mode this line IS the contracted output.
+        records.append(jsonLine(["stream": bareID + "\n"]))
+        if !quiet {
+            var messages = ["Successfully built \(imageName)"]
+            messages.append(contentsOf: tags.map { "Successfully tagged \($0)" })
+            records.append(contentsOf: messages.map { jsonLine(["stream": $0 + "\n"]) })
+        }
+        return records
+    }
+
+    /// A single response record, newline-terminated like the daemons' encoder.
+    private static func jsonLine(_ object: [String: Any]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: object),
+            let line = String(data: data, encoding: .utf8)
+        else {
+            return "{\"error\":\"failed to encode record\"}\n"
+        }
+        return line + "\n"
     }
 
     /// Runs a single BuildKit solve against one builder backend and loads/unpacks its
