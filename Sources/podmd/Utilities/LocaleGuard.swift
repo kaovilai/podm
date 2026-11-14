@@ -44,12 +44,20 @@ enum LocaleGuard {
     /// what happened; the offending values are deliberately not echoed (they
     /// are arbitrary bytes from someone's shell, and may contain terminal
     /// escape sequences).
+    /// - Parameters:
+    ///   - environment: the environment to inspect (injectable for tests).
+    ///   - apply: performs the replacement; the default writes to the live
+    ///     process environment.
     @discardableResult
-    static func sanitizeProcessLocale(log: (String) -> Void = { FileHandle.standardError.write(Data($0.utf8)) }) -> [String] {
-        let invalid = invalidVariables(in: ProcessInfo.processInfo.environment)
+    static func sanitizeProcessLocale(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        apply: (String, String) -> Void = { setenv($0, $1, 1) },
+        log: (String) -> Void = { FileHandle.standardError.write(Data($0.utf8)) }
+    ) -> [String] {
+        let invalid = invalidVariables(in: environment)
         guard !invalid.isEmpty else { return [] }
         for entry in invalid {
-            setenv(entry.name, "C.UTF-8", 1)
+            apply(entry.name, "C.UTF-8")
         }
         let names = invalid.map(\.name).joined(separator: ", ")
         log(

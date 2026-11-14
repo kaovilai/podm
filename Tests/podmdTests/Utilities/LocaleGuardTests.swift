@@ -55,4 +55,56 @@ struct LocaleGuardTests {
         let environment = ["LANG": "C", "LC_ALL": "bad\nvalue", "LC_CTYPE": "also bad\nvalue", "LC_COLLATE": "C"]
         #expect(LocaleGuard.invalidVariables(in: environment).map(\.name) == ["LC_ALL", "LC_CTYPE"])
     }
+
+    @Test("the sanitizer replaces only the offending variables and warns once")
+    func sanitizerReplacesAndWarns() {
+        var applied: [(String, String)] = []
+        var warnings: [String] = []
+        let poisoned = "dotfiles repo has uncommitted changes, run \u{1B}[0;31medit-dotfiles\u{1B}[0m to review\nC.UTF-8"
+
+        let replaced = LocaleGuard.sanitizeProcessLocale(
+            environment: ["LANG": poisoned, "LC_ALL": "en_US.UTF-8", "PATH": "/usr/bin"],
+            apply: { applied.append(($0, $1)) },
+            log: { warnings.append($0) }
+        )
+
+        #expect(replaced == ["LANG"])
+        #expect(applied.count == 1)
+        #expect(applied.first?.0 == "LANG")
+        #expect(applied.first?.1 == "C.UTF-8")
+        #expect(warnings.count == 1)
+        // The warning names the variable and never echoes the offending bytes
+        // (they may carry terminal escape sequences).
+        #expect(warnings.first?.contains("LANG") == true)
+        #expect(warnings.first?.contains("dotfiles repo") == false)
+        #expect(warnings.first?.contains("\u{1B}") == false)
+    }
+
+    @Test("a clean environment changes nothing and stays silent")
+    func sanitizerLeavesCleanEnvironmentAlone() {
+        var applied: [(String, String)] = []
+        var warnings: [String] = []
+        let replaced = LocaleGuard.sanitizeProcessLocale(
+            environment: ["LANG": "C.UTF-8", "LC_ALL": "en_US.UTF-8", "PATH": "/usr/bin"],
+            apply: { applied.append(($0, $1)) },
+            log: { warnings.append($0) }
+        )
+        #expect(replaced.isEmpty)
+        #expect(applied.isEmpty)
+        #expect(warnings.isEmpty)
+    }
+
+    @Test("several poisoned variables are all replaced by one warning")
+    func sanitizerHandlesSeveral() {
+        var applied: [(String, String)] = []
+        var warnings: [String] = []
+        let replaced = LocaleGuard.sanitizeProcessLocale(
+            environment: ["LANG": "bad value", "LC_ALL": "also bad", "LC_CTYPE": "C"],
+            apply: { applied.append(($0, $1)) },
+            log: { warnings.append($0) }
+        )
+        #expect(Set(replaced) == ["LANG", "LC_ALL"])
+        #expect(Set(applied.map(\.0)) == ["LANG", "LC_ALL"])
+        #expect(warnings.count == 1)
+    }
 }
