@@ -279,6 +279,13 @@ extension ContainerAttachRoute {
 
     // Output-only attach for stopped containers (docker run without -i, issue #220).
     // Uses pipes instead of log-file polling to eliminate the race for fast-exiting containers.
+    /// The id the exit monitor records exit codes and the `--rm` tombstone
+    /// under: the canonical 64-hex id of the RESOLVED snapshot, never the
+    /// request path's value (which may be a reusable name or a truncated id).
+    static func exitRecordId(for container: ContainerSnapshot) -> String {
+        DockerContainerID.hexId(for: container)
+    }
+
     private static func attachStoppedOutputOnly(
         req: Request,
         client: ClientContainerProtocol,
@@ -288,12 +295,7 @@ extension ContainerAttachRoute {
         isUpgrade: Bool,
         hasConnectionUpgrade: Bool
     ) async throws -> Response {
-        // The canonical 64-hex id — never the request path's value, which may be
-        // a reusable name or a truncated id: the exit monitor records exit codes
-        // and the `--rm` tombstone under this id, and a record keyed by a name
-        // or truncated id would both dodge the boot-time alias clear and survive
-        // into a later container reusing that name.
-        let hexId = DockerContainerID.hexId(for: container)
+        let hexId = ContainerAttachRoute.exitRecordId(for: container)
         let attachStdout = query.stdout ?? true
         let stderrOnly = (query.stderr ?? false) && !(query.stdout ?? false)
 
@@ -583,9 +585,7 @@ extension ContainerAttachRoute {
         shouldUpgrade: Bool,
         isTTY: Bool
     ) async throws -> Response {
-        // Canonical 64-hex id (the request path may carry a name or truncated
-        // id — see attachStoppedOutputOnly).
-        let hexId = DockerContainerID.hexId(for: container)
+        let hexId = ContainerAttachRoute.exitRecordId(for: container)
 
         let attachStdout = query.stdout ?? true
         let attachStderr = query.stderr ?? !isTTY

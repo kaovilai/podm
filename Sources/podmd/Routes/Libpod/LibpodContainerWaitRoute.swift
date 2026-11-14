@@ -2,12 +2,20 @@ import Vapor
 
 struct LibpodContainerWaitRoute: RouteCollection {
     let client: ClientContainerProtocol
+    /// `--rm` tombstones — injectable so route tests can bound the tombstone
+    /// wait without touching the process-wide singleton.
+    var autoRemoved: AutoRemovedContainers = .shared
 
     func boot(routes: RoutesBuilder) throws {
-        try routes.registerVersionedRoute(.POST, pattern: "/libpod/containers/{id}/wait", use: LibpodContainerWaitRoute.handler(client: client))
+        try routes.registerVersionedRoute(
+            .POST, pattern: "/libpod/containers/{id}/wait",
+            use: LibpodContainerWaitRoute.handler(client: client, autoRemoved: autoRemoved))
     }
 
-    static func handler(client: ClientContainerProtocol) -> @Sendable (Request) async throws -> Response {
+    static func handler(
+        client: ClientContainerProtocol,
+        autoRemoved: AutoRemovedContainers = .shared
+    ) -> @Sendable (Request) async throws -> Response {
         { req in
             guard let containerId = req.parameters.get("id") else {
                 throw Abort(.badRequest, reason: "Missing container ID")
@@ -29,6 +37,12 @@ struct LibpodContainerWaitRoute: RouteCollection {
                 // {"StatusCode": N} object is an unmarshal error for it.
                 return Response(status: .ok, body: .init(string: String(waitResponse.StatusCode)))
             } catch ClientContainerError.notFound(let id) {
+                // `podman run --rm` can race the reap the same way docker's
+                // does — the run happened, so answer with its recorded exit
+                // code rather than calling it a missing container.
+                if let code = await autoRemoved.waitForExitCode(for: containerId) {
+                    return Response(status: .ok, body: .init(string: String(code)))
+                }
                 throw Abort(.notFound, reason: "No such container: \(id)")
             } catch {
                 req.logger.error("Failed to wait for container \(containerId): \(error)")

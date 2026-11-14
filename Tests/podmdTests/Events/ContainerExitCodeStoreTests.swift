@@ -271,3 +271,23 @@ struct ExitCodeStoreLosingBootTests {
         #expect(await ContainerExitCodeStore.shared.get(id: nativeId) == 5)
     }
 }
+
+/// A fresh boot must clear the code from EVERY alias the monitor writes:
+/// the native id AND the canonical Docker hex id. Clearing only the native id
+/// left the previous run's code answering `/wait <hex id>`.
+@Suite("ContainerExitCodeStore — alias clearing")
+struct ExitCodeStoreAliasClearTests {
+
+    @Test("removeAll clears both the native id and the hex id")
+    func removeAllClearsBothAliases() async {
+        let nativeId = "alias-native-\(UUID().uuidString)"
+        let hexId = "alias-hex-\(UUID().uuidString)"
+        await ContainerExitCodeStore.shared.set(id: nativeId, code: 42)
+        await ContainerExitCodeStore.shared.set(id: hexId, code: 42)
+
+        await ContainerExitCodeStore.shared.removeAll(nativeId: nativeId, hexId: hexId)
+
+        #expect(await ContainerExitCodeStore.shared.get(id: nativeId) == nil)
+        #expect(await ContainerExitCodeStore.shared.get(id: hexId) == nil)
+    }
+}

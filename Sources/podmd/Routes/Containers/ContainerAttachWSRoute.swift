@@ -65,9 +65,7 @@ extension ContainerAttachWSRoute {
         container: ContainerSnapshot,
         query: ContainerAttachWSQuery
     ) async {
-        // Canonical 64-hex id — the request path may carry a reusable name or a
-        // truncated id (see ContainerAttachRoute).
-        let hexId = DockerContainerID.hexId(for: container)
+        let hexId = ContainerAttachRoute.exitRecordId(for: container)
         let stdin = query.stdin ?? false
         let stdout = query.stdout ?? true
         let stderr = query.stderr ?? true
