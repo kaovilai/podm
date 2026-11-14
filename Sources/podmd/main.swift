@@ -4,6 +4,10 @@ import ContainerResource
 import Foundation
 import Vapor
 
+// Before anything touches Foundation: an unparseable LANG/LC_* value crashes
+// CoreFoundation's collation with a silent SIGSEGV (see LocaleGuard).
+LocaleGuard.sanitizeProcessLocale()
+
 // CLI options
 struct CLIOptions: ParsableArguments {
     @ArgumentParser.Flag(name: .long, help: "Show version")

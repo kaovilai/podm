@@ -446,14 +446,7 @@ extension BuildRoute {
                     } catch {
                         req.logger.error("Build failed: \(error)")
 
-                        // Extract error message - prioritize ContainerizationError message
-                        let errorMessage: String
-                        if error is ContainerizationError {
-                            // Use string interpolation to get ContainerizationError's description
-                            errorMessage = "\(error)"
-                        } else {
-                            errorMessage = error.localizedDescription
-                        }
+                        let errorMessage = BuildRoute.buildFailureMessage(for: error)
 
                         // Docker API compliant error response
                         let errorDetail: [String: Any] = [
@@ -495,6 +488,25 @@ extension BuildRoute {
                 body: body
             )
         }
+    }
+
+    /// The message a failed build reports to the client.
+    ///
+    /// BuildKit failures arrive as gRPC `RPCError` values whose
+    /// `localizedDescription` is only "The operation couldn't be completed.
+    /// (GRPCCore.RPCError error 1.)" — no failing step, no exit code, nothing a
+    /// user can act on. The value's own description carries BuildKit's message
+    /// ("failed to solve: process \"/bin/sh -c exit 42\" did not complete
+    /// successfully: exit code: 42"), so use that. ContainerizationError keeps
+    /// its structured description.
+    ///
+    /// Pure so the mapping is asserted in unit tests without running a builder.
+    static func buildFailureMessage(for error: Error) -> String {
+        if error is ContainerizationError {
+            // String interpolation yields ContainerizationError's description.
+            return "\(error)"
+        }
+        return String(describing: error)
     }
 
     private static func performBuild(
