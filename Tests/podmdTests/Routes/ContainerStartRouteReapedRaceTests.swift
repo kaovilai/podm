@@ -45,6 +45,38 @@ struct ContainerStartRouteReapedRaceTests {
         }
     }
 
+    @Test("the tombstoned 204 emits no post-start events")
+    func tombstonedSuccessBypassesPostStartSetup() async throws {
+        let nativeId = "reaped-rm-no-events"
+        let snapshot = try makeContainerSnapshot(
+            nativeId: nativeId, networks: [], labels: [:], status: .stopped)
+        let hexId = DockerContainerID.hexId(for: snapshot)
+
+        let autoRemoved = AutoRemovedContainers(ttl: .seconds(600), defaultWait: .seconds(60))
+        await autoRemoved.record(hexId: hexId, code: 0)
+        let broadcaster = EventBroadcaster()
+
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+            app.storage[EventBroadcasterKey.self] = broadcaster
+            try app.register(
+                collection: ContainerStartRoute(
+                    client: ReapedDuringStartClientMock(snapshot: snapshot), autoRemoved: autoRemoved))
+
+            try await app.testing().test(.POST, "/v1.51/containers/\(hexId)/start") { res async in
+                #expect(res.status == .noContent)
+            }
+        }
+
+        // The 204 means "this run already completed": the route must return
+        // before post-start setup, so nothing — not even a start event — is
+        // emitted for the reaped instance.
+        let (replay, _) = await broadcaster.subscribe(since: 0, until: nil, matching: nil)
+        #expect(!replay.contains { $0.Action == "start" }, "events: \(replay.map(\.Action))")
+    }
+
     @Test("a /start by NAME finds the tombstone through its resolved snapshot")
     func nameRequestResolvesTombstoneKey() async throws {
         let nativeId = "reaped-rm-by-name"
