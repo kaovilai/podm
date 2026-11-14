@@ -62,14 +62,17 @@ actor AutoRemovedContainers {
 
     /// The recorded exit code, while the tombstone is still fresh.
     ///
-    /// Accepts a hex-id prefix, matching how `/containers/{id}` resolution
-    /// treats ids elsewhere (a client may hand back a short id from `docker ps`).
-    /// An ambiguous prefix resolves to nothing, like the container routes.
+    /// Accepts a case-insensitive hex-id prefix, matching how `/containers/{id}`
+    /// resolution treats ids elsewhere (a client may hand back a short id from
+    /// `docker ps`, or spell it in upper case). An ambiguous prefix resolves to
+    /// nothing, like the container routes.
     func exitCode(for id: String) -> Int32? {
         prune()
         if let exact = entries[id] { return exact.code }
+        if let exact = entries[id.lowercased()] { return exact.code }
         guard Self.isHexIdPrefix(id) else { return nil }
-        let matches = entries.filter { $0.key.hasPrefix(id) && Self.isHexId($0.key) }
+        let needle = id.lowercased()
+        let matches = entries.filter { $0.key.hasPrefix(needle) && Self.isHexId($0.key) }
         guard matches.count == 1 else { return nil }
         return matches.first?.value.code
     }

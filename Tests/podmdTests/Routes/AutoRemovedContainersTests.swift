@@ -41,6 +41,8 @@ struct AutoRemovedContainersTests {
         let tombs = AutoRemovedContainers()
         await tombs.record(hexId: Self.hex, code: 9)
         #expect(await tombs.exitCode(for: String(Self.hex.prefix(12))) == 9)
+        // Ids are matched case-insensitively, like live container resolution.
+        #expect(await tombs.exitCode(for: String(Self.hex.prefix(12)).uppercased()) == 9)
         // Too short to be an id prefix.
         #expect(await tombs.exitCode(for: String(Self.hex.prefix(3))) == nil)
     }
