@@ -291,3 +291,58 @@ struct ImagePlatformStoreContentLifecycleTests {
         #expect(FileManager.default.fileExists(atPath: file.path), "an unchanged record must still retry a failed write")
     }
 }
+
+/// A deletion guards its cleanup with a fixed instant taken when it starts.
+/// Two things must follow: an identical re-pull refreshes the record's
+/// timestamp (so the guard keeps it), and a record loaded from disk — which
+/// carries no in-memory timestamp — is still cleaned up.
+@Suite("ImagePlatformStore — deletion cutoff semantics")
+struct ImagePlatformStoreDeletionCutoffTests {
+
+    private func makeStore(directory: URL) async -> ImagePlatformStore {
+        let store = ImagePlatformStore()
+        await store.configure(storageDirectory: directory)
+        return store
+    }
+
+    private func tempDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("podm-image-platforms-cutoff-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    @Test("an identical re-pull refreshes the timestamp and survives a deletion's cleanup")
+    func identicalPullRefreshesTimestamp() async throws {
+        let store = await makeStore(directory: try tempDir())
+        let ref = "docker.io/library/alpine:latest"
+        let amd64 = Platform(arch: "amd64", os: "linux", variant: nil)
+        await store.record(reference: ref, platform: amd64)
+
+        // The delete starts...
+        let deletionStartedAt: ContinuousClock.Instant = .now
+        // ...and the pull recreates the reference for the SAME variant: the
+        // persisted content is unchanged, but the selection is fresh.
+        await store.record(reference: ref, platform: amd64)
+        await store.remove(matching: ref, recordedBefore: deletionStartedAt)
+
+        #expect(
+            await store.platform(forReference: ref)?.architecture == "amd64",
+            "a pull that re-recorded the reference must keep its selection")
+    }
+
+    @Test("a record loaded from disk (no in-memory timestamp) is still removed by a deletion")
+    func loadedRecordStillRemoved() async throws {
+        let directory = try tempDir()
+        let first = await makeStore(directory: directory)
+        let ref = "docker.io/library/alpine:latest"
+        await first.record(reference: ref, platform: Platform(arch: "amd64", os: "linux", variant: nil))
+
+        // A daemon restart: the reloaded store has no in-memory timestamps.
+        let reloaded = await makeStore(directory: directory)
+        let deletionStartedAt: ContinuousClock.Instant = .now
+        await reloaded.remove(matching: ref, recordedBefore: deletionStartedAt)
+
+        #expect(await reloaded.platform(forReference: ref) == nil)
+    }
+}

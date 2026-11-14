@@ -87,8 +87,11 @@ actor ImagePlatformStore {
         guard !reference.isEmpty else { return }
         var record = Record(os: platform.os, arch: platform.architecture, variant: platform.variant, digest: digest)
         if platforms[reference] == record {
-            // Same record again — but a previous persist may have failed, and
-            // skipping the write here would leave disk behind forever.
+            // Same record again — but this IS a fresh success (a re-pull of the
+            // same variant), so refresh the in-memory timestamp: a deletion that
+            // snapshotted the old one would otherwise discard this reference's
+            // selection. A previously failed persist is retried too.
+            platforms[reference]?.recordedAt = .now
             if needsPersist { persist() }
             return
         }
@@ -136,6 +139,9 @@ actor ImagePlatformStore {
         guard !destination.isEmpty else { return }
         if var record {
             guard platforms[destination] != record else {
+                // A fresh tag of the same content: refresh the timestamp, or a
+                // deletion that snapshotted the old one discards it.
+                platforms[destination]?.recordedAt = .now
                 if needsPersist { persist() }
                 return
             }

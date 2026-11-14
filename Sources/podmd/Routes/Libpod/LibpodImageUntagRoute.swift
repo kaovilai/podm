@@ -130,11 +130,14 @@ struct LibpodImageUntagRoute: RouteCollection {
                     reference: resolved.reference, digest: resolved.digest, systemConfig: systemConfig)
             }
             for reference in allReferences {
+                // Fixed instant BEFORE deleting: a concurrent pull that recreates
+                // this reference records its own variant, which must survive.
+                let deletionStartedAt: ContinuousClock.Instant = .now
                 try await store.delete(reference: reference)
                 // The name is gone — forget the variant it held, so an image
                 // reusing the name cannot inherit it (same cleanup the shared
                 // delete path performs for `image rm`/`image prune`).
-                await ImagePlatformStore.shared.remove(matching: reference)
+                await ImagePlatformStore.shared.remove(matching: reference, recordedBefore: deletionStartedAt)
                 await broadcastUntag(req: req, digest: resolved.digest, reference: reference)
             }
             return Response(status: .created)
@@ -162,8 +165,9 @@ struct LibpodImageUntagRoute: RouteCollection {
             try await store.ensureDanglingReference(
                 reference: resolved.reference, digest: resolved.digest, systemConfig: systemConfig)
         }
+        let deletionStartedAt: ContinuousClock.Instant = .now
         try await store.delete(reference: stored)
-        await ImagePlatformStore.shared.remove(matching: stored)
+        await ImagePlatformStore.shared.remove(matching: stored, recordedBefore: deletionStartedAt)
         await broadcastUntag(req: req, digest: resolved.digest, reference: stored)
         return Response(status: .created)
     }

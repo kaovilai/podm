@@ -99,6 +99,45 @@ struct LibpodImagePullPlatformTests {
         #expect(platform.variant == "v3")
     }
 
+    @Test("architecture aliases normalize exactly like the combined platform parameter (x86_64)")
+    func architectureAliasNormalized() async throws {
+        let client = RecordingPullClient()
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+            try app.register(collection: LibpodImagePullRoute(client: client))
+
+            try await app.testing().test(
+                .POST, "/v1.51/libpod/images/pull?reference=alpine&os=linux&arch=x86_64"
+            ) { res async in
+                #expect(res.status == .ok)
+            }
+        }
+        let platform = try #require(await client.lastPlatform)
+        #expect(platform.architecture == "amd64", "x86_64 is the same platform as amd64")
+    }
+
+    @Test("a bare arm request defaults to the base variant (v7), like the combined form")
+    func bareArmDefaultsToV7() async throws {
+        let client = RecordingPullClient()
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+            try app.register(collection: LibpodImagePullRoute(client: client))
+
+            try await app.testing().test(
+                .POST, "/v1.51/libpod/images/pull?reference=alpine&os=linux&arch=arm&variant="
+            ) { res async in
+                #expect(res.status == .ok)
+            }
+        }
+        let platform = try #require(await client.lastPlatform)
+        #expect(platform.architecture == "arm")
+        #expect(platform.variant == "v7", "arm/nil matches no ARM manifest in an index")
+    }
+
     @Test("no platform at all pulls the host platform")
     func defaultsToHost() async throws {
         let client = RecordingPullClient()

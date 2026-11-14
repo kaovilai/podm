@@ -276,17 +276,17 @@ struct ClientImageService: ClientImageProtocol {
         } catch {
             throw ClientImageError.notFound(id: id)
         }
-        // Snapshot when this reference was last recorded BEFORE deleting: the
-        // delete suspends (blob cleanup, remaining-reference lookup) and a pull
-        // arriving in that window may recreate the reference and record its own
-        // variant, which must survive this cleanup.
-        let recordedBefore = await ImagePlatformStore.shared.recordedInstant(matching: normalizedRef)
+        // The deletion's START: a pull that recreates the reference after this
+        // instant recorded its own variant and must survive the cleanup below.
+        // A fixed instant (not the previous record's timestamp) also covers
+        // records loaded from disk, which carry no in-memory timestamp.
+        let deletionStartedAt: ContinuousClock.Instant = .now
         try await imageStore.delete(reference: normalizedRef)
         // Every deletion path (docker/podman image rm, image prune, libpod
         // delete) funnels through here — cleaning up only in ImageDeleteRoute
         // left pruned and libpod-deleted references holding a stale variant
         // that a later image reusing the name would inherit.
-        await ImagePlatformStore.shared.remove(matching: normalizedRef, recordedBefore: recordedBefore)
+        await ImagePlatformStore.shared.remove(matching: normalizedRef, recordedBefore: deletionStartedAt)
 
         // Free orphaned blobs — mirrors Apple Container's own `container image rm`.
         // Use try? so a GC failure does not fail the delete: the tag is already gone
