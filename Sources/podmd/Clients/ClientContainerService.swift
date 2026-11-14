@@ -47,6 +47,11 @@ actor ContainerExitCodeStore {
         }
         codes[id] = code
         exitDates[id] = Date()
+        if let bootDate {
+            codeBootDates[id] = bootDate
+        } else {
+            codeBootDates.removeValue(forKey: id)
+        }
         // Resume anyone awaiting this container's exit code (e.g. the die-event observer),
         // delivering the authoritative recorded value rather than a timed-poll fallback.
         if let pending = waiters.removeValue(forKey: id) {
@@ -78,6 +83,10 @@ actor ContainerExitCodeStore {
     /// belongs to a run that has since been replaced.
     private var generations: [String: UInt64] = [:]
     private var bootDates: [String: Date] = [:]
+    /// The boot a recorded code belongs to, so a boot registration can tell a
+    /// code from an earlier run (clearable) from one this same boot already
+    /// recorded (must survive).
+    private var codeBootDates: [String: Date] = [:]
     private var nextGeneration: UInt64 = 0
 
     /// The generation currently in force for `id`, if any boot has been
@@ -90,11 +99,32 @@ actor ContainerExitCodeStore {
 
     /// Starts a new boot: clears every alias (see `removeAll`) and returns the
     /// generation token this boot's observers must pass to `set`.
-    func beginBoot(nativeId: String, hexId: String, bootDate: Date? = nil) -> UInt64 {
+    /// - Returns: the generation, or nil when this registration is STALE — a
+    ///   newer boot is already registered (a delayed start finished after a
+    ///   restart). A stale registration must not disturb the newer boot: it
+    ///   neither clears that boot's result nor invalidates its observer.
+    func beginBoot(nativeId: String, hexId: String, bootDate: Date? = nil) -> UInt64? {
+        let ids = [nativeId, hexId]
+        if let bootDate {
+            for id in ids {
+                if let registered = bootDates[id], registered > bootDate { return nil }
+            }
+        }
         nextGeneration &+= 1
-        for id in [nativeId, hexId] {
-            codes.removeValue(forKey: id)
-            exitDates.removeValue(forKey: id)
+        for id in ids {
+            // Clear only what an EARLIER boot recorded: a concurrent observer
+            // of THIS boot may already have recorded the real exit code while
+            // this start was fetching its post-start snapshot, and throwing it
+            // away would leave /wait with nothing but a sentinel.
+            let recordedByThisBoot =
+                codeBootDates[id].map { recorded in
+                    bootDate.map { recorded >= $0 } ?? false
+                } ?? false
+            if !recordedByThisBoot {
+                codes.removeValue(forKey: id)
+                exitDates.removeValue(forKey: id)
+                codeBootDates.removeValue(forKey: id)
+            }
             generations[id] = nextGeneration
             if let bootDate {
                 bootDates[id] = bootDate
@@ -109,6 +139,7 @@ actor ContainerExitCodeStore {
         codes.removeValue(forKey: id)
         exitDates.removeValue(forKey: id)
         bootDates.removeValue(forKey: id)
+        codeBootDates.removeValue(forKey: id)
     }
 
     /// Suspends until the exit code for `id` is recorded, returning the exact recorded value.

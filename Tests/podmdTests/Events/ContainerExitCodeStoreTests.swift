@@ -375,3 +375,54 @@ struct ExitCodeStoreBootDateTests {
         #expect(await ContainerExitCodeStore.shared.get(id: nativeId) == 0)
     }
 }
+
+/// A start fetches its post-start snapshot before it registers the boot, so a
+/// concurrent observer of the SAME boot can record the real exit code first.
+/// Registration must keep that result. And a delayed start that finishes after
+/// a restart must not disturb the newer boot's registration.
+@Suite("ContainerExitCodeStore — boot registration ordering")
+struct ExitCodeStoreBootRegistrationTests {
+
+    private func tempIds() -> (String, String) {
+        ("reg-native-\(UUID().uuidString)", "reg-hex-\(UUID().uuidString)")
+    }
+
+    @Test("registration keeps a code the same boot already recorded")
+    func sameBootCodeSurvivesRegistration() async {
+        let (nativeId, hexId) = tempIds()
+        let bootDate = Date(timeIntervalSince1970: 1_000)
+        defer { Task { await ContainerExitCodeStore.shared.removeAll(nativeId: nativeId, hexId: hexId) } }
+
+        // The concurrent observer records while the starter fetches its snapshot.
+        await ContainerExitCodeStore.shared.set(id: nativeId, code: 3, bootDate: bootDate)
+        _ = await ContainerExitCodeStore.shared.beginBoot(
+            nativeId: nativeId, hexId: hexId, bootDate: bootDate)
+
+        #expect(
+            await ContainerExitCodeStore.shared.get(id: nativeId) == 3,
+            "the starter's own registration must not discard its boot's result")
+    }
+
+    @Test("a stale registration is refused and leaves the newer boot untouched")
+    func staleRegistrationRefused() async {
+        let (nativeId, hexId) = tempIds()
+        let olderBoot = Date(timeIntervalSince1970: 1_000)
+        let newerBoot = Date(timeIntervalSince1970: 2_000)
+        defer { Task { await ContainerExitCodeStore.shared.removeAll(nativeId: nativeId, hexId: hexId) } }
+
+        // The restart registers first and its observer records the real code.
+        let newerGeneration = await ContainerExitCodeStore.shared.beginBoot(
+            nativeId: nativeId, hexId: hexId, bootDate: newerBoot)
+        await ContainerExitCodeStore.shared.set(
+            id: nativeId, code: 0, generation: newerGeneration, bootDate: newerBoot)
+
+        // A delayed start of the OLDER boot finally registers.
+        let stale = await ContainerExitCodeStore.shared.beginBoot(
+            nativeId: nativeId, hexId: hexId, bootDate: olderBoot)
+
+        #expect(stale == nil, "an older registration must be refused")
+        #expect(await ContainerExitCodeStore.shared.get(id: nativeId) == 0, "the newer boot's result must survive")
+        await ContainerExitCodeStore.shared.set(id: nativeId, code: 7, bootDate: olderBoot)
+        #expect(await ContainerExitCodeStore.shared.get(id: nativeId) == 0, "the older boot cannot overwrite it either")
+    }
+}
