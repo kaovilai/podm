@@ -157,6 +157,46 @@ struct LibpodImagePullPlatformTests {
         #expect(platform.variant == "v8.1", "image-spec 1.1.1 lists v8.1 as an arm64 variant")
     }
 
+    @Test("the split form normalizes variant spellings like the combined form (amd64/v1)")
+    func variantV1NormalizesToNone() async throws {
+        let client = RecordingPullClient()
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+            try app.register(collection: LibpodImagePullRoute(client: client))
+
+            try await app.testing().test(
+                .POST, "/v1.51/libpod/images/pull?reference=alpine&os=linux&arch=amd64&variant=v1"
+            ) { res async in
+                #expect(res.status == .ok)
+            }
+        }
+        let platform = try #require(await client.lastPlatform)
+        #expect(platform.architecture == "amd64")
+        #expect(platform.variant == nil, "v1 is amd64's default and must normalize away to match the manifest")
+    }
+
+    @Test("the split form normalizes a bare variant number (arm64/8 -> v8)")
+    func bareVariantNumberNormalizes() async throws {
+        let client = RecordingPullClient()
+        try await withApp(configure: { _ in }) { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            regexRouter.installMiddleware(on: app)
+            try app.register(collection: LibpodImagePullRoute(client: client))
+
+            try await app.testing().test(
+                .POST, "/v1.51/libpod/images/pull?reference=alpine&os=linux&arch=arm64&variant=8"
+            ) { res async in
+                #expect(res.status == .ok)
+            }
+        }
+        let platform = try #require(await client.lastPlatform)
+        #expect(platform.architecture == "arm64")
+        #expect(platform.variant == "v8", "the combined form parses 8 as v8")
+    }
+
     @Test("no platform at all pulls the host platform")
     func defaultsToHost() async throws {
         let client = RecordingPullClient()

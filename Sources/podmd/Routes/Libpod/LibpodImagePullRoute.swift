@@ -97,16 +97,14 @@ struct LibpodImagePullRoute: RouteCollection {
         let resolvedOS = requestedOS ?? host.os
         let resolvedArch = requestedArch ?? host.architecture
         let resolvedVariant = requestedVariant
-        // The OS/architecture pair goes through Platform's parser so the split
-        // form accepts exactly what the combined `platform=` form does:
-        // architecture aliases (`x86_64`, `aarch64`, …) normalize to their OCI
-        // names, and a bare `arm` picks up the parser's default variant (v7) —
-        // ARM/nil matches no ARM manifest in an index.
-        //
-        // The VARIANT cannot come from that parser (`Platform(from:
-        // "linux/amd64/v3")` rejects a valid platform), so an explicit variant
-        // is applied on top of the normalized base and validated on its own.
+        // Normalize exactly like the combined `platform=` form: parse the full
+        // specification, which also normalizes the VARIANT spelling (amd64/v1 →
+        // no variant, arm64/8 → v8). Component construction is the fallback for
+        // the valid variants that parser rejects (`linux/amd64/v3`).
         let spec = resolvedVariant.map { "\(resolvedOS)/\(resolvedArch)/\($0)" } ?? "\(resolvedOS)/\(resolvedArch)"
+        if let parsed = try? Platform(from: spec) {
+            return parsed
+        }
         let base: Platform
         do {
             base = try Platform(from: "\(resolvedOS)/\(resolvedArch)")
