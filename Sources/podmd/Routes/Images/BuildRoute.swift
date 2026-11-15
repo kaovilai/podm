@@ -738,6 +738,26 @@ extension BuildRoute {
             }
         }
 
+        // Remember which variant each produced tag now holds. A single-platform
+        // build pins that platform; a multi-platform build leaves the tag
+        // unrecorded (container create then resolves the host platform, which is
+        // the sane default for an index) — also clearing any variant left over
+        // from an earlier pull of the same name.
+        //
+        // Done HERE, right after the output is loaded and before optional
+        // manifest registration: that registration can fail the build, and
+        // leaving the old record in place would make later creates select a
+        // variant the tag no longer holds.
+        for producedTag in (allTags.isEmpty ? [imageName] : allTags) {
+            guard let normalized = try? ClientImage.normalizeReference(producedTag, containerSystemConfig: systemConfig)
+            else { continue }
+            if platforms.count == 1, let built = platforms.first {
+                await ImagePlatformStore.shared.record(reference: normalized, platform: built, digest: builtDigest)
+            } else {
+                await ImagePlatformStore.shared.remove(reference: normalized)
+            }
+        }
+
         // `--manifest <name>`: fold the just-built image's platform(s) into a named manifest
         // list, creating it if it doesn't exist yet — this is podman's real multi-arch
         // workflow (see containers/podman#27211): a bare multi-platform build alone never

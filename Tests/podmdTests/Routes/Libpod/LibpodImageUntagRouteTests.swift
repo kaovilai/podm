@@ -70,6 +70,34 @@ struct LibpodImageUntagRouteTests {
         #expect(store.aliveReferences == [store.digest], "image stays reachable by digest after its last name is gone")
     }
 
+    @Test("the surviving digest reference inherits the untagged name's variant selection")
+    func untagCarriesVariantToDigest() async throws {
+        let digest = "sha256:" + String(repeating: "d", count: 64)
+        let repo = "untagsel\(UUID().uuidString.lowercased().prefix(8))"
+        let stored = "docker.io/library/\(repo):v1"
+        let store = FakeUntagStore(reference: stored, digest: digest)
+        await ImagePlatformStore.shared.record(
+            reference: stored, platform: Platform(arch: "amd64", os: "linux", variant: nil), digest: digest)
+        defer {
+            Task {
+                await ImagePlatformStore.shared.remove(reference: stored)
+                await ImagePlatformStore.shared.remove(reference: digest)
+            }
+        }
+
+        try await withUntagApp(store: store) { app in
+            try await app.testing().test(.POST, "/v1.51/libpod/images/\(repo)/untag?repo=\(repo)&tag=v1") { res async throws in
+                #expect(res.status == .created)
+            }
+        }
+
+        #expect(store.aliveReferences == [digest])
+        #expect(
+            await ImagePlatformStore.shared.platform(forReference: digest)?.architecture == "amd64",
+            "create/run by the surviving digest must keep the pulled variant")
+        #expect(await ImagePlatformStore.shared.platform(forReference: stored) == nil, "the removed name forgets its record")
+    }
+
     @Test("bare untag (no repo/tag) also leaves the digest-addressable record")
     func untagAllPreservesDangling() async throws {
         let store = FakeUntagStore(

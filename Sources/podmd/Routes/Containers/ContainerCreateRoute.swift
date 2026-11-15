@@ -163,13 +163,31 @@ extension ContainerCreateRoute {
             // Validate the requested platform only if provided
             var requestedPlatform = try Platform(from: containerPlatform)
 
-            if let platformError = ContainerCreateRoute.validateRunnablePlatform(requestedPlatform) {
-                throw Abort(.badRequest, reason: platformError)
-            }
-
             // Check if image exists locally
             do {
-                _ = try await ClientImage.get(reference: body.Image, containerSystemConfig: systemConfig)
+                let localImage = try await ClientImage.get(reference: body.Image, containerSystemConfig: systemConfig)
+                // Look the variant up by what `get` RESOLVED, not only by the
+                // request's spelling: `body.Image` may be an image ID, which
+                // normalizes to a key no pull ever wrote. `matching:` tries the
+                // exact key, then the configured normalization; the resolved
+                // digest rejects a record whose reference now holds different
+                // content (load/import/commit).
+                let digest = localImage.descriptor.digest
+                var pulledForImage = await ImagePlatformStore.shared.platform(matching: body.Image, digest: digest)
+                if pulledForImage == nil, localImage.reference != body.Image {
+                    pulledForImage = await ImagePlatformStore.shared.platform(
+                        matching: localImage.reference, digest: digest)
+                }
+                requestedPlatform = ContainerCreateRoute.effectivePlatform(
+                    explicitQueryValue: query.platform,
+                    hostDefault: requestedPlatform,
+                    pulledForImage: pulledForImage)
+                // Validate AFTER the recorded selection is applied: an image
+                // pulled for an unrunnable platform must answer the same 400 a
+                // --platform ask does, not proceed to fetch/prepare it.
+                if let platformError = ContainerCreateRoute.validateRunnablePlatform(requestedPlatform) {
+                    throw Abort(.badRequest, reason: platformError)
+                }
             } catch {
                 throw ContainerCreateRoute.imageExistenceError(error, image: body.Image)
             }
@@ -764,6 +782,27 @@ extension ContainerCreateRoute {
 
     /// Maps an error from the pre-flight image existence check to a client-facing error.
     ///
+    /// Which platform the create runs the image for.
+    ///
+    /// An explicit `--platform` always wins (it is already parsed into
+    /// `hostDefault`). Otherwise the variant the image was actually PULLED for
+    /// wins over the host default: Apple's image store keeps the whole OCI
+    /// index under a reference and resolves any variant on demand, so
+    /// defaulting to the host platform silently unpacks a host-platform
+    /// sibling of a deliberately pulled cross-platform image — the run then
+    /// executes the wrong architecture. Docker runs the image it pulled.
+    ///
+    /// Extracted as a pure function so the override rule is asserted in unit
+    /// tests without driving Apple Container APIs.
+    static func effectivePlatform(
+        explicitQueryValue: String?,
+        hostDefault: Platform,
+        pulledForImage: Platform?
+    ) -> Platform {
+        if let explicitQueryValue, !explicitQueryValue.isEmpty { return hostDefault }
+        return pulledForImage ?? hostDefault
+    }
+
     /// A genuine not-found is reported with Docker's `No such image: <ref>` phrasing,
     /// which is load-bearing: docker-py raises `ImageNotFound` off that exact text.
     /// Any other error — most notably a transient `ContainerizationError(.interrupted,

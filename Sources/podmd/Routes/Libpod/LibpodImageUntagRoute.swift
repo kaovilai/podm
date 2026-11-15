@@ -126,11 +126,35 @@ struct LibpodImageUntagRoute: RouteCollection {
         // from default image listings while remaining in storage until pruned.
         guard let target = untagTargets.first else {
             if !allReferences.isEmpty {
+                // Capture BEFORE preserving the image: the helper tags through a
+                // mutable source name, so a concurrent pull could change what it
+                // tags (and the record the copy would read afterwards). The
+                // cutoff keeps a selection recorded by an overlapping untag of
+                // the same digest from being overwritten by this older one.
+                let selection = await ImagePlatformStore.shared.captureSelection(
+                    matching: resolved.reference, digest: resolved.digest)
+                let preservedCutoff = await ImagePlatformStore.shared.recordedInstant(matching: resolved.digest)
                 try await store.ensureDanglingReference(
                     reference: resolved.reference, digest: resolved.digest, systemConfig: systemConfig)
+                // The surviving digest reference inherits the selection, or a
+                // later create/run by digest falls back to the host platform —
+                // but only when it really holds this digest. Read through the
+                // injected store so route tests can cover this branch.
+                let preserved = try? await store.resolve(name: resolved.digest, systemConfig: systemConfig)
+                let preservedMatches = preserved.map { $0.digest == resolved.digest } ?? false
+                await ImagePlatformStore.shared.copy(
+                    selection: preservedMatches ? selection : nil, to: resolved.digest,
+                    recordedBefore: preservedCutoff)
             }
             for reference in allReferences {
+                // Fixed instant BEFORE deleting: a concurrent pull that recreates
+                // this reference records its own variant, which must survive.
+                let deletionStartedAt: ContinuousClock.Instant = .now
                 try await store.delete(reference: reference)
+                // The name is gone — forget the variant it held, so an image
+                // reusing the name cannot inherit it (same cleanup the shared
+                // delete path performs for `image rm`/`image prune`).
+                await ImagePlatformStore.shared.remove(matching: reference, recordedBefore: deletionStartedAt)
                 await broadcastUntag(req: req, digest: resolved.digest, reference: reference)
             }
             return Response(status: .created)
@@ -155,10 +179,21 @@ struct LibpodImageUntagRoute: RouteCollection {
         }
 
         if allReferences.count == 1 {
+            // Capture before preserving — see the all-names branch above.
+            let selection = await ImagePlatformStore.shared.captureSelection(
+                matching: stored, digest: resolved.digest)
+            let preservedCutoff = await ImagePlatformStore.shared.recordedInstant(matching: resolved.digest)
             try await store.ensureDanglingReference(
                 reference: resolved.reference, digest: resolved.digest, systemConfig: systemConfig)
+            let preserved = try? await store.resolve(name: resolved.digest, systemConfig: systemConfig)
+            let preservedMatches = preserved.map { $0.digest == resolved.digest } ?? false
+            await ImagePlatformStore.shared.copy(
+                selection: preservedMatches ? selection : nil, to: resolved.digest,
+                recordedBefore: preservedCutoff)
         }
+        let deletionStartedAt: ContinuousClock.Instant = .now
         try await store.delete(reference: stored)
+        await ImagePlatformStore.shared.remove(matching: stored, recordedBefore: deletionStartedAt)
         await broadcastUntag(req: req, digest: resolved.digest, reference: stored)
         return Response(status: .created)
     }
