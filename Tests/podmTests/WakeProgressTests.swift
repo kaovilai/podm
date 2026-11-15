@@ -32,12 +32,16 @@ struct WakeProgressTests {
         #expect(WakeProgress.wakeNotice().contains("waking podmd"))
         #expect(WakeProgress.timeoutNotice().contains("30s"))
         #expect(WakeProgress.timeoutNotice().contains("podm doctor"))
+        // /_ping is a health probe, not proof of absence: both notices describe
+        // the observation instead of asserting podmd is not running.
+        #expect(WakeProgress.timeoutNotice().contains("health probe"))
 
         let failure = WakeProgress.kickstartFailureNotice(
             exitStatus: 113,
             launchdDomain: "gui/501",
             plistPath: "/Users/example/Library/LaunchAgents/io.github.podm.daemon.plist")
         #expect(failure.contains("exited 113"))
+        #expect(failure.contains("health probe"))
         #expect(failure.contains("launchctl bootstrap gui/501"))
         #expect(failure.contains("podm serve"))
         #expect(failure.contains("podm doctor"))

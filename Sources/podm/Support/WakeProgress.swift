@@ -46,7 +46,7 @@ enum WakeProgress {
 
     /// Printed when the daemon never answered within `deadline`.
     static func timeoutNotice() -> String {
-        "podm: podmd is still starting after \(Int(deadline))s — continuing to the CLI (run `podm doctor` if it never answers)\n"
+        "podm: podmd did not answer its health probe within \(Int(deadline))s — continuing to the CLI (run `podm doctor` if it never answers)\n"
     }
 
     /// Printed when launchd refuses to start the agent (typically: the plist
@@ -54,11 +54,16 @@ enum WakeProgress {
     /// `launchctl bootout`). Names the exact reload command — plain
     /// `podm install` does not reload an agent (it only installs one when
     /// `--launchd-template` is passed).
+    ///
+    /// `/_ping` calls Apple Container's health check, so a failed probe does
+    /// not by itself prove podmd is absent (a live daemon with an unhealthy
+    /// runtime fails it too) — the notice states what was observed, not a
+    /// process state it cannot know.
     static func kickstartFailureNotice(
         exitStatus: Int32, launchdDomain: String, plistPath: String
     ) -> String {
         """
-        podm: podmd is not running and launchd could not start it (launchctl kickstart exited \(exitStatus))
+        podm: podmd did not answer its health probe and launchd could not start the agent (launchctl kickstart exited \(exitStatus))
         podm: reload the agent: launchctl bootstrap \(launchdDomain) \(shellQuoted(plistPath))
         podm: or run `podm serve` for a foreground daemon — `podm doctor` explains the rest
 
