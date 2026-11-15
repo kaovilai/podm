@@ -78,6 +78,7 @@ enum LaunchAgentInspection: Equatable {
     case missing
     case unreadable
     case wrongLabel(String?)
+    case invalidProgram
     case placeholder
     case binaryMissing(String)
     case okay(String)
@@ -103,9 +104,14 @@ enum LaunchAgentInspection: Equatable {
             return .wrongLabel(plist["Label"] as? String)
         }
         // launchd runs `Program` when present; `ProgramArguments[0]` is only the
-        // argv[0] for the other form.
+        // argv[0] for the other form. A present but empty/non-string Program is
+        // not the same as an absent one: launchd cannot execute it and will not
+        // fall back, so falling back here would hide a broken plist.
         let binary: String
-        if let program = plist["Program"] as? String, !program.isEmpty {
+        if let rawProgram = plist["Program"] {
+            guard let program = rawProgram as? String, !program.isEmpty else {
+                return .invalidProgram
+            }
             binary = program
         } else if let arguments = plist["ProgramArguments"] as? [String],
             let first = arguments.first, !first.isEmpty
@@ -254,6 +260,16 @@ enum DoctorChecks {
                     severity: .fail,
                     detail:
                         "\(probes.launchAgentPath) registers \(label.map { "label \($0)" } ?? "no Label"), not \(probes.launchdLabel) — the shim kicks \(probes.launchdServiceTarget); reinstall it with `podm install --launchd-template <plist-template>`"
+                )
+            ]
+        case .invalidProgram:
+            return [
+                DoctorCheck(
+                    name: "LaunchAgent",
+                    passed: false,
+                    severity: .fail,
+                    detail:
+                        "\(probes.launchAgentPath) has an empty or non-string Program, which launchd cannot execute — reinstall it with `podm install --launchd-template <plist-template>`"
                 )
             ]
         case .placeholder:

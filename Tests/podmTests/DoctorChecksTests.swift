@@ -160,6 +160,19 @@ struct DoctorChecksTests {
         #expect(Self.check("LaunchAgent", in: bad)?.detail.contains("/gone/podmd") == true)
     }
 
+    @Test("a present but empty Program is a broken plist, not a fallback")
+    func emptyProgram() {
+        // launchd cannot execute "" and does not fall back to ProgramArguments,
+        // so the healthy ProgramArguments entry must not mask the plist.
+        let checks = DoctorChecks.evaluate(
+            probes: Self.probes(
+                plistData: Self.plistData(binary: Self.goodBinary, program: "")))
+        let agent = Self.check("LaunchAgent", in: checks)
+        #expect(agent?.passed == false)
+        #expect(agent?.blocksExit == true)
+        #expect(agent?.detail.contains("Program") == true)
+    }
+
     @Test("a missing podmd binary points at building it, not at podm install")
     func missingDaemonBinary() {
         let checks = DoctorChecks.evaluate(probes: Self.probes(podmdLocated: false))
