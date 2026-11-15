@@ -42,6 +42,14 @@ struct WakeProgressTests {
         #expect(failure.contains("podm serve"))
         #expect(failure.contains("podm doctor"))
         #expect(failure.contains("io.github.podm.daemon.plist"))
+
+        // Paths are shell-quoted so the copied command survives spaces.
+        let spaced = WakeProgress.kickstartFailureNotice(
+            exitStatus: 113,
+            launchdDomain: "gui/501",
+            plistPath: "/Users/Example User/Library/LaunchAgents/io.github.podm.daemon.plist")
+        #expect(spaced.contains("'/Users/Example User/Library/LaunchAgents/io.github.podm.daemon.plist'"))
+        #expect(WakeProgress.shellQuoted("/Users/O'Brien/x") == "'/Users/O'\\''Brien/x'")
         // stderr lines must be complete lines, or the next output runs on.
         #expect(WakeProgress.wakeNotice().hasSuffix("\n"))
         #expect(WakeProgress.timeoutNotice().hasSuffix("\n"))

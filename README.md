@@ -281,7 +281,7 @@ container apiserver and resuming services), so the shim prints
 enough to notice — wakes that finish in a fraction of a second stay silent. If
 the LaunchAgent plist exists but the job is not loaded, the shim says how to
 reload it (`launchctl bootstrap gui/$(id -u)
-~/Library/LaunchAgents/io.github.podm.daemon.plist`) or run a foreground
+"$HOME/Library/LaunchAgents/io.github.podm.daemon.plist"`) or run a foreground
 daemon (`podm serve`), then hands over to the CLI instead of waiting out its
 own connect retry.
 

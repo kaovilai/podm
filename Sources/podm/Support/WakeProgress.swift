@@ -59,9 +59,16 @@ enum WakeProgress {
     ) -> String {
         """
         podm: podmd is not running and launchd could not start it (launchctl kickstart exited \(exitStatus))
-        podm: reload the agent: launchctl bootstrap \(launchdDomain) \(plistPath)
+        podm: reload the agent: launchctl bootstrap \(launchdDomain) \(shellQuoted(plistPath))
         podm: or run `podm serve` for a foreground daemon — `podm doctor` explains the rest
 
         """
+    }
+
+    /// Single-quote a path for the shell, so the copied command still passes one
+    /// argument when the home directory contains spaces (embedded apostrophes
+    /// become `'\''`).
+    static func shellQuoted(_ path: String) -> String {
+        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
