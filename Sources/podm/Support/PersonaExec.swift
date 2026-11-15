@@ -53,26 +53,55 @@ enum PersonaExec {
     /// The daemon idle-exits after `PODM_IDLE_EXIT_SECS` with no connections and
     /// no running containers. If the LaunchAgent is installed and the socket is
     /// gone, kickstart the agent and wait (bounded) for the socket to come back so
-    /// the very next `podman ps` after an idle exit just works. Best effort and
-    /// silent on every failure path: without the agent (or without launchd, e.g. a
-    /// bare `podm serve` dev setup) the real CLI surfaces its own connect error.
+    /// the very next `podman ps` after an idle exit just works.
+    ///
+    /// The wait is no longer silent: a wake that takes longer than
+    /// `WakeProgress.announceAfter` prints one line, so a cold start reads as
+    /// "waking" instead of a hung CLI. A failed kickstart (plist present but the
+    /// job not loaded — e.g. after `podm uninstall` kept the file, or a hand
+    /// written plist) says how to reload the agent and hands over immediately
+    /// instead of burning the deadline on a daemon launchd was never going to
+    /// start. The hand-over stays a hand-over: `docker --help`, `podman
+    /// --version` and `docker --context <remote> …` need no local daemon, so the
+    /// shim never decides for them. Without a plist at all (a bare `podm serve`
+    /// dev setup) the shim stays silent, exactly as before.
     private static func wakeDaemonIfIdle() {
         let socketPath = PodmPaths.socketPath
         if daemonReachable(socketPath: socketPath) { return }
         let plistPath = PodmPaths.launchAgentURL.path
         guard FileManager.default.fileExists(atPath: plistPath) else { return }
 
-        _ = ProcessSpawn.run(
-            "/bin/launchctl", ["kickstart", PodmPaths.launchdServiceTarget], discardOutput: true)
+        let kickstart = ProcessSpawn.run(
+            "/bin/launchctl", ["kickstart", PodmPaths.launchdServiceTarget], captureOutput: true)
+        guard kickstart.exitStatus == 0 else {
+            Stderr.write(
+                WakeProgress.kickstartFailureNotice(
+                    exitStatus: kickstart.exitStatus,
+                    launchdDomain: PodmPaths.launchdDomain,
+                    plistPath: plistPath))
+            return
+        }
 
-        // Bounded wait for the daemon to answer after launchd spawns it. A
-        // cold start runs startup housekeeping (container-apiserver bring-up,
-        // healthcheck resume) before the socket answers — up to ~30s on a slow
-        // machine — so the overall deadline is 60s, matching the integration
-        // CI's readiness budget. Bail early the moment it answers.
-        for _ in 0..<600 {
+        // Bounded wait for the daemon to answer after launchd spawns it; the
+        // deadline and progress cadence live in `WakeProgress`. Monotonic time:
+        // wall-clock adjustments must not stretch or cut the wait.
+        let started = DispatchTime.now().uptimeNanoseconds
+        var announced = false
+        while true {
             if daemonReachable(socketPath: socketPath) { return }
-            usleep(100_000)  // 100ms → up to 60s total
+            let elapsed =
+                Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000
+            switch WakeProgress.decision(elapsed: elapsed, announced: announced) {
+            case .giveUp:
+                Stderr.write(WakeProgress.timeoutNotice())
+                return
+            case .announce:
+                announced = true
+                Stderr.write(WakeProgress.wakeNotice())
+            case .wait:
+                break
+            }
+            usleep(100_000)  // 100ms poll
         }
     }
 
