@@ -22,15 +22,16 @@ struct WakeProgressTests {
 
     @Test("the deadline wins over announcing")
     func deadlineWins() {
-        #expect(WakeProgress.decision(elapsed: 59.9, announced: true) == .wait)
-        #expect(WakeProgress.decision(elapsed: 60, announced: false) == .giveUp)
-        #expect(WakeProgress.decision(elapsed: 60, announced: true) == .giveUp)
+        #expect(WakeProgress.decision(elapsed: 29.9, announced: true) == .wait)
+        #expect(WakeProgress.decision(elapsed: 30, announced: false) == .giveUp)
+        #expect(WakeProgress.decision(elapsed: 30, announced: true) == .giveUp)
     }
 
     @Test("notices name the state and the fix")
     func notices() {
         #expect(WakeProgress.wakeNotice().contains("waking podmd"))
-        #expect(WakeProgress.timeoutNotice().contains("60s"))
+        #expect(WakeProgress.timeoutNotice().contains("30s"))
+        #expect(WakeProgress.timeoutNotice().contains("podm doctor"))
 
         let failure = WakeProgress.kickstartFailureNotice(
             exitStatus: 113,
@@ -38,6 +39,7 @@ struct WakeProgressTests {
         #expect(failure.contains("exited 113"))
         #expect(failure.contains("podm install"))
         #expect(failure.contains("podm serve"))
+        #expect(failure.contains("podm doctor"))
         #expect(failure.contains("io.github.podm.daemon.plist"))
         // stderr lines must be complete lines, or the next output runs on.
         #expect(WakeProgress.wakeNotice().hasSuffix("\n"))

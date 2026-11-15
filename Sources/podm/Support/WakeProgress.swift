@@ -4,22 +4,24 @@ import Foundation
 
 /// User-visible progress for waking an idle-exited daemon.
 ///
-/// The shim used to spend the whole wake deadline in silence: a cold start
-/// looked like a hung `docker ps` / `podman ps`, and an installed-but-unloaded
-/// LaunchAgent burned the full 60s before the real CLI printed its own connect
-/// error. These helpers hold the decisions and messages, kept free of launchd
-/// and clocks so they can be unit tested.
+/// The shim used to spend a long wait in silence: a cold start looked like a
+/// hung `docker ps` / `podman ps`, and an installed-but-unloaded LaunchAgent
+/// burned the full deadline before the real CLI printed its own connect error.
+/// These helpers hold the decisions and messages, kept free of launchd and
+/// clocks so they can be unit tested.
 enum WakeProgress {
     /// A wake that completes sooner than this stays silent — most wakes are
     /// sub-second (the daemon is already warm), and a progress line on every
     /// command would be noise. Past it, the wait is real and worth a line.
     static let announceAfter: TimeInterval = 0.4
 
-    /// Overall readiness deadline, matching the integration CI's readiness
-    /// budget. A cold start runs startup housekeeping (container-apiserver
-    /// bring-up, healthcheck resume) before the socket answers — up to ~30s on
-    /// a slow machine.
-    static let deadline: TimeInterval = 60
+    /// Overall readiness deadline. A cold start runs startup housekeeping
+    /// (container-apiserver bring-up, healthcheck resume) before the socket
+    /// answers — up to ~30s on a slow machine — so 30s covers a healthy cold
+    /// start. Waiting past it rarely helps: the real CLI keeps retrying on its
+    /// own (~50s measured), and a daemon that is truly wedged is a
+    /// `podm doctor` problem, not something a longer shim poll can fix.
+    static let deadline: TimeInterval = 30
 
     enum Decision: Equatable {
         /// Keep polling quietly.
@@ -44,7 +46,7 @@ enum WakeProgress {
 
     /// Printed when the daemon never answered within `deadline`.
     static func timeoutNotice() -> String {
-        "podm: podmd did not become ready within \(Int(deadline))s — continuing to the CLI\n"
+        "podm: podmd is still starting after \(Int(deadline))s — continuing to the CLI (run `podm doctor` if it never answers)\n"
     }
 
     /// Printed when launchd refuses to start the agent (typically: the plist
@@ -53,7 +55,7 @@ enum WakeProgress {
         """
         podm: podmd is not running and launchd could not start it (launchctl kickstart exited \(exitStatus))
         podm: run `podm install` to reload the LaunchAgent, or `podm serve` for a foreground daemon
-        podm: agent file: \(plistPath)
+        podm: diagnose with `podm doctor` — agent file: \(plistPath)
 
         """
     }
