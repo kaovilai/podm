@@ -279,9 +279,11 @@ The first command after an idle exit pays the daemon's cold start (waking the
 container apiserver and resuming services), so the shim prints
 `podm: waking podmd (it exits when idle)…` on stderr once the wait is long
 enough to notice — wakes that finish in a fraction of a second stay silent. If
-the LaunchAgent plist exists but the job is not loaded, the shim fails at once
-with the fix (`podm install` to reload the agent, or `podm serve` for a
-foreground daemon) instead of leaving the CLI to time out on its own.
+the LaunchAgent plist exists but the job is not loaded, the shim says how to
+reload it (`launchctl bootstrap gui/$(id -u)
+~/Library/LaunchAgents/io.github.podm.daemon.plist`) or run a foreground
+daemon (`podm serve`), then hands over to the CLI instead of waiting out its
+own connect retry.
 
 ## How it works
 

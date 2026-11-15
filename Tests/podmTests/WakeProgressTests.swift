@@ -35,9 +35,10 @@ struct WakeProgressTests {
 
         let failure = WakeProgress.kickstartFailureNotice(
             exitStatus: 113,
+            launchdDomain: "gui/501",
             plistPath: "/Users/example/Library/LaunchAgents/io.github.podm.daemon.plist")
         #expect(failure.contains("exited 113"))
-        #expect(failure.contains("podm install"))
+        #expect(failure.contains("launchctl bootstrap gui/501"))
         #expect(failure.contains("podm serve"))
         #expect(failure.contains("podm doctor"))
         #expect(failure.contains("io.github.podm.daemon.plist"))

@@ -50,12 +50,17 @@ enum WakeProgress {
     }
 
     /// Printed when launchd refuses to start the agent (typically: the plist
-    /// exists but the job was never loaded, or was booted out).
-    static func kickstartFailureNotice(exitStatus: Int32, plistPath: String) -> String {
+    /// exists but the job was never loaded, or was booted out with
+    /// `launchctl bootout`). Names the exact reload command — plain
+    /// `podm install` does not reload an agent (it only installs one when
+    /// `--launchd-template` is passed).
+    static func kickstartFailureNotice(
+        exitStatus: Int32, launchdDomain: String, plistPath: String
+    ) -> String {
         """
         podm: podmd is not running and launchd could not start it (launchctl kickstart exited \(exitStatus))
-        podm: run `podm install` to reload the LaunchAgent, or `podm serve` for a foreground daemon
-        podm: diagnose with `podm doctor` — agent file: \(plistPath)
+        podm: reload the agent: launchctl bootstrap \(launchdDomain) \(plistPath)
+        podm: or run `podm serve` for a foreground daemon — `podm doctor` explains the rest
 
         """
     }

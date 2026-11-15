@@ -59,10 +59,12 @@ enum PersonaExec {
     /// `WakeProgress.announceAfter` prints one line, so a cold start reads as
     /// "waking" instead of a hung CLI. A failed kickstart (plist present but the
     /// job not loaded — e.g. after `podm uninstall` kept the file, or a hand
-    /// written plist) fails immediately with the fix instead of burning the
-    /// deadline and the CLI's own ~50s connect retry (109s measured end to end).
-    /// Without a plist at all (a bare `podm serve` dev setup) the shim stays
-    /// silent and the real CLI reports, exactly as before.
+    /// written plist) says how to reload the agent and hands over immediately
+    /// instead of burning the deadline on a daemon launchd was never going to
+    /// start. The hand-over stays a hand-over: `docker --help`, `podman
+    /// --version` and `docker --context <remote> …` need no local daemon, so the
+    /// shim never decides for them. Without a plist at all (a bare `podm serve`
+    /// dev setup) the shim stays silent, exactly as before.
     private static func wakeDaemonIfIdle() {
         let socketPath = PodmPaths.socketPath
         if daemonReachable(socketPath: socketPath) { return }
@@ -72,24 +74,24 @@ enum PersonaExec {
         let kickstart = ProcessSpawn.run(
             "/bin/launchctl", ["kickstart", PodmPaths.launchdServiceTarget], captureOutput: true)
         guard kickstart.exitStatus == 0 else {
-            // The job is not loaded, so no process is on its way: waiting out
-            // the deadline would only burn time before the CLI's own connect
-            // retry (~50s measured) repeats the same failure.
             Stderr.write(
                 WakeProgress.kickstartFailureNotice(
-                    exitStatus: kickstart.exitStatus, plistPath: plistPath))
-            exit(1)
+                    exitStatus: kickstart.exitStatus,
+                    launchdDomain: PodmPaths.launchdDomain,
+                    plistPath: plistPath))
+            return
         }
 
         // Bounded wait for the daemon to answer after launchd spawns it; the
-        // deadline and progress cadence live in `WakeProgress`.
-        let started = Date()
+        // deadline and progress cadence live in `WakeProgress`. Monotonic time:
+        // wall-clock adjustments must not stretch or cut the wait.
+        let started = DispatchTime.now().uptimeNanoseconds
         var announced = false
         while true {
             if daemonReachable(socketPath: socketPath) { return }
-            switch WakeProgress.decision(
-                elapsed: Date().timeIntervalSince(started), announced: announced)
-            {
+            let elapsed =
+                Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000
+            switch WakeProgress.decision(elapsed: elapsed, announced: announced) {
             case .giveUp:
                 Stderr.write(WakeProgress.timeoutNotice())
                 return
