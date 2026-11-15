@@ -184,7 +184,7 @@ docker context use podm
 | `podm install` | One-time setup: symlinks, LaunchAgent, client-path discovery, zsh completion, podman connection |
 | `podm uninstall` | Remove symlinks, LaunchAgent, and podm-managed state |
 | `podm status` | Daemon state, socket, LaunchAgent, running containers |
-| `podm doctor` | Diagnose the install (socket reachable, CLIs found, versions) |
+| `podm doctor` | Diagnose the install: CLIs, podmd binary, LaunchAgent (rendered plist + loaded job), socket, daemon ping |
 | `podm version` | Version and build info |
 | `podm serve` | Run the API daemon in the foreground (what launchd uses) |
 
