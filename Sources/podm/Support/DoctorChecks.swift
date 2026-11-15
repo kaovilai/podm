@@ -38,11 +38,13 @@ struct DoctorProbes {
     var locateDaemon: () -> String?
     var run: (_ executable: String, _ arguments: [String]) -> (exitStatus: Int32, output: String?)
     var readFile: (String) -> Data?
+    var fileExists: (String) -> Bool
     var isExecutableFile: (String) -> Bool
     var isSocket: (String) -> Bool
 
     var socketPath: String
     var launchAgentPath: String
+    var launchdLabel: String
     var launchdDomain: String
     var launchdServiceTarget: String
 
@@ -59,10 +61,12 @@ struct DoctorProbes {
             locateDaemon: { DaemonLocator.locate() },
             run: { ProcessSpawn.run($0, $1, captureOutput: true) },
             readFile: { FileManager.default.contents(atPath: $0) },
+            fileExists: { FileManager.default.fileExists(atPath: $0) },
             isExecutableFile: { FileSystem.isExecutableFile($0) },
             isSocket: { FileSystem.isSocket($0) },
             socketPath: PodmPaths.socketPath,
             launchAgentPath: PodmPaths.launchAgentURL.path,
+            launchdLabel: PodmPaths.launchdLabel,
             launchdDomain: PodmPaths.launchdDomain,
             launchdServiceTarget: PodmPaths.launchdServiceTarget
         )
@@ -73,24 +77,45 @@ struct DoctorProbes {
 enum LaunchAgentInspection: Equatable {
     case missing
     case unreadable
+    case wrongLabel(String?)
     case placeholder
     case binaryMissing(String)
     case okay(String)
 
     static func inspect(
         path: String,
+        expectedLabel: String,
+        fileExists: (String) -> Bool,
         readFile: (String) -> Data?,
         isExecutableFile: (String) -> Bool
     ) -> LaunchAgentInspection {
-        guard let data = readFile(path) else { return .missing }
+        // `contents(atPath:)` is nil for permission failures too — an existing
+        // but unreadable plist must not read as an optional, absent agent.
+        guard fileExists(path) else { return .missing }
         guard
+            let data = readFile(path),
             let plist = try? PropertyListSerialization.propertyList(from: data, format: nil)
-                as? [String: Any],
-            let arguments = plist["ProgramArguments"] as? [String],
-            let binary = arguments.first
+                as? [String: Any]
         else { return .unreadable }
-        // `podm install` renders __PODMD_BIN__; a plist that still contains it
-        // bootstraps fine but can never start the daemon (see InstallCommand).
+        // The shim kickstarts `io.github.podm.daemon`; a plist registering any
+        // other label cannot be the agent it waits for.
+        guard let label = plist["Label"] as? String, label == expectedLabel else {
+            return .wrongLabel(plist["Label"] as? String)
+        }
+        // launchd runs `Program` when present; `ProgramArguments[0]` is only the
+        // argv[0] for the other form.
+        let binary: String
+        if let program = plist["Program"] as? String, !program.isEmpty {
+            binary = program
+        } else if let arguments = plist["ProgramArguments"] as? [String],
+            let first = arguments.first, !first.isEmpty
+        {
+            binary = first
+        } else {
+            return .unreadable
+        }
+        // `podm install --launchd-template` renders __PODMD_BIN__; a plist that
+        // still contains it bootstraps fine but can never start the daemon.
         if binary.contains("__PODMD_BIN__") { return .placeholder }
         guard isExecutableFile(binary) else { return .binaryMissing(binary) }
         return .okay(binary)
@@ -149,7 +174,7 @@ enum DoctorChecks {
             checks.append(
                 DoctorCheck(
                     name: "podmd binary", passed: false, severity: .fail,
-                    detail: "not found next to the shim or on PATH — run `podm install`"))
+                    detail: "not found next to the shim or on PATH — build it with `make` in the podm repository"))
         }
 
         checks.append(contentsOf: launchAgentChecks(probes))
@@ -195,6 +220,8 @@ enum DoctorChecks {
     private static func launchAgentChecks(_ probes: DoctorProbes) -> [DoctorCheck] {
         let inspection = LaunchAgentInspection.inspect(
             path: probes.launchAgentPath,
+            expectedLabel: probes.launchdLabel,
+            fileExists: probes.fileExists,
             readFile: probes.readFile,
             isExecutableFile: probes.isExecutableFile)
 
@@ -216,7 +243,17 @@ enum DoctorChecks {
                     passed: false,
                     severity: .fail,
                     detail:
-                        "cannot parse \(probes.launchAgentPath) — reinstall it with `podm install --launchd-template <plist-template>`"
+                        "cannot read or parse \(probes.launchAgentPath) — reinstall it with `podm install --launchd-template <plist-template>`"
+                )
+            ]
+        case .wrongLabel(let label):
+            return [
+                DoctorCheck(
+                    name: "LaunchAgent",
+                    passed: false,
+                    severity: .fail,
+                    detail:
+                        "\(probes.launchAgentPath) registers \(label.map { "label \($0)" } ?? "no Label"), not \(probes.launchdLabel) — the shim kicks \(probes.launchdServiceTarget); reinstall it with `podm install --launchd-template <plist-template>`"
                 )
             ]
         case .placeholder:

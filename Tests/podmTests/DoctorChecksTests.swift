@@ -12,16 +12,22 @@ struct DoctorChecksTests {
     private static let plistPath = "/Users/example/Library/LaunchAgents/io.github.podm.daemon.plist"
     private static let goodBinary = "/Users/example/.podm/bin/podmd"
 
-    private static func plistData(binary: String) -> Data {
-        let plist: [String: Any] = [
-            "Label": "io.github.podm.daemon",
+    private static func plistData(
+        binary: String,
+        label: String = "io.github.podm.daemon",
+        program: String? = nil
+    ) -> Data {
+        var plist: [String: Any] = [
+            "Label": label,
             "ProgramArguments": [binary],
         ]
+        if let program { plist["Program"] = program }
         return try! PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
     }
 
     private static func probes(
         plistData: Data? = plistData(binary: goodBinary),
+        plistExists: Bool = true,
         launchctlExit: Int32 = 0,
         podmdLocated: Bool = true,
         socketPresent: Bool = true,
@@ -42,10 +48,12 @@ struct DoctorChecksTests {
                 }
             },
             readFile: { path in path == plistPath ? plistData : nil },
+            fileExists: { _ in plistExists },
             isExecutableFile: { $0 == goodBinary },
             isSocket: { _ in socketPresent },
             socketPath: "/Users/example/.podm/container.sock",
             launchAgentPath: plistPath,
+            launchdLabel: "io.github.podm.daemon",
             launchdDomain: "gui/501",
             launchdServiceTarget: "gui/501/io.github.podm.daemon"
         )
@@ -67,7 +75,7 @@ struct DoctorChecksTests {
 
     @Test("no LaunchAgent is a warning, not a failure — `podm serve` is legitimate")
     func missingAgent() {
-        let checks = DoctorChecks.evaluate(probes: Self.probes(plistData: nil))
+        let checks = DoctorChecks.evaluate(probes: Self.probes(plistData: nil, plistExists: false))
         let agent = Self.check("LaunchAgent", in: checks)
         #expect(agent?.passed == false)
         #expect(agent?.severity == .warn)
@@ -117,12 +125,48 @@ struct DoctorChecksTests {
         #expect(loaded?.detail.contains("'/Users/example/Library/LaunchAgents/io.github.podm.daemon.plist'") == true)
     }
 
-    @Test("a missing podmd binary fails on its own line")
+    @Test("an existing but unreadable plist is a FAIL, not an absent agent")
+    func unreadableButPresentPlist() {
+        let checks = DoctorChecks.evaluate(probes: Self.probes(plistData: nil, plistExists: true))
+        let agent = Self.check("LaunchAgent", in: checks)
+        #expect(agent?.passed == false)
+        #expect(agent?.blocksExit == true)
+        #expect(agent?.detail.contains("cannot read") == true)
+    }
+
+    @Test("a plist registering another label cannot be the agent the shim kicks")
+    func wrongLabel() {
+        let checks = DoctorChecks.evaluate(
+            probes: Self.probes(plistData: Self.plistData(binary: Self.goodBinary, label: "com.example.other")))
+        let agent = Self.check("LaunchAgent", in: checks)
+        #expect(agent?.passed == false)
+        #expect(agent?.blocksExit == true)
+        #expect(agent?.detail.contains("com.example.other") == true)
+        #expect(agent?.detail.contains("io.github.podm.daemon") == true)
+    }
+
+    @Test("launchd runs Program when the plist defines it")
+    func programForm() {
+        let good = DoctorChecks.evaluate(
+            probes: Self.probes(
+                plistData: Self.plistData(binary: "/ignored", program: Self.goodBinary)))
+        #expect(Self.check("LaunchAgent", in: good)?.passed == true)
+        #expect(Self.check("LaunchAgent", in: good)?.detail.contains(Self.goodBinary) == true)
+
+        let bad = DoctorChecks.evaluate(
+            probes: Self.probes(
+                plistData: Self.plistData(binary: Self.goodBinary, program: "/gone/podmd")))
+        #expect(Self.check("LaunchAgent", in: bad)?.passed == false)
+        #expect(Self.check("LaunchAgent", in: bad)?.detail.contains("/gone/podmd") == true)
+    }
+
+    @Test("a missing podmd binary points at building it, not at podm install")
     func missingDaemonBinary() {
         let checks = DoctorChecks.evaluate(probes: Self.probes(podmdLocated: false))
         let daemon = Self.check("podmd binary", in: checks)
         #expect(daemon?.passed == false)
-        #expect(daemon?.detail.contains("podm install") == true)
+        #expect(daemon?.detail.contains("make") == true)
+        #expect(daemon?.detail.contains("podm install") == false)
     }
 
     @Test("socket and ping failures both block")
