@@ -112,6 +112,9 @@ struct DoctorChecksTests {
         #expect(loaded?.blocksExit == true)
         #expect(loaded?.detail.contains("113") == true)
         #expect(loaded?.detail.contains("launchctl bootstrap gui/501") == true)
+        // The path is shell-quoted: a home directory with spaces must not split
+        // the copied command into two arguments.
+        #expect(loaded?.detail.contains("'/Users/example/Library/LaunchAgents/io.github.podm.daemon.plist'") == true)
     }
 
     @Test("a missing podmd binary fails on its own line")

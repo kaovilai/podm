@@ -256,9 +256,15 @@ enum DoctorChecks {
                     severity: .fail,
                     detail: loaded.exitStatus == 0
                         ? probes.launchdServiceTarget
-                        : "job not loaded (launchctl print exited \(loaded.exitStatus)) — reload it with `launchctl bootstrap \(probes.launchdDomain) \(probes.launchAgentPath)`"
+                        : "job not loaded (launchctl print exited \(loaded.exitStatus)) — reload it with `launchctl bootstrap \(probes.launchdDomain) \(shellQuoted(probes.launchAgentPath))`"
                 ))
             return checks
         }
+    }
+
+    /// Single-quote a path for the shell so a home directory containing spaces
+    /// still copies to one `launchctl bootstrap` argument.
+    private static func shellQuoted(_ path: String) -> String {
+        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
